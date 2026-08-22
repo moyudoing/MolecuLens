@@ -1,0 +1,44 @@
+# —— 构建产物 ——
+build/
+cmake-build-*/
+out/
+*.o
+*.obj
+*.lib
+*.a
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+
+# —— 缓存与日志 ——
+cache/
+logs/
+*.log
+*.crash
+
+# —— IDE ——
+.vscode/
+.idea/
+*.user
+
+# —— 生成的头文件 ——
+gen/
+
+# —— 导出产物 ——
+export/
+*.png
+*.bmp
+*.tga
+*.ppm
+*.obj
+*.mtl
+*.pov
+*.stl
+*.mlscene
+*.mlrepr
+
+# —— 系统 ——
+Thumbs.db
+.DS_Store

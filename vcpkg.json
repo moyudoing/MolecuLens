@@ -1,0 +1,23 @@
+{
+  "name": "moleculens",
+  "version-string": "0.1.0",
+  "description": "MolecuLens - cross-platform molecular structure and trajectory display engine",
+  "homepage": "https://github.com/your/MolecuLens",
+  "builtin-baseline": "0bf1354d6704ec797acea686d0250afc4036a082",
+  "dependencies": [
+    "glfw3",
+    "volk",
+    "vulkan-headers",
+    "vulkan-memory-allocator",
+    "glm",
+    {
+      "name": "imgui",
+      "features": [ "docking-experimental" ]
+    },
+    "spdlog",
+    "nlohmann-json",
+    { "name": "cppzmq", "platform": "!windows" },
+    "cli11",
+    "catch2"
+  ]
+}

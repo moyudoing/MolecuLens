@@ -1,0 +1,187 @@
+Package: vcpkg-cmake-config
+Version: 2024-05-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 535b5224e409ace05621ab29f6862f306edf3dbde48927ed1ab5b8f3dccf0d69
+Status: install ok installed
+
+Package: vcpkg-cmake
+Version: 2024-04-23
+Architecture: x64-windows
+Multi-Arch: same
+Abi: aa601f6caf635f6a5302e4ca27b9e3e6c39eb7ed33dff75340e773f28b3ebdd7
+Status: install ok installed
+
+Package: catch2
+Version: 3.8.0
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 36cfb4cf5bc2600af846cb6cba2330803bb5dbfea77deed6f0819383dfb9b53d
+Description: A modern, C++-native, test framework for unit-tests, TDD and BDD.
+Status: install ok installed
+
+Package: cli11
+Version: 2.5.0
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 6357df5350968d72cd66e3064c04d0f9b3d167ba67c1627a42f79af90ec1a4dd
+Description: CLI11 is a command line parser for C++11 and beyond that provides a rich feature set with a simple and intuitive interface.
+Status: install ok installed
+
+Package: glfw3
+Version: 3.4
+Port-Version: 1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 41eb1bdf16358d24ccd917db9fdd7ffcd0fac7cf74953748b2b7781721f83f13
+Description: GLFW is a free, Open Source, multi-platform library for OpenGL, OpenGL ES and Vulkan application development. It provides a simple, platform-independent API for creating windows, contexts and surfaces, reading input, handling events, etc.
+Status: install ok installed
+
+Package: glm
+Version: 1.0.1
+Port-Version: 3
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 206c0bab612885c3f4e7fe10670ed1a51289ea4529225d58a88103306f5f7806
+Description: OpenGL Mathematics (GLM)
+Status: install ok installed
+
+Package: imgui
+Version: 1.91.9
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 95955f0afb48c0b1eda8b7bb220ca102527910b079a2cf45d6a689793818d2cb
+Description: Bloat-free Immediate Mode Graphical User interface for C++ with minimal dependencies.
+Status: install ok installed
+
+Package: imgui
+Feature: docking-experimental
+Architecture: x64-windows
+Multi-Arch: same
+Description: Build with docking support
+Status: install ok installed
+
+Package: nlohmann-json
+Version: 3.11.3
+Port-Version: 1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 3d6cf7ae239e40e0f614c9e8017942c08d7875f7169034879b132bbcd3e98f12
+Description: JSON for Modern C++
+Status: install ok installed
+
+Package: sqlite3
+Version: 3.49.1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 04772a81a6c4500060b1aa9d9f61733d8b72c9601a91dd18d0e9bd5c820c9f38
+Description: SQLite is a software library that implements a self-contained, serverless, zero-configuration, transactional SQL database engine.
+Default-Features: json1
+Status: purge ok not-installed
+
+Package: sqlite3
+Feature: json1
+Architecture: x64-windows
+Multi-Arch: same
+Description: Enable JSON functionality for sqlite3
+Status: purge ok not-installed
+
+Package: vcpkg-cmake-get-vars
+Version: 2024-09-22
+Depends: vcpkg-cmake
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 92c9eac68f079c3d9fe937a837116d434c7f2717750a574df56e9cce6f546f92
+Status: purge ok not-installed
+
+Package: fmt
+Version: 11.0.2
+Port-Version: 1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 3d8a8af35c82975db8d94f9158de9613467557b97ca18414a55962a53e5a73f4
+Description: {fmt} is an open-source formatting library providing a fast and safe alternative to C stdio and C++ iostreams.
+Status: install ok installed
+
+Package: spdlog
+Version: 1.15.2
+Depends: fmt, vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: d92bc06da70c79b2fe18834dab34435ded710157a8fddf7d1597a273135bea86
+Description: Very fast, header-only/compiled, C++ logging library.
+Status: install ok installed
+
+Package: vulkan-headers
+Version: 1.4.304.1
+Port-Version: 1
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: fc03cc5f6dba57761aa10e2220c73ddb822416483312edf920c0e0a3270732a0
+Description: Vulkan header files and API registry
+Status: install ok installed
+
+Package: volk
+Version: 1.4.304.1
+Depends: vcpkg-cmake, vcpkg-cmake-config, vulkan-headers
+Architecture: x64-windows
+Multi-Arch: same
+Abi: d4a384b63dbfc34dbdd3fb6c910d747cdfa42e8e7daf5b3130bb830bd9b21b3f
+Description: Meta loader for Vulkan API.
+    Note that the static library target volk::volk is built without platform-specific defines.
+    Use the header-only target volk::volk_headers if you require platform-specific extensions.
+Status: install ok installed
+
+Package: vulkan-memory-allocator
+Version: 3.1.0
+Depends: vcpkg-cmake, vcpkg-cmake-config
+Architecture: x64-windows
+Multi-Arch: same
+Abi: f52e0782263f28c0dc05a21a9d849fd9e5f3f0780fca223ade9737882a73fe94
+Description: Easy to integrate Vulkan memory allocation library from GPUOpen
+Status: install ok installed
+
+Package: vulkan-loader
+Version: 1.4.304.1
+Depends: vcpkg-cmake, vcpkg-cmake-config, vulkan-headers
+Architecture: x64-windows
+Multi-Arch: same
+Abi: f89e0f7e5f4bdac62deb926a667657c4f319efb8e1375f90ed0378f2f13df97a
+Description: Vulkan Development Tools
+Status: purge ok not-installed
+
+Package: vulkan
+Version: 2023-12-17
+Depends: vcpkg-cmake, vulkan-headers, vulkan-loader
+Architecture: x64-windows
+Multi-Arch: same
+Abi: 5d474142aaa4e38da7103402fe17b9afe8feb8788629a0cae879542a01a82632
+Description: A stub package that ensures that Vulkan headers and a loader are available.
+    On Android, the NDK provides a loader at API level 24 or higher.
+Status: purge ok not-installed
+
+Package: imgui
+Feature: glfw-binding
+Depends: glfw3
+Architecture: x64-windows
+Multi-Arch: same
+Description: Make available GLFW binding
+Status: purge ok not-installed
+
+Package: imgui
+Feature: vulkan-binding
+Depends: vulkan
+Architecture: x64-windows
+Multi-Arch: same
+Description: Make available Vulkan binding
+Status: purge ok not-installed
+
