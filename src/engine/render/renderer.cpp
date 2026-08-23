@@ -10,6 +10,7 @@
 
 #include "engine/rep/representer.h"
 #include "engine/vulkan/realtime/vulkan_renderer.h"
+#include "entity/element/element.h"
 #include "entity/scene/scene.h"
 #include "entity/selection/selection.h"
 
@@ -75,6 +76,13 @@ void Renderer::rebuildCommandList() {
         if (!inst.visible) {
             continue;
         }
+        // 体系显隐：整个体系隐藏则其成员整体不渲染（体系作为整体对象）
+        if (inst.systemId != UINT32_MAX) {
+            const uint32_t si = scene_->systemIndexById(inst.systemId);
+            if (si != UINT32_MAX && !scene_->systems()[si].visible) {
+                continue;
+            }
+        }
         for (const auto& rep : representations_) {
             if (!rep.visible) {
                 continue;
@@ -110,6 +118,7 @@ void Renderer::rebuildCommandList() {
     }
 
     commandList_ = std::move(fresh);
+    commandList_.bumpSerial();   // serial 递增：视图层用其检测命令流重建（缓存键 P5）
     scene_->clearDirty();
 }
 
@@ -125,6 +134,21 @@ PickResult Renderer::pick(uint32_t x, uint32_t y) {
     return PickResult{};
 }
 
+void Renderer::applySceneLighting(RenderView& view) const {
+    if (!scene_) {
+        return;
+    }
+    const auto& props = scene_->properties();
+    // 全局光：天顶/地面半球色 + 均匀环境光（无方向光/点光源）
+    view.light.skyColor = glm::vec3(props.skyColor[0], props.skyColor[1], props.skyColor[2]);
+    view.light.groundColor =
+        glm::vec3(props.groundColor[0], props.groundColor[1], props.groundColor[2]);
+    view.light.ambientColor =
+        glm::vec3(props.ambientColor[0], props.ambientColor[1], props.ambientColor[2]);
+    view.light.ambientIntensity = props.ambient;
+    view.fog = glm::vec4(props.fog[0], props.fog[1], props.fogMode, props.fogDensity);
+}
+
 bool Renderer::sceneBounds(glm::vec3* outCenter, float* outRadius) const {
     if (scene_ == nullptr || scene_->coordsSoA().positions.empty()) {
         return false;
@@ -136,7 +160,18 @@ bool Renderer::sceneBounds(glm::vec3* outCenter, float* outRadius) const {
         hi = glm::max(hi, p);
     }
     *outCenter = (lo + hi) * 0.5f;
-    *outRadius = glm::length(hi - lo) * 0.5f;
+    float radius = glm::length(hi - lo) * 0.5f;
+    // 半径下限 = 所有原子 vdW 半径的最大值（单原子/全部重叠时包围球退化为
+    // 点，radius=0 → centerOn 距离/近远面退化 → 相机贴在原子内 → 不可见）。
+    // 取最大 vdW 半径保证相机距离合理，单原子在各渲染模式（VDW/表面/球棍…）
+    // 都能正确显示。
+    float minRadius = 1.0f;
+    for (const auto& ms : scene_->structures()) {
+        for (const auto el : ms.elements) {
+            minRadius = std::max(minRadius, entity::elementInfo(el).vdwRadius);
+        }
+    }
+    *outRadius = std::max(radius, minRadius);
     return true;
 }
 

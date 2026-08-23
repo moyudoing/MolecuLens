@@ -33,18 +33,11 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
     vec3 N = normalize(vNormal);
-    vec3 V = normalize(ubo.cameraPos.xyz - vPos);
-    vec3 L = normalize(-ubo.lightDir.xyz);
-    vec3 H = normalize(L + V);
-
-    float ndl = max(dot(N, L), 0.0);
-    float ndh = max(dot(N, H), 0.0);
-    float spec = pow(ndh, max(mat.matShininess, 0.001)) * (1.0 - mat.matMetallic);
-
     vec3 base = mat.matDiffuse.rgb * vColor.rgb;
-    vec3 col = ubo.ambient.rgb * ubo.ambient.w * base
-             + base * ubo.lightColor.rgb * ndl
-             + mat.matSpecular.rgb * spec * ubo.lightColor.rgb;
+    // 全局光照（无方向光/点光源）：半球环境光 mix(地面色, 天顶色, N.y) + 均匀环境光
+    float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);              // 0=朝下 1=朝上
+    vec3 hemi = mix(ubo.lightColor.rgb, ubo.lightDir.rgb, up); // 地面色→天顶色
+    vec3 col = base * (ubo.ambient.rgb + hemi * ubo.ambient.w);
 
     float alpha = mat.matOpacity * vColor.a;
     outColor = vec4(col, alpha);

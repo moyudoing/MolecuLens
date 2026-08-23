@@ -47,7 +47,11 @@ void main() {
     vec3 up2 = cross(dir, right);
 
     vec3 local = aLocalPos;
-    vec3 worldPos = a + dir * (local.y * halfLen) + right * (local.x * r) + up2 * (local.z * r);
+    // 键圆柱以两端点中点为原点（local.y=-1 → 端点 A，+1 → 端点 B）。
+    // 若以 a 为原点（a + dir*(local.y*halfLen)），圆柱将偏移半个键长——
+    // 端点错位、化学键与原子不连接（见 moleculens-fixes）。
+    vec3 mid = 0.5f * (a + b);
+    vec3 worldPos = mid + dir * (local.y * halfLen) + right * (local.x * r) + up2 * (local.z * r);
     vec3 worldN = normalize(right * local.x + up2 * local.z);
 
     gl_Position = ubo.viewProj * vec4(worldPos, 1.0);

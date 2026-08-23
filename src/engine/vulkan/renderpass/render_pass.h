@@ -24,8 +24,9 @@ public:
     // 窗口主通道（MSAA resolve）
     bool createMain(VulkanDevice& device, VkFormat colorFormat, VkFormat depthFormat,
                     VkSampleCountFlagBits samples);
-    // 离屏通道（无 MSAA resolve；可采样输出；finalLayout 供 readback/采样）
+    // 离屏通道（含 depth；无 MSAA resolve；可采样输出；finalLayout 供 readback/采样）
     bool createOffscreen(VulkanDevice& device, VkFormat colorFormat,
+                         VkFormat depthFormat,
                          VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT,
                          VkImageLayout finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     // 拾取 ID Pass（R32_UINT，无深度，主方案 §5.6）

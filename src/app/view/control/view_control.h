@@ -41,6 +41,7 @@ class TimeAxis;
 class TimelineController;
 class IoController;
 class SelectionController;
+class SceneController;
 class RenderController;
 class RepresentationController;
 
@@ -71,6 +72,7 @@ public:
 
     // 布局重置（主方案 §7.4 验收项）
     void resetLayout();
+
     // 布局序列化（M5 落地 settings.json）
     std::string serializeLayout();
     bool deserializeLayout(const std::string& base64);
@@ -82,8 +84,8 @@ public:
     // 窗口控制（自绘标题栏，主方案 §7.3）
     void toggleMaximize();
 
-    GLFWwindow* window() const { return window_; }
-    bool windowShouldClose() const { return windowShouldClose_; }
+    [[nodiscard]] GLFWwindow* window() const { return window_; }
+    [[nodiscard]] bool windowShouldClose() const { return windowShouldClose_; }
     MolScene& molScene() { return molScene_; }
     TimeAxis& timeAxis() { return timeAxis_; }
     ToolRegistry& tools() { return tools_; }
@@ -92,26 +94,43 @@ public:
     void svcTimeline(TimelineController* ctl) { timelineCtl_ = ctl; }
     void svcIo(IoController* ctl) { ioCtl_ = ctl; }
     void svcSelection(SelectionController* ctl) { selectionCtl_ = ctl; }
+    void svcScene(SceneController* ctl);
     void svcRender(RenderController* ctl);
     void svcRep(RepresentationController* ctl);
 
     // UI 回调（VulkanRenderer renderpass 内调用）
     static void renderImGuiUi(VkCommandBuffer cmd);
 
+    // 平台原生"另存为"对话框（Windows 资源管理器；PNG 过滤器）。
+    // defaultName = 对话框默认文件名（可含或省略 .png）。返回用户选择的完整路径；
+    // 返回空串 = 用户取消（调用方应中止导出、不生成文件）。
+    // 内部记忆上次导出目录，下次默认定位到该目录。
+    static std::string saveFileDialog(const char* defaultName);
+
 private:
     bool createWindow();
     bool initImGuiBackends();
-    void newFrame(float dt);
+    static void newFrame(float dt);
     void render();                          // 菜单 + DockSpace + 所有面板 + 遮罩
     void renderMainMenuBar();               // 自绘标题栏（主方案 §7.3）
     void setupDocking();                    // Dock 布局（主方案 §7.4）
     void renderLoadingOverlay();            // 加载遮罩（主方案 §7.5）
+    bool windowIsMaximized() const;         // 真实窗口最大化状态（Win32 查询）
 
     GLFWwindow* window_ = nullptr;
     bool windowShouldClose_ = false;
     bool maximized_ = false;
+#ifdef _WIN32
+    // 自绘标题栏最大化：记录还原位置（Win32 手动最大化/还原，绕开
+    // GLFW 无边框窗口 glfwMaximizeWindow/glfwRestoreWindow 的尺寸不同步问题）
+    bool restoreRectValid_ = false;
+    int restoreL_ = 0, restoreT_ = 0, restoreR_ = 0, restoreB_ = 0;
+#endif
     float lastFrameTime_ = 0.0f;
     float fps_ = 0.0f;
+    // 自绘标题栏实际高度（renderMainMenuBar 每帧测量；setupDocking 用其偏移，
+    // 避免硬编码 34 与字号/内边距变化后的真实高度不一致导致 DockSpace 偏移）
+    float titleBarHeight_ = 34.0f;
 
     engine::VulkanRenderer* vk_ = nullptr;
     engine::Renderer* renderer_ = nullptr;
@@ -121,6 +140,13 @@ private:
     TimelineController* timelineCtl_ = nullptr;
     IoController* ioCtl_ = nullptr;
     SelectionController* selectionCtl_ = nullptr;
+    SceneController* sceneCtl_ = nullptr;
+    RenderController* renderCtl_ = nullptr;
+    RepresentationController* repCtl_ = nullptr;
+    // 工具面板观察指针（注册进 tools_ 注册表；svc* 注入控制器）
+    MolListTool* molListTool_ = nullptr;
+    StylesTool* stylesTool_ = nullptr;
+    MaterialTool* materialTool_ = nullptr;
 
     MainView mainView_;
     MolScene molScene_;
@@ -131,11 +157,11 @@ private:
     bool showMolList_ = true;
     bool showStyles_ = true;
     bool showMaterial_ = true;
-    bool showExport_ = false;
+    bool showExport_ = true;   // 图像导出面板默认可见（导出功能需面板触发）
     bool showPaint_ = false;
     bool showTimeline_ = true;
     bool showStatusBar_ = true;
-    bool showLog_ = true;
+    bool showLog_ = false;
 
     // 加载遮罩状态（主方案 §7.5）
     LoadingState loading_;

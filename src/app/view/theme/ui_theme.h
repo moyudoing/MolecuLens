@@ -1,6 +1,6 @@
 // =============================================================================
 // MolecuLens · app · view/theme/ui_theme.h —— 设计系统（UITheme）
-// 规格来源：主方案 §7.6（Tokyo Night 配色；OPPO B.ttf 中文 Glyph Ranges；
+// 规格来源：主方案 §7.6（Tokyo Night 配色；OPPO_B.ttf 中文 Glyph Ranges；
 //           三档字号 16/20/13px；动画引擎 hoverProgress easeOutCubic；
 //           组件库 sectionHeader/badge/primaryButton/loadingBar/helpMarker）
 // =============================================================================
@@ -37,7 +37,7 @@ public:
 
     // 应用主题（全部 ImGui 控件色映射，主方案 §7.6）
     static void applyTheme();
-    // 加载字体（OPPO B.ttf + 中文 Glyph Ranges；可执行目录 font/）
+    // 加载字体（OPPO_B.ttf + 中文 Glyph Ranges；可执行目录 font/）
     static bool loadFont(const char* fontPath);
 
     // 动画：悬停进度（easeOutCubic 缓动；缓存超 256 自动清理）

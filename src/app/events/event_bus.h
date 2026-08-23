@@ -26,7 +26,7 @@ public:
     void subscribe(Subscriber* sub);
     void unsubscribe(Subscriber* sub);
     void poll();                       // 主循环轮询 active Subscriber（时间轴等）
-    const std::deque<Event>& log() const { return log_; }   // 回放栈
+    [[nodiscard]] const std::deque<Event>& log() const { return log_; }   // 回放栈
 
 private:
     std::vector<Subscriber*> subscribers_;

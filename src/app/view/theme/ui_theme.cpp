@@ -119,7 +119,7 @@ bool UITheme::loadFont(const char* fontPath) {
         return true;
     }
     ImGuiIO& io = ImGui::GetIO();
-    // 中文 Glyph Ranges（主方案 §7.6：OPPO B.ttf 中文）
+    // 中文 Glyph Ranges（主方案 §7.6：OPPO_B.ttf 中文）
     // 注意：ranges 必须持久——imgui 的字体配置保存 GlyphRanges 指针（不复制），
     // 局部数组销毁后悬垂会导致运行期断言（imgui_draw.cpp "glyph range array
     // persistent"）。static 保证生命周期与进程一致。
@@ -130,6 +130,15 @@ bool UITheme::loadFont(const char* fontPath) {
         ImFontGlyphRangesBuilder builder;
         builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
         builder.AddRanges(io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+        // 界面符号（窗口按钮/标题等），Default/中文常用范围未覆盖会渲染成 "?"
+        builder.AddChar(0x2013);   // – en dash
+        builder.AddChar(0x2014);   // — em dash
+        builder.AddChar(0x00D7);   // × 乘号（关闭按钮）
+        builder.AddChar(0x00B7);   // · 间隔号
+        builder.AddChar(0x2022);   // • 项目符号
+        builder.AddChar(0x25A1);   // □ 白方块（最大化）
+        builder.AddChar(0x25B6);   // ▶ 播放
+        builder.AddChar(0x23F8);   // ⏸ 暂停
         builder.BuildRanges(&ranges);
     }
 
@@ -149,7 +158,7 @@ bool UITheme::loadFont(const char* fontPath) {
         GetModuleFileNameA(nullptr, exePath, MAX_PATH);
         const std::string exeDir = std::filesystem::path(exePath).parent_path().string();
         const std::string cands[] = {
-            "data/font/OPPO B.ttf",
+            "data/font/OPPO_B.ttf",
             "data/font/OPPO_B.ttf",
             "font/OPPO_B.ttf",
             exeDir + "/font/OPPO_B.ttf",

@@ -75,6 +75,7 @@ void CameraController::reset() {
     if (svc_.camera) {
         svc_.camera->yaw = 0.0f;
         svc_.camera->pitch = 0.5f;
+        svc_.camera->roll = 0.0f;
         svc_.camera->ortho = false;
         svc_.camera->fov = 45.0f;
     }

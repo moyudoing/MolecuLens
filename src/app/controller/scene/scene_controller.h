@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <string>
 
+#include <glm/glm.hpp>
+
 #include "app/events/event_bus.h"
 #include "app/shell/application.h"
 
@@ -28,6 +30,18 @@ public:
     bool removeInstance(uint32_t instanceIndex);
     bool setVisible(uint32_t instanceIndex, bool visible);
     bool setTransform(uint32_t instanceIndex, const entity::Transform& tm);
+    // 平移/定位（读当前位姿、仅改平移分量 → setTransform）
+    bool setInstancePosition(uint32_t instanceIndex, const glm::vec3& position);
+    bool setSystemPosition(uint32_t systemId, const glm::vec3& position);
+
+    // 体系（组）操作
+    uint32_t addSystem(const std::string& name);
+    bool removeSystem(uint32_t systemId);
+    bool setSystemVisible(uint32_t systemId, bool visible);
+    bool setSystemTransform(uint32_t systemId, const entity::Transform& tm);
+    bool renameSystem(uint32_t systemId, const std::string& name);
+    bool moveInstanceToSystem(uint32_t instanceIndex, uint32_t systemId);
+    bool setSystemRenderMode(uint32_t systemId, int mode);   // 0实心/1线框/2透明/3点
 
     void onEvent(const Event&) override;
 

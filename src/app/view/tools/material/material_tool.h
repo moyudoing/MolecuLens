@@ -10,11 +10,16 @@
 
 namespace moleculens::app {
 
+class RepresentationController;
+
 class MaterialTool : public BaseToolView {
 public:
     const char* getTitle() const override { return "材质选择";
     }
     void render(DataManager* dm, MolScene* scene) override;
+
+    // 控制器注入（ViewControl::svcRep 装配）
+    void setRepController(RepresentationController* ctl) { repCtl_ = ctl; }
 
     // 预设表（8 套，与主方案 §6.6.2 同源）
     struct Preset {
@@ -27,6 +32,9 @@ public:
     static void presetParams(int index, float* ambient, float* diffuse, float* specular,
                              float* shininess, float* metallic, float* roughness,
                              float* opacity);
+
+private:
+    RepresentationController* repCtl_ = nullptr;
 };
 
 } // namespace moleculens::app

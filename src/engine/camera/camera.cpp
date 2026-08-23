@@ -20,7 +20,13 @@ glm::vec3 OrbitCamera::position() const {
 }
 
 glm::mat4 OrbitCamera::viewMatrix() const {
-    return glm::lookAt(position(), target, glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 v = glm::lookAt(position(), target, glm::vec3(0.0f, 1.0f, 0.0f));
+    // 绕屏幕法线（视图空间 +Z）滚转：view' = Rz(roll) * view（先 lookAt 再滚转
+    // 视图空间坐标 → 图像绕屏幕中心旋转；正 roll = 逆时针，见 rollView 注释）
+    if (roll != 0.0f) {
+        v = glm::rotate(glm::mat4(1.0f), roll, glm::vec3(0.0f, 0.0f, 1.0f)) * v;
+    }
+    return v;
 }
 
 glm::mat4 OrbitCamera::projectionMatrix(float aspect) const {
@@ -52,6 +58,12 @@ void OrbitCamera::pan(const glm::vec2& ndcDelta) {
     const glm::vec3 right = glm::normalize(glm::vec3(view[0][0], view[1][0], view[2][0]));
     const glm::vec3 up = glm::normalize(glm::vec3(view[0][1], view[1][1], view[2][1]));
     target -= (right * ndcDelta.x + up * ndcDelta.y) * worldPerPx;
+}
+
+void OrbitCamera::rollView(float delta) {
+    // 累计滚转角（viewMatrix 以 Rz(roll) 后乘应用）。
+    // 交互层传入 delta：右键拖拽，正值 = 视图逆时针（见 MolScene::handleMouse）。
+    roll += delta;
 }
 
 void OrbitCamera::setFov(float degrees) {

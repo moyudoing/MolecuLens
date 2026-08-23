@@ -40,9 +40,15 @@ struct SceneProperties {
     float fog[2] = {0.0f, 0.0f};             // 雾近/远（可选）
     float fogMode = 0.0f;                    // 0 关 / 1 线性 / 2 指数 / 3 指数²
     float fogDensity = 0.05f;
-    float ambient = 0.3f;                    // 环境光强度
+    float ambient = 0.45f;                   // 半球光强度（0 纯平 / 越大天顶地面差异越大）
     float scale = 1.0f;                      // 全局缩放
     Units units = Units::Angstrom;
+    // —— 全局光（环境光/全局光照，无方向光/点光源）——
+    // 全局 UBO 语义：ambient=基础环境色+强度；skyColor/groundColor 构成半球环境光
+    // （天顶亮/地面暗的渐变，提供深度感而不需要方向光）。
+    float skyColor[3] = {1.0f, 1.0f, 1.0f};       // 天顶（半球上方）色
+    float groundColor[3] = {0.35f, 0.4f, 0.5f};   // 地面（半球下方）色
+    float ambientColor[3] = {0.55f, 0.6f, 0.75f}; // 均匀环境光基础色
 };
 
 // —— 单帧（SoA 扁平；主方案 §4.3）——
@@ -67,6 +73,27 @@ struct MoleculeInstance {
     bool visible = true;
     std::shared_ptr<Trajectory> trajectory;  // 静态文件则 frames.size()==1
     std::vector<uint32_t> globalAtomIds;     // 实例内原子 → 全局原子 ID（拾取回查）
+    uint32_t systemId = UINT32_MAX;      // 所属体系（SystemGroup.id）；无 = 未归组
+};
+
+// —— 体系 / 组（一次导入的多分子文件视为一个体系；主方案 §4.3 扩展）——
+// 体系是整体渲染与管理单位：体系级位姿合成到成员实例（世界坐标 = 体系位姿 ×
+// 实例位姿），体系显隐影响整个体系；支持分子跨体系移交/重组。
+// 每个体系可独立设置渲染模式（实心/线框/透明/点），互不影响 —— 管线按模式
+// 创建/切换（SphereInst/CylinderInst 等按体系模式走对应 VkPipeline）。
+enum class SystemRenderMode : uint8_t {
+    Solid = 0,       // 实心（默认）：填充三角网格
+    Wireframe,       // 线框：多边形 LINE 模式（三角网格线框）
+    Transparent,     // 透明：混合（alpha）+ 降低材质透明度
+    Point,           // 点：原子渲染为点、键渲染为线段
+};
+struct SystemGroup {
+    uint32_t id = 0;                     // 稳定 id（实例按 id 关联，非下标）
+    std::string name;                    // 显示名
+    bool visible = true;
+    Transform transform;                 // 体系级位姿（整体平移/旋转/缩放）
+    std::vector<uint32_t> instanceIndices;  // 成员实例下标（随实例增删重建）
+    SystemRenderMode renderMode = SystemRenderMode::Solid;   // 体系独立渲染模式
 };
 
 // —— 坐标 SoA（GPU 上传用，段式布局；主方案 §4.3）——
@@ -89,10 +116,28 @@ public:
     // 去重注册：命中既有 → 返回既有下标；未命中 → 追加
     uint32_t registerStructure(const MoleculeStructure&);
     // 写入 instances_，并在 coordsSoA_ 追加该结构长度 × 1 帧的坐标段
-    uint32_t addInstance(uint32_t structureIndex, const Transform&);
+    // systemId = UINT32_MAX 时挂到当前体系（无则自动新建）
+    uint32_t addInstance(uint32_t structureIndex, const Transform&,
+                         uint32_t systemId = UINT32_MAX);
     // 追加轨迹实例（坐标段按帧数预留首帧）
     uint32_t addTrajectoryInstance(uint32_t structureIndex, const Transform&,
-                                   std::shared_ptr<Trajectory> traj);
+                                   std::shared_ptr<Trajectory> traj,
+                                   uint32_t systemId = UINT32_MAX);
+
+    // —— 体系（SystemGroup）管理 ——
+    uint32_t addSystem(const std::string& name = std::string());
+    bool removeSystem(uint32_t systemId);                 // 删除体系及其全部实例
+    bool setSystemVisible(uint32_t systemId, bool visible);
+    bool setSystemTransform(uint32_t systemId, const Transform&);
+    bool renameSystem(uint32_t systemId, const std::string& name);
+    bool moveInstanceToSystem(uint32_t instanceIndex, uint32_t systemId);  // 跨组移交
+    bool setSystemRenderMode(uint32_t systemId, SystemRenderMode mode);   // 体系渲染模式
+    const std::vector<SystemGroup>& systems() const { return systems_; }
+    // 实例 → 所属体系 id（UINT32_MAX = 未归组）
+    uint32_t systemIdOfInstance(uint32_t instanceIndex) const;
+    uint32_t systemIndexById(uint32_t systemId) const;    // id → systems_ 下标
+    uint32_t currentSystemId() const { return currentSystemId_; }
+    bool setCurrentSystem(uint32_t systemId);
 
     void setDirty(uint32_t bits) { dirty_ |= bits; }   // 接受 DIRTY_* 位或组合
     uint32_t dirtyBits() const { return dirty_; }
@@ -128,11 +173,15 @@ public:
     std::string_view chainName(int32_t chainId) const;
     std::string_view residueName(int32_t residueId) const;
     int32_t chainCount() const { return static_cast<int32_t>(chainNames_.size()); }
+    int32_t residueCount() const { return static_cast<int32_t>(residueNames_.size()); }
 
     // 原子名（结构 + 原子下标 → 名字符串）
     std::string_view atomName(uint32_t structureIndex, uint32_t atomIndex) const;
 
 private:
+    uint32_t resolveSystemId(uint32_t requested);          // UINT32_MAX → 当前/新建
+    void rebuildSystemMembership();                        // 按 instances_ 重建成员表
+
     std::vector<MoleculeStructure> structuresPool_;
     std::unordered_map<StructureKey, uint32_t, StructureKeyHash> structureIndex_;
     std::vector<MoleculeInstance>  instances_;
@@ -141,6 +190,9 @@ private:
     StringPool strings_;
     std::vector<uint32_t> chainNames_;     // StringPool id
     std::vector<uint32_t> residueNames_;   // StringPool id
+    std::vector<SystemGroup> systems_;
+    uint32_t nextSystemId_ = 1;
+    uint32_t currentSystemId_ = UINT32_MAX;
     uint32_t dirty_ = 0;
     uint64_t serial_ = 0;
 };

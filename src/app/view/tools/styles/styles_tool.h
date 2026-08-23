@@ -10,10 +10,21 @@
 
 namespace moleculens::app {
 
+class RepresentationController;
+class RenderController;
+
 class StylesTool : public BaseToolView {
 public:
-    const char* getTitle() const override { return "渲染设置"; }
+    [[nodiscard]] const char* getTitle() const override { return "渲染设置"; }
     void render(DataManager* dm, MolScene* scene) override;
+
+    // 控制器注入（Application 装配后由 ViewControl::svc* 调用）
+    void setRepController(RepresentationController* ctl) { repCtl_ = ctl; }
+    void setRenderController(RenderController* ctl) { renderCtl_ = ctl; }
+
+private:
+    RepresentationController* repCtl_ = nullptr;
+    RenderController* renderCtl_ = nullptr;
 };
 
 } // namespace moleculens::app

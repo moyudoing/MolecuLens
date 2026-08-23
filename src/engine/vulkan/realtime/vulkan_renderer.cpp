@@ -7,9 +7,9 @@
 #include "engine/vulkan/realtime/vulkan_renderer.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 #include <numeric>
+#include <unordered_map>
 
 #include <GLFW/glfw3.h>
 
@@ -31,8 +31,38 @@ namespace {
 #include "gen/shaders/line_frag.h"
 #include "gen/shaders/mesh_vert.h"
 #include "gen/shaders/mesh_frag.h"
+#include "gen/shaders/point_vert.h"
+#include "gen/shaders/point_frag.h"
 
-// 生成单位 icosphere（细分 2 级 → 80 三角形，主方案 §5.7.1）
+// 生成单位 icosphere（细分 2 级 → 320 三角形，主方案 §5.7.1；比 80 更平滑）
+void subdivideOnce(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices) {
+    std::vector<glm::vec3> newVerts = verts;
+    std::vector<uint32_t> newIndices;
+    newIndices.reserve(indices.size() * 4);
+    std::unordered_map<uint64_t, uint32_t> midCache;
+    auto mid = [&](uint32_t a, uint32_t b) -> uint32_t {
+        const uint32_t lo = std::min(a, b), hi = std::max(a, b);
+        const uint64_t key = (static_cast<uint64_t>(lo) << 32) | hi;
+        auto it = midCache.find(key);
+        if (it != midCache.end()) {
+            return it->second;
+        }
+        const glm::vec3 m = glm::normalize(verts[lo] + verts[hi]);
+        const uint32_t idx = static_cast<uint32_t>(newVerts.size());
+        newVerts.push_back(m);
+        midCache.emplace(key, idx);
+        return idx;
+    };
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const uint32_t i0 = indices[i], i1 = indices[i + 1], i2 = indices[i + 2];
+        const uint32_t m01 = mid(i0, i1), m12 = mid(i1, i2), m20 = mid(i2, i0);
+        newIndices.insert(newIndices.end(),
+                          {i0, m01, m20, m01, i1, m12, m20, m12, i2, m01, m12, m20});
+    }
+    verts.swap(newVerts);
+    indices.swap(newIndices);
+}
+
 void generateIcosphere(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices) {
     // 正二十面体
     const float t = (1.0f + std::sqrt(5.0f)) * 0.5f;
@@ -63,6 +93,7 @@ void generateIcosphere(std::vector<glm::vec3>& verts, std::vector<uint32_t>& ind
         verts.push_back(m20);
         indices.insert(indices.end(), {i0, j0, j2, j0, i1, j1, j2, j1, i2, j0, j1, j2});
     }
+    subdivideOnce(verts, indices);   // 2 级：80 → 320 三角形
 }
 
 // 生成单位圆柱（8 段，半径 1，y∈[-1,1]，无端盖，主方案 §5.7.3）
@@ -88,9 +119,11 @@ void generateCylinder(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indi
 glm::mat4 vkProjection(const glm::mat4& proj) {
     glm::mat4 m = proj;
     m[1][1] *= -1.0f;
-    // 深度范围：glm::perspective 默认 [-1,1] → 改为 [0,1]
-    m[2][2] = m[2][2] * 0.5f + m[3][2] * 0.5f;
-    m[2][3] = m[2][3] * 0.5f;
+    // 深度范围：glm::perspective 默认 [-1,1] → 改为 [0,1]。
+    // 修正索引：GLM 列主序中 z 行 w 系数在 m[3][2]，w 行 z 系数在 m[2][3]。
+    // 此前读取/写入方向相反 → clip.w 变 -0.5z、深度错误 → 几何被远平面裁剪。
+    m[2][2] = m[2][2] * 0.5f + m[2][3] * 0.5f;
+    m[3][2] = m[3][2] * 0.5f;
     return m;
 }
 
@@ -145,20 +178,27 @@ bool VulkanRenderer::init(WindowHandle window, const RenderConfig& cfg,
 }
 
 void VulkanRenderer::shutdown() {
-    fprintf(stderr, "[s] VulkanRenderer::shutdown\n");
     if (!initialized_) {
         return;
     }
     vkDeviceWaitIdle(device_.device());
-    fprintf(stderr, "[s] device idle\n");
     destroyPickResources();
     drawBuffers_.reset();
     icosphere_.reset();
+    icosphereIdx_.reset();
     cylinder_.reset();
+    cylinderIdx_.reset();
     spherePipeline_.destroy(device_);
+    sphereWire_.destroy(device_);
+    sphereBlend_.destroy(device_);
     cylinderPipeline_.destroy(device_);
-    linePipeline_.destroy(device_);
+    cylinderWire_.destroy(device_);
+    cylinderBlend_.destroy(device_);
     meshPipeline_.destroy(device_);
+    meshWire_.destroy(device_);
+    meshBlend_.destroy(device_);
+    linePipeline_.destroy(device_);
+    point_.destroy(device_);
     delete sphereVert_;
     delete sphereFrag_;
     delete cylinderVert_;
@@ -167,10 +207,13 @@ void VulkanRenderer::shutdown() {
     delete lineFrag_;
     delete meshVert_;
     delete meshFrag_;
+    delete pointVert_;
+    delete pointFrag_;
     sphereVert_ = sphereFrag_ = nullptr;
     cylinderVert_ = cylinderFrag_ = nullptr;
     lineVert_ = lineFrag_ = nullptr;
     meshVert_ = meshFrag_ = nullptr;
+    pointVert_ = pointFrag_ = nullptr;
     globalUbo_.destroy();
     globalLayout_.destroy();
     destroyMainFramebuffers();
@@ -244,12 +287,37 @@ bool VulkanRenderer::createPipelines() {
         !loadShader(lineVert_, VK_SHADER_STAGE_VERTEX_BIT, line_vert, line_vert_len) ||
         !loadShader(lineFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, line_frag, line_frag_len) ||
         !loadShader(meshVert_, VK_SHADER_STAGE_VERTEX_BIT, mesh_vert, mesh_vert_len) ||
-        !loadShader(meshFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, mesh_frag, mesh_frag_len)) {
+        !loadShader(meshFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, mesh_frag, mesh_frag_len) ||
+        !loadShader(pointVert_, VK_SHADER_STAGE_VERTEX_BIT, point_vert, point_vert_len) ||
+        !loadShader(pointFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, point_frag, point_frag_len)) {
         return false;
     }
 
     const VkSampleCountFlagBits samples = device_.msaaSamples();
     const VkRenderPass rp = mainRenderPass_.renderPass();
+
+    // 每体系渲染模式一套管线（实心/线框/透明/点；见 SystemRenderMode）
+    struct PipeSpec {
+        const VkPipelineShaderStageCreateInfo* stages = nullptr;
+        std::vector<VkVertexInputBindingDescription> bindings;
+        std::vector<VkVertexInputAttributeDescription> attrs;
+        VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        bool blend = false;
+        bool depthWrite = true;
+        VkPolygonMode polygon = VK_POLYGON_MODE_FILL;
+        const char* name = "pipeline";
+    };
+    auto buildPipe = [&](const PipeSpec& s, Pipeline* out) -> bool {
+        PipelineBuilder pb;
+        pb.renderPass(rp).samples(samples).topology(s.topology)
+            .shaders(s.stages, 2)
+            .vertexInput(s.bindings, s.attrs)
+            .descriptorLayouts({globalLayout_.layout()})
+            .pushConstants(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(MaterialBlock))
+            .depthTest(true).depthWrite(s.depthWrite).blend(s.blend)
+            .polygonMode(s.polygon).cullMode(VK_CULL_MODE_NONE);
+        return pb.build(device_, out);
+    };
 
     // —— sphere 管线：binding0 = mesh 顶点(vec3)，binding1 = SphereInst ——
     {
@@ -267,15 +335,14 @@ bool VulkanRenderer::createPipelines() {
             {3, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pickId)},
             {4, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pad)},
         };
-        PipelineBuilder pb;
-        pb.renderPass(rp).samples(samples)
-            .shaders(stages, 2)
-            .vertexInput({bindings, bindings + 2}, {attrs, attrs + 5})
-            .descriptorLayouts({globalLayout_.layout()})
-            .pushConstants(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(MaterialBlock))
-            .depthTest(true).depthWrite(true).blend(false)
-            .cullMode(VK_CULL_MODE_NONE);
-        if (!pb.build(device_, &spherePipeline_)) {
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 2);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 5);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_FILL}, &spherePipeline_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_LINE}, &sphereWire_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL}, &sphereBlend_)) {
             return false;
         }
     }
@@ -297,40 +364,36 @@ bool VulkanRenderer::createPipelines() {
             {4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(CylinderInst, color)},
             {5, 1, VK_FORMAT_R32G32_UINT, offsetof(CylinderInst, pickId_pad)},
         };
-        PipelineBuilder pb;
-        pb.renderPass(rp).samples(samples)
-            .shaders(stages, 2)
-            .vertexInput({bindings, bindings + 2}, {attrs, attrs + 6})
-            .descriptorLayouts({globalLayout_.layout()})
-            .pushConstants(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(MaterialBlock))
-            .depthTest(true).depthWrite(true).blend(false)
-            .cullMode(VK_CULL_MODE_NONE);
-        if (!pb.build(device_, &cylinderPipeline_)) {
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 2);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 6);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_FILL}, &cylinderPipeline_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_LINE}, &cylinderWire_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL}, &cylinderBlend_)) {
             return false;
         }
     }
 
-    // —— line 管线：binding0 = 顶点(pos4+color4 = 48B) ——
+    // —— line 管线：binding0 = 顶点(pos4+color4 交错 = 32B) ——
     {
         const VkPipelineShaderStageCreateInfo stages[] = {
             lineVert_->stage(), lineFrag_->stage(),
         };
+        // 顶点布局 = pos(float4) + color(float4) = 32B/顶点（line.vert）；
+        // 原 48B stride 与数据不匹配 → 取数错位 → 线框渲染错乱。
         const VkVertexInputBindingDescription bindings[] = {
-            {0, 48, VK_VERTEX_INPUT_RATE_VERTEX},
+            {0, 32, VK_VERTEX_INPUT_RATE_VERTEX},
         };
         const VkVertexInputAttributeDescription attrs[] = {
             {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0},
             {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16},
         };
-        PipelineBuilder pb;
-        pb.renderPass(rp).samples(samples).topology(VK_PRIMITIVE_TOPOLOGY_LINE_LIST)
-            .shaders(stages, 2)
-            .vertexInput({bindings, bindings + 1}, {attrs, attrs + 2})
-            .descriptorLayouts({globalLayout_.layout()})
-            .pushConstants(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(MaterialBlock))
-            .depthTest(true).depthWrite(false).blend(true).lineWidth(1.0f)
-            .cullMode(VK_CULL_MODE_NONE);
-        if (!pb.build(device_, &linePipeline_)) {
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 1);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 2);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL}, &linePipeline_)) {
             return false;
         }
     }
@@ -348,15 +411,36 @@ bool VulkanRenderer::createPipelines() {
             {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(TriMeshVertex, normal)},
             {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(TriMeshVertex, color)},
         };
-        PipelineBuilder pb;
-        pb.renderPass(rp).samples(samples)
-            .shaders(stages, 2)
-            .vertexInput({bindings, bindings + 1}, {attrs, attrs + 3})
-            .descriptorLayouts({globalLayout_.layout()})
-            .pushConstants(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(MaterialBlock))
-            .depthTest(true).depthWrite(true).blend(false)
-            .cullMode(VK_CULL_MODE_NONE);
-        if (!pb.build(device_, &meshPipeline_)) {
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 1);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 3);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_FILL}, &meshPipeline_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_LINE}, &meshWire_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL}, &meshBlend_)) {
+            return false;
+        }
+    }
+
+    // —— point 管线（GL_POINTS；SphereInst 实例数据，仅 binding 1）——
+    {
+        const VkPipelineShaderStageCreateInfo stages[] = {
+            pointVert_->stage(), pointFrag_->stage(),
+        };
+        const VkVertexInputBindingDescription bindings[] = {
+            {1, sizeof(SphereInst), VK_VERTEX_INPUT_RATE_INSTANCE},
+        };
+        const VkVertexInputAttributeDescription attrs[] = {
+            {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(SphereInst, posRadius)},
+            {2, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(SphereInst, color)},
+            {3, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pickId)},
+            {4, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pad)},
+        };
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 1);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 4);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_POINT_LIST, false, true,
+                        VK_POLYGON_MODE_FILL}, &point_)) {
             return false;
         }
     }
@@ -465,6 +549,8 @@ void VulkanRenderer::endFrame() {
     if (frameCommand_ == VK_NULL_HANDLE) {
         return;
     }
+    // 队列提交互斥：与后台导出线程串行（QS.4 图像导出多线程）
+    std::unique_lock<std::mutex> qlock = device_.lockQueue();
     device_.endFrameCommands(frameCommand_);
 
     VkSubmitInfo submit{};
@@ -504,13 +590,16 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
     buf.sphereMat.clear();
     buf.cylinders.clear();
     buf.cylinderMat.clear();
+    buf.cylinderMode.clear();
     buf.lines.clear();
     buf.lineMat.clear();
     buf.meshes.clear();
     buf.materials.clear();
+    buf.sphereMode.clear();
 
-    // 收集命令流（12 种命令解包，主方案 §5.3/附录 F）
+    // 收集命令流（13 种命令解包，主方案 §5.3/附录 F）
     uint32_t currentMat = 0;
+    uint8_t currentMode = 0;   // 体系渲染模式（0实心/1线框/2透明/3点）
     buf.materials.push_back(MaterialBlock{});   // 默认材质（下标 0）
     CommandIterator it(list);
     for (bool has = list.first(it); has; has = list.next(it)) {
@@ -526,6 +615,14 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
                 }
                 break;
             }
+            case Cmd::RenderMode: {
+                if (size >= sizeof(RenderModeInst)) {
+                    RenderModeInst rmi;
+                    std::memcpy(&rmi, payload, sizeof(RenderModeInst));
+                    currentMode = rmi.mode;
+                }
+                break;
+            }
             case Cmd::SphereInst: {
                 if (size >= sizeof(SphereInst) && size % sizeof(SphereInst) == 0) {
                     const uint32_t n = size / sizeof(SphereInst);
@@ -535,6 +632,7 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
                                     sizeof(SphereInst));
                         buf.spheres.push_back(inst);
                         buf.sphereMat.push_back(currentMat);
+                        buf.sphereMode.push_back(currentMode);
                     }
                 }
                 break;
@@ -548,6 +646,7 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
                                     sizeof(CylinderInst));
                         buf.cylinders.push_back(inst);
                         buf.cylinderMat.push_back(currentMat);
+                        buf.cylinderMode.push_back(currentMode);
                     }
                 }
                 break;
@@ -574,6 +673,7 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
                     if (sizeof(TriMeshHeader) + vertBytes + idxBytes <= size) {
                         DrawBuffers::Mesh mesh;
                         mesh.mat = currentMat;
+                        mesh.mode = currentMode;
                         mesh.verts.resize(hdr.vertexCount);
                         mesh.idx.resize(hdr.indexCount);
                         std::memcpy(mesh.verts.data(), payload + sizeof(TriMeshHeader),
@@ -601,14 +701,18 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
 
     // UBO 更新（相机 + 光照 + 场景属性，主方案 §6.6.4）
     GlobalUBO ubo{};
-    ubo.viewProj = vkProjection(view.camera.viewProjMatrix(
+    // vkProjection 作用于纯投影矩阵（Y 翻转/深度调整），再乘视图矩阵；
+    // 直接作用于 P*V 联合矩阵会只翻 m[1][1] → clip.y 错误、几何不可见。
+    ubo.viewProj = vkProjection(view.camera.projectionMatrix(
         device_.swapchainExtent().width / static_cast<float>(
-            std::max(1u, device_.swapchainExtent().height))));
+            std::max(1u, device_.swapchainExtent().height)))) *
+                   view.camera.viewMatrix();
     ubo.cameraPos = glm::vec4(view.camera.position(), 1.0f);
-    ubo.lightDir = glm::vec4(0.3f, -0.8f, 0.5f, 0.0f);      // 指向光源方向
-    ubo.lightColor = glm::vec4(1.0f);
-    ubo.ambient = glm::vec4(0.5f, 0.55f, 0.7f, 0.35f);
-    ubo.fog = glm::vec4(0.0f, 0.0f, 0.0f, 0.05f);           // 雾关
+    // 全局光照从 RenderView 读取（天顶/地面半球色 + 环境光；无方向光/点光源）
+    ubo.lightDir = glm::vec4(view.light.skyColor, 0.0f);
+    ubo.lightColor = glm::vec4(view.light.groundColor, 0.0f);
+    ubo.ambient = glm::vec4(view.light.ambientColor, view.light.ambientIntensity);
+    ubo.fog = view.fog;
     ubo.sceneProps = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
     globalUbo_.update(frameIndex_, ubo);
 
@@ -638,19 +742,59 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
 
     const VkDescriptorSet globalSet = globalUbo_.set(frameIndex_);
 
-    // 球（实例化，按材质分批）
+    // 体系渲染模式 → VkPipeline（实心/线框/透明/点；见 SystemRenderMode）
+    const Pipeline* spherePipes[4] = {&spherePipeline_, &sphereWire_, &sphereBlend_, &point_};
+    // 球（实例化，按 (模式,材质) 分批）
     if (!buf.spheres.empty()) {
-        drawInstancedBatches(buf.spheres, buf.sphereMat, buf.materials,
-                             buf.sphereInst, *icosphere_, *icosphereIdx_,
-                             icosphereVerts_, icosphereIndices_,
-                             spherePipeline_.pipeline(), globalSet);
+        drawModeRuns(buf.spheres, buf.sphereMat, buf.sphereMode, buf.materials,
+                     buf.sphereInst, *icosphere_, *icosphereIdx_, icosphereIndices_,
+                     spherePipes, globalSet);
     }
-    // 圆柱
+    // 圆柱（点模式键 → 线段）
     if (!buf.cylinders.empty()) {
-        drawInstancedBatches(buf.cylinders, buf.cylinderMat, buf.materials,
-                             buf.cylinderInst, *cylinder_, *cylinderIdx_,
-                             cylinderVerts_, cylinderIndices_,
-                             cylinderPipeline_.pipeline(), globalSet);
+        const Pipeline* cylPipes[4] = {&cylinderPipeline_, &cylinderWire_, &cylinderBlend_,
+                                       &cylinderPipeline_};
+        std::vector<CylinderInst> cylNonPoint;
+        std::vector<uint32_t> cylMatNonPoint;
+        std::vector<uint8_t> cylModeNonPoint;
+        std::vector<glm::vec4> pointLineVerts;   // a,color,b,color
+        for (size_t ci = 0; ci < buf.cylinders.size(); ++ci) {
+            if (buf.cylinderMode[ci] == 3) {
+                const CylinderInst& c = buf.cylinders[ci];
+                pointLineVerts.push_back(c.aPos);
+                pointLineVerts.push_back(c.color);
+                pointLineVerts.push_back(c.bPos);
+                pointLineVerts.push_back(c.color);
+            } else {
+                cylNonPoint.push_back(buf.cylinders[ci]);
+                cylMatNonPoint.push_back(buf.cylinderMat[ci]);
+                cylModeNonPoint.push_back(buf.cylinderMode[ci]);
+            }
+        }
+        if (!cylNonPoint.empty()) {
+            drawModeRuns(cylNonPoint, cylMatNonPoint, cylModeNonPoint, buf.materials,
+                         buf.cylinderInst, *cylinder_, *cylinderIdx_, cylinderIndices_,
+                         cylPipes, globalSet);
+        }
+        if (!pointLineVerts.empty()) {
+            const VkDeviceSize need = pointLineVerts.size() * sizeof(glm::vec4);
+            if (!buf.lineVerts.valid() || buf.lineVerts.size() < need) {
+                buf.lineVerts.create(device_, need, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                     VMA_MEMORY_USAGE_AUTO_PREFER_HOST);
+            }
+            buf.lineVerts.upload(device_, pointLineVerts.data(), need);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline_.pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    linePipeline_.layout(), 0, 1, &globalSet, 0, nullptr);
+            const MaterialBlock& lmat = buf.materials.empty() ? MaterialBlock{}
+                                                              : buf.materials[0];
+            vkCmdPushConstants(cmd, linePipeline_.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               sizeof(MaterialBlock), &lmat);
+            VkBuffer vb = buf.lineVerts.buffer();
+            const VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
+            vkCmdDraw(cmd, static_cast<uint32_t>(pointLineVerts.size() / 2), 1, 0, 0);
+        }
     }
     // 线段
     if (!buf.lines.empty()) {
@@ -678,34 +822,53 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
         vkCmdPushConstants(cmd, linePipeline_.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                            sizeof(MaterialBlock), &mat);
         VkBuffer vb = buf.lineVerts.buffer();
-        vkCmdBindVertexBuffers(cmd, 0, 1, &vb, nullptr);
+        const VkDeviceSize offset = 0;
+        // pOffsets 必须非 NULL（否则校验错误 + 驱动崩溃 SIGSEGV，线框不可用）
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &offset);
         vkCmdDraw(cmd, static_cast<uint32_t>(lineVerts.size() / 2), 1, 0, 0);
     }
-    // 三角网格（卡通/表面；每网格 1 Draw，主方案 §5.7.8）
+    // 三角网格（卡通/表面；按体系渲染模式分组合并绘制）
     if (!buf.meshes.empty()) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_.pipeline());
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                meshPipeline_.layout(), 0, 1, &globalSet, 0, nullptr);
-        // 拼接全部网格为单一顶点/索引缓冲（复用池，主方案 §6.4 TriMesh 可合并批）
-        size_t totalVerts = 0, totalIdx = 0;
-        for (const auto& mesh : buf.meshes) {
-            totalVerts += mesh.verts.size();
-            totalIdx += mesh.idx.size();
-        }
-        std::vector<TriMeshVertex> allVerts;
-        std::vector<uint32_t> allIdx;
-        allVerts.reserve(totalVerts);
-        allIdx.reserve(totalIdx);
-        for (const auto& mesh : buf.meshes) {
-            const uint32_t base = static_cast<uint32_t>(allVerts.size());
-            allVerts.insert(allVerts.end(), mesh.verts.begin(), mesh.verts.end());
-            for (uint32_t i : mesh.idx) {
-                allIdx.push_back(base + i);
+        for (int mode = 0; mode < 4; ++mode) {
+            size_t totalVerts = 0, totalIdx = 0;
+            for (const auto& mesh : buf.meshes) {
+                if (mesh.mode == mode) {
+                    totalVerts += mesh.verts.size();
+                    totalIdx += mesh.idx.size();
+                }
             }
-        }
-        if (allVerts.empty() || allIdx.empty()) {
-            // 空网格：跳过
-        } else {
+            if (totalVerts == 0 || totalIdx == 0) {
+                continue;
+            }
+            const Pipeline& mp = (mode == 1) ? meshWire_
+                                  : (mode == 2 ? meshBlend_ : meshPipeline_);
+            std::vector<TriMeshVertex> allVerts;
+            std::vector<uint32_t> allIdx;
+            allVerts.reserve(totalVerts);
+            allIdx.reserve(totalIdx);
+            for (const auto& mesh : buf.meshes) {
+                if (mesh.mode != mode) {
+                    continue;
+                }
+                const uint32_t base = static_cast<uint32_t>(allVerts.size());
+                // 网格材质（diffuse/opacity）烘焙进顶点色，避免硬编码
+                // buf.materials[0]（默认全 0）导致表面/卡通全黑。
+                const MaterialBlock& mm = buf.materials[mesh.mat < buf.materials.size()
+                                                             ? mesh.mat
+                                                             : 0];
+                for (const auto& v : mesh.verts) {
+                    TriMeshVertex tv = v;
+                    // 逐分量乘（避免 GLM swizzle；本工程 GLM 未开 GLM_FORCE_SWIZZLE）
+                    tv.color = glm::vec4(tv.color.r * mm.diffuse.x,
+                                         tv.color.g * mm.diffuse.y,
+                                         tv.color.b * mm.diffuse.z,
+                                         tv.color.a * mm.opacity);
+                    allVerts.push_back(tv);
+                }
+                for (uint32_t i : mesh.idx) {
+                    allIdx.push_back(base + i);
+                }
+            }
             const VkDeviceSize vertNeed = allVerts.size() * sizeof(TriMeshVertex);
             if (!buf.meshVerts.valid() || buf.meshVerts.size() < vertNeed) {
                 buf.meshVerts.create(device_, vertNeed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -718,12 +881,24 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
                                    VMA_MEMORY_USAGE_AUTO_PREFER_HOST);
             }
             buf.meshIdx.upload(device_, allIdx.data(), idxNeed);
-            const MaterialBlock& mat = buf.materials[0];
-            vkCmdPushConstants(cmd, meshPipeline_.layout(),
-                               VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MaterialBlock),
-                               &mat);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mp.pipeline());
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mp.layout(), 0, 1,
+                                    &globalSet, 0, nullptr);
+            // 漫反射已烘焙进顶点色，push 白色默认材质（diffuse=1）避免二次变暗
+            MaterialBlock mat;
+            mat.ambient = glm::vec4(0.6f, 0.6f, 0.6f, 1.0f);
+            mat.diffuse = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+            mat.specular = glm::vec4(0.3f, 0.3f, 0.3f, 1.0f);
+            mat.shininess = 32.0f;
+            mat.metallic = 0.0f;
+            mat.roughness = 0.4f;
+            mat.opacity = 1.0f;
+            vkCmdPushConstants(cmd, mp.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               sizeof(MaterialBlock), &mat);
             VkBuffer vb = buf.meshVerts.buffer();
-            vkCmdBindVertexBuffers(cmd, 0, 1, &vb, nullptr);
+            const VkDeviceSize meshOffset = 0;
+            // pOffsets 必须非 NULL（同线段 draw：传 nullptr 校验错误 + SIGSEGV）
+            vkCmdBindVertexBuffers(cmd, 0, 1, &vb, &meshOffset);
             vkCmdBindIndexBuffer(cmd, buf.meshIdx.buffer(), 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(cmd, static_cast<uint32_t>(allIdx.size()), 1, 0, 0, 0);
         }
@@ -737,18 +912,20 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
     vkCmdEndRenderPass(cmd);
 }
 
+// 按 (体系渲染模式, 材质) 连续批次绘制实例化几何。每个模式对应不同 VkPipeline
+// （pipes[4]：0实心/1线框/2透明/3点）。点模式用 GL_POINTS（vkCmdDraw 1 顶点/实例）。
 template <typename InstT>
-void VulkanRenderer::drawInstancedBatches(const std::vector<InstT>& instances,
-                                          const std::vector<uint32_t>& mats,
-                                          const std::vector<MaterialBlock>& materials,
-                                          Buffer& instanceBuffer,
-                                          const Buffer& mesh, const Buffer& meshIdx,
-                                          uint32_t vertexCount, uint32_t indexCount,
-                                          VkPipeline pipeline, VkDescriptorSet set) {
+void VulkanRenderer::drawModeRuns(const std::vector<InstT>& instances,
+                                  const std::vector<uint32_t>& mats,
+                                  const std::vector<uint8_t>& modes,
+                                  const std::vector<MaterialBlock>& materials,
+                                  Buffer& instanceBuffer,
+                                  const Buffer& mesh, const Buffer& meshIdx,
+                                  uint32_t indexCount,
+                                  const Pipeline* pipes[4], VkDescriptorSet set) {
     if (instances.empty()) {
         return;
     }
-    (void)vertexCount;   // 实例化绘制：顶点数由共享网格索引决定
     VkCommandBuffer cmd = frameCommand_;
     const VkDeviceSize need = instances.size() * sizeof(InstT);
     if (!instanceBuffer.valid() || instanceBuffer.size() < need) {
@@ -757,46 +934,44 @@ void VulkanRenderer::drawInstancedBatches(const std::vector<InstT>& instances,
     }
     instanceBuffer.upload(device_, instances.data(), need);
 
-    VkBuffer meshBuf = mesh.buffer();
-    VkBuffer instanceBuf = instanceBuffer.buffer();
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayoutFor(pipeline), 0, 1, &set, 0, nullptr);
-    VkBuffer vertexBufs[] = {meshBuf, instanceBuf};
-    VkDeviceSize offsets[] = {0, 0};
-    vkCmdBindVertexBuffers(cmd, 0, 2, vertexBufs, offsets);
-    vkCmdBindIndexBuffer(cmd, meshIdx.buffer(), 0, VK_INDEX_TYPE_UINT32);
-
-    // 按材质分批（每表示一个材质 → DrawCall 量 = 表示数，主方案 §6.6.3）
     uint32_t runStart = 0;
     uint32_t runMat = mats.empty() ? 0 : mats[0];
-    const auto drawRun = [&](uint32_t start, uint32_t count, uint32_t matIdx) {
+    uint8_t runMode = modes.empty() ? 0 : modes[0];
+    const auto drawRun = [&](uint32_t start, uint32_t count, uint32_t mode,
+                             uint32_t matIdx) {
+        const Pipeline& p = *pipes[mode % 4];
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipeline());
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.layout(), 0, 1,
+                                &set, 0, nullptr);
         const MaterialBlock& mat = materials[matIdx];
-        vkCmdPushConstants(cmd, pipelineLayoutFor(pipeline), VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(MaterialBlock), &mat);
-        vkCmdDrawIndexed(cmd, indexCount, count, 0, 0, start);
+        vkCmdPushConstants(cmd, p.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(MaterialBlock), &mat);
+        if (mode == 3) {
+            // 点模式：GL_POINTS（point.vert 无顶点绑定；仅实例缓冲 binding 1）
+            VkBuffer vb = instanceBuffer.buffer();
+            VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(cmd, 1, 1, &vb, &off);
+            vkCmdDraw(cmd, 1, count, 0, start);
+        } else {
+            VkBuffer vbs[] = {mesh.buffer(), instanceBuffer.buffer()};
+            VkDeviceSize offs[] = {0, 0};
+            vkCmdBindVertexBuffers(cmd, 0, 2, vbs, offs);
+            vkCmdBindIndexBuffer(cmd, meshIdx.buffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, indexCount, count, 0, 0, start);
+        }
     };
     for (size_t i = 1; i < instances.size(); ++i) {
-        if (mats[i] != runMat) {
-            drawRun(runStart, static_cast<uint32_t>(i - runStart), runMat);
+        const uint32_t m = mats.empty() ? 0 : mats[i];
+        const uint8_t mode = modes.empty() ? 0 : modes[i];
+        if (m != runMat || mode != runMode) {
+            drawRun(runStart, static_cast<uint32_t>(i - runStart), runMode, runMat);
             runStart = static_cast<uint32_t>(i);
-            runMat = mats[i];
+            runMat = m;
+            runMode = mode;
         }
     }
-    drawRun(runStart, static_cast<uint32_t>(instances.size() - runStart), runMat);
-}
-
-VkPipelineLayout VulkanRenderer::pipelineLayoutFor(VkPipeline pipeline) const {
-    if (pipeline == spherePipeline_.pipeline()) {
-        return spherePipeline_.layout();
-    }
-    if (pipeline == cylinderPipeline_.pipeline()) {
-        return cylinderPipeline_.layout();
-    }
-    if (pipeline == linePipeline_.pipeline()) {
-        return linePipeline_.layout();
-    }
-    return meshPipeline_.layout();
+    drawRun(runStart, static_cast<uint32_t>(instances.size() - runStart), runMode,
+            runMat);
 }
 
 bool VulkanRenderer::createPickResources() {

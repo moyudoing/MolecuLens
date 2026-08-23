@@ -8,7 +8,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <thread>
 
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_vulkan.h>
@@ -19,6 +22,8 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#define GLFW_EXPOSE_NATIVE_WIN32   // glfwGetWin32Window（自绘标题栏手动最大化）
+#include <GLFW/glfw3native.h>
 #endif
 
 #include "app/controller/io/io_controller.h"
@@ -67,7 +72,84 @@ std::string openFileDialog() {
     return {};
 }
 
+// 上次导出目录（会话内记忆；首次为空 → 由系统决定/当前目录）。
+// "导出图像"对话框下次默认定位到该目录。
+std::string& lastExportDir() {
+    static std::string dir;
+    return dir;
+}
+
+// 自绘标题栏窗口按钮图标（绘制列表画，不依赖字体字形——最大化/还原需随状态切换）
+enum class WindowGlyph { Minimize, Maximize, Restore, Close };
+
+void drawWindowGlyph(const ImVec2& pos, const ImVec2& size, WindowGlyph glyph) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 col = IM_COL32(208, 211, 222, 255);
+    const float t = 2.0f;
+    const ImVec2 c(pos.x + size.x * 0.5f, pos.y + size.y * 0.5f);
+    switch (glyph) {
+        case WindowGlyph::Minimize:
+            dl->AddLine(ImVec2(c.x - 6.0f, c.y), ImVec2(c.x + 6.0f, c.y), col, t);
+            break;
+        case WindowGlyph::Maximize:
+            dl->AddRect(ImVec2(c.x - 6.0f, c.y - 5.0f), ImVec2(c.x + 6.0f, c.y + 5.0f),
+                        col, 0.0f, 0, t);
+            break;
+        case WindowGlyph::Restore: {
+            // 两个错位方框（后框 + 前景底 + 前框），表示"还原"
+            const ImVec2 a(c.x - 3.0f, c.y - 4.0f), b(c.x + 6.0f, c.y + 5.0f);
+            const ImVec2 a2(c.x - 6.0f, c.y - 5.0f), b2(c.x + 3.0f, c.y + 4.0f);
+            dl->AddRect(a2, b2, col, 0.0f, 0, t);
+            dl->AddRectFilled(a, b, IM_COL32(26, 30, 45, 255));
+            dl->AddRect(a, b, col, 0.0f, 0, t);
+            break;
+        }
+        case WindowGlyph::Close:
+            dl->AddLine(ImVec2(c.x - 5.0f, c.y - 5.0f), ImVec2(c.x + 5.0f, c.y + 5.0f), col, t);
+            dl->AddLine(ImVec2(c.x - 5.0f, c.y + 5.0f), ImVec2(c.x + 5.0f, c.y - 5.0f), col, t);
+            break;
+    }
+}
+
 } // namespace
+
+// 平台原生"另存为"对话框（Windows 资源管理器；PNG 过滤器）。
+// 用户确认返回所选路径；取消返回空串。成功后记忆目录供下次默认定位。
+std::string ViewControl::saveFileDialog(const char* defaultName) {
+#ifdef _WIN32
+    char path[MAX_PATH] = {};
+    // 默认文件名（无扩展名自动补 .png）
+    std::string name = (defaultName && *defaultName) ? defaultName : "image.png";
+    if (name.find('.') == std::string::npos) {
+        name += ".png";
+    }
+    std::snprintf(path, sizeof(path), "%s", name.c_str());
+
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "PNG 图像 (*.png)\0*.png\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = "png";   // 用户未输扩展名时自动补
+    // OFN_NOCHANGEDIR：对话框不改应用当前工作目录（避免相对路径副作用）；
+    // OFN_OVERWRITEPROMPT：覆盖前询问；OFN_PATHMUSTEXIST：路径必须存在。
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    const std::string& initDir = lastExportDir();
+    ofn.lpstrInitialDir = initDir.empty() ? nullptr : initDir.c_str();
+
+    if (GetSaveFileNameA(&ofn)) {
+        const std::string chosen(path);
+        // 记忆目录（供下次默认定位到同一文件夹）
+        const size_t slash = chosen.find_last_of("\\/");
+        lastExportDir() =
+            (slash == std::string::npos) ? std::string() : chosen.substr(0, slash);
+        return chosen;
+    }
+#else
+    (void)defaultName;   // 非 Windows：占位（M5 接入 native dialog）
+#endif
+    return {};
+}
 
 ViewControl::~ViewControl() { shutdown(); }
 
@@ -81,9 +163,12 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
     timelineCtl_ = nullptr;   // 由 Application 装配后注入
     ioCtl_ = nullptr;
 
+    spdlog::info("[ui] init: creating GLFW window ...");
     if (!createWindow()) {
+        spdlog::error("[ui] init: createWindow FAILED");
         return false;
     }
+    spdlog::info("[ui] init: GLFW window created");
     // Vulkan 渲染器（主方案 §6.3 初始化流程：实例/设备/交换链/管线）
     // 注：Vulkan 校验层（cfg.debug=true）在本机 loader 加载时崩溃（环境问题：
     // 搜狗输入法钩子与 loader 交互）。默认关闭以保证稳定运行；
@@ -92,17 +177,23 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
     cfg.debug = false;
     cfg.msaaSamples = 4;
     std::string vkError;
+    spdlog::info("[ui] init: VulkanRenderer init (instance/device/swapchain) ...");
     if (!vk_->init(window_, cfg, &vkError)) {
         spdlog::error("[ui] VulkanRenderer init failed: {}", vkError);
         return false;
     }
+    spdlog::info("[ui] init: VulkanRenderer ok");
     if (!initImGuiBackends()) {
+        spdlog::error("[ui] init: ImGui backends init FAILED");
         return false;
     }
+    spdlog::info("[ui] init: ImGui backends ok");
     // 设计系统（主方案 §7.6）
     UITheme::applyTheme();
+    spdlog::info("[ui] init: theme applied");
 
     // 设置加载（主方案 §12.2：布局 base64 恢复 + 相机/渲染参数）
+    spdlog::info("[ui] init: loading settings ...");
     auto settingsResult = persist::SettingsStore::load();
     if (settingsResult) {
         const auto& settings = settingsResult.value();
@@ -115,23 +206,37 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
         }
     }
     // 面板注册（主方案 §7.9：5 个工具面板 + 日志）
-    addModule(std::make_unique<MolListTool>());
-    addModule(std::make_unique<StylesTool>());
-    addModule(std::make_unique<MaterialTool>());
+    {
+        auto ml = std::make_unique<MolListTool>();
+        molListTool_ = ml.get();
+        addModule(std::move(ml));
+    }
+    {
+        auto st = std::make_unique<StylesTool>();
+        stylesTool_ = st.get();
+        addModule(std::move(st));
+    }
+    {
+        auto mt = std::make_unique<MaterialTool>();
+        materialTool_ = mt.get();
+        addModule(std::move(mt));
+    }
     addModule(std::make_unique<ExportImgTool>());
     addModule(std::make_unique<PaintingTool>());
-    molScene_.init(renderer_, camera_);
+    spdlog::info("[ui] init: panels registered");
+    spdlog::info("[ui] init: MolScene viewport (offscreen renderer) ...");
+    molScene_.init(renderer_, camera_, vk_);
+    spdlog::info("[ui] init: MolScene viewport ready");
     return true;
 }
 
 void ViewControl::shutdown() {
     // ImGui 后端与窗口清理（Vulkan 设备由 VulkanRenderer 管理）
     if (window_) {
-        fprintf(stderr, "[s] imgui vulkan\n"); ImGui_ImplVulkan_Shutdown();
-        fprintf(stderr, "[s] imgui glfw\n"); ImGui_ImplGlfw_Shutdown();
-        fprintf(stderr, "[s] ctx\n"); ImGui::DestroyContext();
-        fprintf(stderr, "[s] glfwDestroyWindow\n"); glfwDestroyWindow(window_);
-        fprintf(stderr, "[s] view done\n");
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+        glfwDestroyWindow(window_);
         window_ = nullptr;
     }
 }
@@ -201,18 +306,33 @@ bool ViewControl::initImGuiBackends() {
 }
 
 void ViewControl::runLoop() {
+    // 帧率上限：默认 120 FPS（主方案 §7.2 验收项——帧率不受限导致 CPU/GPU
+    // 占用异常；睡眠到帧预算结束，负载低时省资源、帧率稳定在目标附近）。
+    constexpr float kTargetFps = 120.0f;
+    constexpr double kFrameBudget = 1.0 / static_cast<double>(kTargetFps);
     lastFrameTime_ = static_cast<float>(glfwGetTime());
+
+    /// @brife 进入主循环
+    /// frameStart记录本这一帧开始的时刻，后面用来算本帧一共花了多久，做帧率限制
     while (!windowShouldClose_) {
+        const double frameStart = glfwGetTime();
+
+        // glfwPollEvents()：处理窗口所有系统事件：鼠标移动、按键、窗口缩放、点击关闭按钮。非阻塞，马上返回。
         glfwPollEvents();
+        // glfwWindowShouldClose(window_)：读取窗口是否收到关闭信号（点右上角 ×），赋值给标记，下次循环就退
         windowShouldClose_ = glfwWindowShouldClose(window_);
 
-        const float now = static_cast<float>(glfwGetTime());
+        const auto now = static_cast<float>(glfwGetTime());
         const float dt = std::min(now - lastFrameTime_, 0.1f);
         lastFrameTime_ = now;
         fps_ = fps_ * 0.95f + (dt > 0.0f ? 1.0f / dt : 0.0f) * 0.05f;
         UITheme::advanceTime(dt);
         if (svc_->bus) {
             svc_->bus->poll();
+        }
+        // QS.5 文件导入多线程：后台解析完成 → 主线程合并（渲染器读场景须在主线程）
+        if (ioCtl_) {
+            ioCtl_->consumeParsed();
         }
 
         newFrame(dt);
@@ -232,6 +352,13 @@ void ViewControl::runLoop() {
         vk_->beginFrame();
         vk_->execute(empty, view);
         vk_->endFrame();
+
+        // 帧率限制：本帧耗时 < 预算 → 睡眠补足剩余时间（稳定上限，省资源）
+        const double elapsed = glfwGetTime() - frameStart;
+        const double remain = kFrameBudget - elapsed;
+        if (remain > 0.0) {
+            std::this_thread::sleep_for(std::chrono::duration<double>(remain));
+        }
     }
     // 退出时保存设置（主方案 §12.2：布局 base64 + 相机）
     persist::Settings settings;
@@ -282,8 +409,10 @@ void ViewControl::render() {
     renderLoadingOverlay();
 }
 
+
 void ViewControl::renderMainMenuBar() {
-    // 自绘标题栏（主方案 §7.3：菜单 + 拖拽区 + 居中标题 + 窗口按钮）
+
+    // 自绘标题栏（主方案 §7.3：菜单 + 拖拽区 + 居中标题 + 窗口按钮）。
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->Pos);
     ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, 34));
@@ -296,6 +425,8 @@ void ViewControl::renderMainMenuBar() {
                      ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_MenuBar |
                      ImGuiWindowFlags_NoSavedSettings);
+    // 记录标题栏实际高度（setupDocking 用它做 DockSpace 偏移，随字号/内边距自适应）
+    titleBarHeight_ = ImGui::GetWindowHeight();
     if (ImGui::BeginMenuBar()) {
         // 菜单（主方案 §7.3）
         if (ImGui::BeginMenu("文件")) {
@@ -344,59 +475,170 @@ void ViewControl::renderMainMenuBar() {
             ImGui::MenuItem("关于 MolecuLens 0.1.0", nullptr, false);
             ImGui::EndMenu();
         }
+
+
+        // —— 标题栏右侧控件：窗口按钮 + 居中标题 + 拖拽区 ——
+        // 宽度取视口尺寸：自绘标题栏铺满整个窗口，最大化后随之变宽不溢出
+        const float barW = viewport->Size.x;
+        const float bw = 32.0f, bh = 26.0f;              // 窗口按钮尺寸
+        const float buttonsW = 3.0f * bw + 8.0f;         // 三按钮 + 按钮间距
+        const ImVec2 row = ImGui::GetCursorScreenPos();  // 菜单之后的行位置
+
+        // 同步真实窗口状态（外部最大化/还原/任务栏操作后 flag 可能过期），
+        // 保证按钮图标与切换逻辑与窗口实际状态一致。
+        maximized_ = windowIsMaximized();
+
+        // 1) 窗口按钮（最小化/最大化/关闭）—— 靠右，距右缘 8px
+        const float btnX = viewport->Pos.x + barW - buttonsW - 8.0f;
+        ImGui::SetCursorScreenPos(ImVec2(btnX, row.y));
+        if (ImGui::Button("\xe2\x80\x94", ImVec2(bw, bh))) {          // 最小化
+            glfwIconifyWindow(window_);
+        }
+        // 最大化/还原：图标随状态切换（□ 最大化 / 双框 还原），点击切换
+        ImGui::SetCursorScreenPos(ImVec2(btnX + bw, row.y));
+        ImGui::PushID("maximize");
+        if (ImGui::Button("", ImVec2(bw, bh))) {
+            toggleMaximize();
+        }
+        const bool mz = maximized_;
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(mz ? "还原" : "最大化");
+        }
+        drawWindowGlyph(ImGui::GetItemRectMin(), ImGui::GetItemRectSize(),
+                        mz ? WindowGlyph::Restore : WindowGlyph::Maximize);
+        ImGui::PopID();
+        ImGui::SetCursorScreenPos(ImVec2(btnX + 2 * bw, row.y));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::C_DANGER);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui::C_DANGER);
+        if (ImGui::Button("×", ImVec2(bw, bh))) {          // 关闭
+            windowShouldClose_ = true;
+        }
+        ImGui::PopStyleColor(3);
+
+        // 2) 居中标题（相对整个标题栏水平居中，垂直居中于按钮高度）
+        const ImVec2 titleSize = ImGui::CalcTextSize("MolecuLens");
+        ImGui::SetCursorScreenPos(
+            ImVec2(viewport->Pos.x + (barW - titleSize.x) * 0.5f,
+                   row.y + (bh - titleSize.y) * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ui::C_ACCENT_HI);
+        ImGui::Text("MolecuLens");
+        ImGui::PopStyleColor();
+
+        // 3) 拖拽区 —— 最后绘制，铺满"菜单之后 → 按钮之前"并接收点击；
+        //    透明按钮盖在标题上不影响显示，标题区域点击同样可拖动窗口。
+        //    拖拽用"按下时光标相对窗口的偏移"定位：每帧窗口位置 =
+        //    当前窗口位置 + (光标相对位移)，光标坐标用 glfwGetCursorPos
+        //    （窗口相对坐标），避免 MouseDelta 累加在快速移动时漂移。
+        const float dragW = (btnX - row.x) - 8.0f;
+        ImGui::SetCursorScreenPos(ImVec2(row.x, row.y));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
+        ImGui::InvisibleButton("##drag", ImVec2(std::max(1.0f, dragW), bh));
+        ImGui::PopStyleColor(2);
+        // 按下帧（item 尚未进入拖动）就记录偏移——IsItemClicked 只在点击帧为真，
+        // 若放在"拖动守卫"内会在点击帧被跳过，导致偏移恒为 0、窗口跳变。
+        static float s_grabX = 0.0f, s_grabY = 0.0f;
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+            double cx, cy;
+            glfwGetCursorPos(window_, &cx, &cy);
+            s_grabX = static_cast<float>(cx);
+            s_grabY = static_cast<float>(cy);
+        }
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            double cx, cy;
+            glfwGetCursorPos(window_, &cx, &cy);
+            int wx, wy;
+            glfwGetWindowPos(window_, &wx, &wy);
+            glfwSetWindowPos(window_, wx + static_cast<int>(cx - s_grabX),
+                             wy + static_cast<int>(cy - s_grabY));
+        }
+
         ImGui::EndMenuBar();
     }
-    // 拖拽区（InvisibleButton 铺满剩余空间；IsMouseDragging → glfwSetWindowPos，§7.3）
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
-    const float avail = ImGui::GetContentRegionAvail().x - 100.0f;
-    ImGui::InvisibleButton("##drag", ImVec2(avail, 24));
-    ImGui::PopStyleColor(2);
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-        int x, y;
-        glfwGetWindowPos(window_, &x, &y);
-        const ImVec2 delta = ImGui::GetIO().MouseDelta;
-        glfwSetWindowPos(window_, x + static_cast<int>(delta.x),
-                         y + static_cast<int>(delta.y));
-    }
-    // 居中标题（主方案 §7.3）
-    const ImVec2 titlePos = ImGui::GetCursorScreenPos();
-    const float titleW = ImGui::CalcTextSize("MolecuLens").x;
-    ImGui::SetCursorScreenPos(ImVec2(titlePos.x + (avail - titleW) * 0.5f - 40.0f,
-                                     titlePos.y));
-    ImGui::PushStyleColor(ImGuiCol_Text, ui::C_ACCENT_HI);
-    ImGui::Text("MolecuLens");
-    ImGui::PopStyleColor();
-    ImGui::SetCursorScreenPos(titlePos);
-    // 窗口按钮（最小化/最大化/关闭，主方案 §7.3）
-    const float bw = 32.0f, bh = 26.0f;
-    ImGui::SameLine(ImGui::GetWindowWidth() - 3 * bw - 8);
-    if (ImGui::Button("—", ImVec2(bw, bh))) {
-        glfwIconifyWindow(window_);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("□", ImVec2(bw, bh))) {
-        toggleMaximize();
-    }
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ui::C_DANGER);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ui::C_DANGER);
-    if (ImGui::Button("×", ImVec2(bw, bh))) {
-        windowShouldClose_ = true;
-    }
-    ImGui::PopStyleColor(3);
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
+}
+
+bool ViewControl::windowIsMaximized() const {
+#ifdef _WIN32
+    HWND hwnd = glfwGetWin32Window(window_);
+    if (!hwnd) {
+        return maximized_;
+    }
+    // 原生最大化（WS_MAXIMIZE 置位）
+    if (::IsZoomed(hwnd)) {
+        return true;
+    }
+    // 自绘最大化：SetWindowPos 铺满工作区（不置 WS_MAXIMIZE 位，IsZoomed 为假），
+    // 用"当前矩形 ≈ 所在监视器工作区"判断，外部还原后矩形变化 → 状态自动同步。
+    RECT cur, work{};
+    if (!GetWindowRect(hwnd, &cur)) {
+        return maximized_;
+    }
+    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{sizeof(mi)};
+    if (mon && GetMonitorInfo(mon, &mi)) {
+        work = mi.rcWork;
+    } else {
+        SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
+    }
+    constexpr int kTol = 4;   // 像素容差（任务栏/边框/缩放误差）
+    return (std::abs(cur.left - work.left) <= kTol &&
+            std::abs(cur.top - work.top) <= kTol &&
+            std::abs(cur.right - work.right) <= kTol &&
+            std::abs(cur.bottom - work.bottom) <= kTol);
+#else
+    return maximized_;
+#endif
 }
 
 void ViewControl::toggleMaximize() {
     if (!window_) {
         return;
     }
-    // 最大化/还原切换（主方案 §7.3：记住位置）
+#ifdef _WIN32
+    // 无边框窗口用 glfwMaximizeWindow/glfwRestoreWindow 时 GLFW 内部尺寸不同步
+    // （ImGui DisplaySize 停留在旧值，UI 不铺满、还原失效）。改用 Win32 手动
+    // 最大化到工作区 / 还原到记录位置，SetWindowPos → WM_SIZE → GLFW 同步尺寸。
+    if (HWND hwnd = glfwGetWin32Window(window_)) {
+        if (windowIsMaximized()) {
+            // 还原
+            if (restoreRectValid_) {
+                SetWindowPos(hwnd, nullptr, restoreL_, restoreT_,
+                             restoreR_ - restoreL_, restoreB_ - restoreT_,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            } else {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+        } else {
+            // 最大化：先记录当前矩形，再铺满工作区（排除任务栏）
+            RECT cur;
+            if (GetWindowRect(hwnd, &cur)) {
+                restoreRectValid_ = true;
+                restoreL_ = cur.left;
+                restoreT_ = cur.top;
+                restoreR_ = cur.right;
+                restoreB_ = cur.bottom;
+            }
+            RECT work{};
+            HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{sizeof(mi)};
+            if (mon && GetMonitorInfo(mon, &mi)) {
+                work = mi.rcWork;
+            } else {
+                SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
+            }
+            SetWindowPos(hwnd, HWND_TOP, work.left, work.top,
+                         work.right - work.left, work.bottom - work.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        maximized_ = windowIsMaximized();   // 同步到操作后的真实状态
+        return;
+    }
+#endif
+    // 非 Windows 兜底
     if (maximized_) {
         glfwRestoreWindow(window_);
         maximized_ = false;
@@ -410,11 +652,16 @@ void ViewControl::setupDocking() {
     // DockSpace 布局（主方案 §7.4：先右分 25%，再下分 5%，right 再下分 55%；
     // 用 WorkSize 而非 DisplaySize）
     ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + 34.0f));
+    // 偏移用实测标题栏高度（renderMainMenuBar 每帧测量）：字号/内边距变化后
+    // 高度不再是 34，硬编码会导致 DockSpace 上移/下移、与标题栏重叠或留缝。
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + titleBarHeight_));
     ImGui::SetNextWindowSize(
-        ImVec2(viewport->Size.x, viewport->Size.y - 34.0f));
+        ImVec2(viewport->Size.x, viewport->Size.y - titleBarHeight_));
     ImGui::SetNextWindowViewport(viewport->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    // 窗口内边距清零：DockSpace 才能铺满整个 Dock 窗口，不因默认 14px 内边距
+    // 在右/下侧溢出。
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ui::C_BG);
     ImGui::Begin("##dockspace", nullptr,
                  ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
@@ -422,12 +669,13 @@ void ViewControl::setupDocking() {
                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_MenuBar);
     ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
 
     ImGuiID dockspaceId = ImGui::GetID("MolecuLensDock");
-    const ImVec2 workSize = ImGui::GetWindowSize();
-    ImGui::DockSpace(dockspaceId, ImVec2(workSize.x, workSize.y),
-                     ImGuiDockNodeFlags_None);
+    // DockSpace 用实际内容区域尺寸：GetWindowSize 含内边距，若仍用它会令
+    // Dock 区域超出内容区（右/下溢出、窗口错位）。
+    const ImVec2 workSize = ImGui::GetContentRegionAvail();
+    ImGui::DockSpace(dockspaceId, workSize, ImGuiDockNodeFlags_None);
 
     if (!layoutInitialized_) {
         // 默认布局（主方案 §7.4）
@@ -442,7 +690,13 @@ void ViewControl::setupDocking() {
         ImGuiID rightBot = ImGui::DockBuilderSplitNode(
             right, ImGuiDir_Down, 0.55f, nullptr, &right);
 
-        ImGui::DockBuilderDockWindow("3D 视口", dockspaceId);
+        // 3D 主视口：中央节点禁用标签栏（NoTabBar）——上方不再显示
+        // 窗口标签/功能栏（配合视口窗口 NoTitleBar），"主视口上方工具栏
+        // 默认隐藏且不再显示"（主方案 §7.4 主视图沉浸式）。
+        ImGui::DockBuilderDockWindow("##3D 视口", dockspaceId);
+        if (ImGuiDockNode* viewNode = ImGui::DockBuilderGetNode(dockspaceId)) {
+            viewNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
+        }
         ImGui::DockBuilderDockWindow("分子列表", right);
         ImGui::DockBuilderDockWindow("渲染设置", rightBot);
         ImGui::DockBuilderDockWindow("材质选择", rightBot);
@@ -594,14 +848,31 @@ void ViewControl::renderLoadingOverlay() {
     }
 }
 
+void ViewControl::svcScene(SceneController* ctl) {
+    sceneCtl_ = ctl;
+    // 分子列表"删除"直通场景控制器
+    if (molListTool_) {
+        molListTool_->setSceneController(ctl);
+    }
+}
+
 void ViewControl::svcRender(RenderController* ctl) {
-    // 预留：面板直接驱动渲染参数（M2 接入）
-    (void)ctl;
+    renderCtl_ = ctl;
+    // 渲染设置面板直通背景/雾效参数
+    if (stylesTool_) {
+        stylesTool_->setRenderController(ctl);
+    }
 }
 
 void ViewControl::svcRep(RepresentationController* ctl) {
-    // 预留：面板直接驱动表示列表（M2 接入）
-    (void)ctl;
+    repCtl_ = ctl;
+    // 渲染设置（样式/着色/缩放）与材质面板直通表示控制器
+    if (stylesTool_) {
+        stylesTool_->setRepController(ctl);
+    }
+    if (materialTool_) {
+        materialTool_->setRepController(ctl);
+    }
 }
 
 void ViewControl::renderImGuiUi(VkCommandBuffer cmd) {

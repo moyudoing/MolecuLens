@@ -7,9 +7,9 @@
 
 // viewProj        : mat4   (0-64)
 // cameraPos       : vec4   (64-80)
-// lightDir        : vec4   (80-96)   指向光源方向（-dir）
-// lightColor      : vec4   (96-112)
-// ambient         : vec4   (112-128) rgb = 环境光色, w = 强度
+// lightDir        : vec4   (80-96)   全局光：rgb = 天顶色（半球环境光）
+// lightColor      : vec4   (96-112)  全局光：rgb = 地面色（半球环境光）
+// ambient         : vec4   (112-128) rgb = 均匀环境光基础色, w = 半球光强度
 // fog             : vec4   (128-144) x = near, y = far, z = mode(0关/1线性/2指数/3指数²), w = density
 // sceneProps      : vec4   (144-160) x = 全局缩放, yzw 保留
 struct GlobalUBO {
@@ -48,15 +48,10 @@ float fogFactor(GlobalUBO ubo, float dist) {
     return clamp(f, 0.0, 1.0);
 }
 
-// Blinn-Phong + metallic/roughness 高光缩放（主方案 §6.6.5）
-vec3 shadeBlinnPhong(GlobalUBO ubo, PushMaterial mat, vec3 N, vec3 V, vec3 P, vec3 baseColor) {
-    vec3 L = normalize(-ubo.lightDir.xyz);
-    vec3 H = normalize(L + V);
-    float ndl = max(dot(N, L), 0.0);
-    float ndh = max(dot(N, H), 0.0);
-    float spec = pow(ndh, max(mat.shininess, 0.001)) * (1.0 - mat.metallic);
-    vec3 ambient  = ubo.ambient.rgb * ubo.ambient.w * baseColor;
-    vec3 diffuse  = baseColor * ubo.lightColor.rgb * ndl;
-    vec3 specular = mat.specular.rgb * spec * ubo.lightColor.rgb;
-    return ambient + diffuse + specular;
+// 全局光照（无方向光/点光源）：半球环境光 mix(地面色, 天顶色, N.y) + 均匀环境光。
+// 各片元着色器内联实现（GLSL 无 include）。
+vec3 shadeGlobal(GlobalUBO ubo, vec3 N, vec3 baseColor) {
+    float up = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);              // 0=朝下 1=朝上
+    vec3 hemi = mix(ubo.lightColor.rgb, ubo.lightDir.rgb, up); // 地面色→天顶色
+    return baseColor * (ubo.ambient.rgb + hemi * ubo.ambient.w);
 }

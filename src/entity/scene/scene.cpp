@@ -6,15 +6,24 @@
 
 #include "entity/scene/scene.h"
 
+#include <algorithm>
+
 namespace moleculens::entity {
 
 namespace {
 
-// 取实例帧坐标（帧 0 兜底），应用实例位姿 → 世界坐标段
+// 取实例帧坐标（帧 0 兜底），应用实例位姿（× 体系位姿）→ 世界坐标段
 void fillInstanceSegment(SceneStructure& scene, const MoleculeInstance& mi,
                          std::vector<glm::vec3>& out) {
     const size_t n = scene.structures()[mi.structureIndex].elements.size();
-    const glm::mat4 m = mi.transform.matrix();
+    // 体系位姿合成：整个体系作为一个整体对象渲染（体系变换 × 实例变换）
+    glm::mat4 m = mi.transform.matrix();
+    if (mi.systemId != UINT32_MAX) {
+        const uint32_t si = scene.systemIndexById(mi.systemId);
+        if (si != UINT32_MAX) {
+            m = scene.systems()[si].transform.matrix() * m;
+        }
+    }
 
     const std::vector<glm::vec3>* frame = nullptr;
     if (mi.trajectory && !mi.trajectory->frames.empty()) {
@@ -44,7 +53,8 @@ uint32_t SceneStructure::registerStructure(const MoleculeStructure& ms) {
     return index;
 }
 
-uint32_t SceneStructure::addInstance(uint32_t structureIndex, const Transform& tm) {
+uint32_t SceneStructure::addInstance(uint32_t structureIndex, const Transform& tm,
+                                     uint32_t systemId) {
     if (structureIndex >= structuresPool_.size()) {
         return UINT32_MAX;
     }
@@ -55,9 +65,11 @@ uint32_t SceneStructure::addInstance(uint32_t structureIndex, const Transform& t
     auto traj = std::make_shared<Trajectory>();
     traj->frames.emplace_back();  // 静态 1 帧
     mi.trajectory = traj;
+    mi.systemId = resolveSystemId(systemId);
 
     const uint32_t index = static_cast<uint32_t>(instances_.size());
     instances_.push_back(std::move(mi));
+    rebuildSystemMembership();
 
     // 坐标段追加：该结构长度 × 1 帧（世界坐标 = 帧坐标 × 位姿）
     fillInstanceSegment(*this, instances_[index], coordsSoA_.positions);
@@ -75,7 +87,8 @@ uint32_t SceneStructure::addInstance(uint32_t structureIndex, const Transform& t
 
 uint32_t SceneStructure::addTrajectoryInstance(uint32_t structureIndex,
                                                const Transform& tm,
-                                               std::shared_ptr<Trajectory> traj) {
+                                               std::shared_ptr<Trajectory> traj,
+                                               uint32_t systemId) {
     if (structureIndex >= structuresPool_.size() || !traj || traj->frames.empty()) {
         return UINT32_MAX;
     }
@@ -84,9 +97,11 @@ uint32_t SceneStructure::addTrajectoryInstance(uint32_t structureIndex,
     mi.transform = tm;
     mi.name = "molecule_" + std::to_string(instances_.size());
     mi.trajectory = std::move(traj);
+    mi.systemId = resolveSystemId(systemId);
 
     const uint32_t index = static_cast<uint32_t>(instances_.size());
     instances_.push_back(std::move(mi));
+    rebuildSystemMembership();
 
     fillInstanceSegment(*this, instances_[index], coordsSoA_.positions);
     const size_t n = structuresPool_[structureIndex].elements.size();
@@ -101,6 +116,115 @@ uint32_t SceneStructure::addTrajectoryInstance(uint32_t structureIndex,
     return index;
 }
 
+uint32_t SceneStructure::addSystem(const std::string& name) {
+    SystemGroup sys;
+    sys.id = nextSystemId_++;
+    sys.name = name.empty() ? ("system_" + std::to_string(systems_.size())) : name;
+    systems_.push_back(std::move(sys));
+    if (currentSystemId_ == UINT32_MAX) {
+        currentSystemId_ = sys.id;   // 首个体系自动设为当前
+    }
+    setDirty(DIRTY_INSTANCE);
+    return sys.id;
+}
+
+bool SceneStructure::removeSystem(uint32_t systemId) {
+    const uint32_t si = systemIndexById(systemId);
+    if (si == UINT32_MAX) {
+        return false;
+    }
+    // 删除该体系全部实例（成员下标已失效，全部擦除后整体重建成员表）
+    std::vector<uint32_t> victims = systems_[si].instanceIndices;
+    std::sort(victims.begin(), victims.end(), std::greater<uint32_t>());
+    for (const uint32_t idx : victims) {
+        instances_.erase(instances_.begin() + idx);
+    }
+    rebuildSystemMembership();
+    systems_.erase(systems_.begin() + si);
+    if (currentSystemId_ == systemId) {
+        currentSystemId_ = systems_.empty() ? UINT32_MAX : systems_.front().id;
+    }
+    rebuildCoordsSoA();
+    setDirty(DIRTY_INSTANCE | DIRTY_COORDS);
+    return true;
+}
+
+bool SceneStructure::setSystemVisible(uint32_t systemId, bool visible) {
+    const uint32_t si = systemIndexById(systemId);
+    if (si == UINT32_MAX) {
+        return false;
+    }
+    systems_[si].visible = visible;
+    setDirty(DIRTY_INSTANCE);
+    return true;
+}
+
+bool SceneStructure::setSystemTransform(uint32_t systemId, const Transform& tm) {
+    const uint32_t si = systemIndexById(systemId);
+    if (si == UINT32_MAX) {
+        return false;
+    }
+    systems_[si].transform = tm;
+    rebuildCoordsSoA();   // 体系位姿变更 → 成员世界坐标重算
+    setDirty(DIRTY_INSTANCE | DIRTY_COORDS);
+    return true;
+}
+
+bool SceneStructure::setSystemRenderMode(uint32_t systemId, SystemRenderMode mode) {
+    const uint32_t si = systemIndexById(systemId);
+    if (si == UINT32_MAX) {
+        return false;
+    }
+    systems_[si].renderMode = mode;
+    setDirty(DIRTY_INSTANCE);   // 模式变更 → 命令流重建（RenderMode 命令重发）
+    return true;
+}
+
+bool SceneStructure::renameSystem(uint32_t systemId, const std::string& name) {
+    const uint32_t si = systemIndexById(systemId);
+    if (si == UINT32_MAX) {
+        return false;
+    }
+    systems_[si].name = name;
+    setDirty(DIRTY_INSTANCE);
+    return true;
+}
+
+bool SceneStructure::moveInstanceToSystem(uint32_t instanceIndex, uint32_t systemId) {
+    if (instanceIndex >= instances_.size() || systemIndexById(systemId) == UINT32_MAX) {
+        return false;
+    }
+    instances_[instanceIndex].systemId = systemId;
+    rebuildSystemMembership();
+    rebuildCoordsSoA();
+    setDirty(DIRTY_INSTANCE | DIRTY_COORDS);
+    return true;
+}
+
+uint32_t SceneStructure::systemIdOfInstance(uint32_t instanceIndex) const {
+    if (instanceIndex >= instances_.size()) {
+        return UINT32_MAX;
+    }
+    return instances_[instanceIndex].systemId;
+}
+
+uint32_t SceneStructure::systemIndexById(uint32_t systemId) const {
+    for (size_t i = 0; i < systems_.size(); ++i) {
+        if (systems_[i].id == systemId) {
+            return static_cast<uint32_t>(i);
+        }
+    }
+    return UINT32_MAX;
+}
+
+bool SceneStructure::setCurrentSystem(uint32_t systemId) {
+    if (systemIndexById(systemId) == UINT32_MAX) {
+        return false;
+    }
+    currentSystemId_ = systemId;
+    return true;
+}
+
 uint64_t SceneStructure::bumpSerial() {
     ++serial_;
     return serial_;
@@ -111,6 +235,7 @@ void SceneStructure::removeInstance(uint32_t instanceIndex) {
         return;
     }
     instances_.erase(instances_.begin() + instanceIndex);
+    rebuildSystemMembership();   // 实例下标前移 → 体系成员表整体重建
     rebuildCoordsSoA();
     setDirty(DIRTY_INSTANCE | DIRTY_COORDS);
 }
@@ -128,6 +253,9 @@ void SceneStructure::setInstanceTransform(uint32_t instanceIndex, const Transfor
         return;
     }
     instances_[instanceIndex].transform = tm;
+    // 位姿变更必须重算世界坐标（此前只置脏，rebuildCoordsSoA 无调用点 →
+    // 移动分子后渲染仍用旧坐标，屏幕不变——见 moleculens-fixes）
+    rebuildCoordsSoA();
     setDirty(DIRTY_INSTANCE | DIRTY_COORDS);
 }
 
@@ -207,6 +335,28 @@ std::string_view SceneStructure::atomName(uint32_t structureIndex, uint32_t atom
         return {};
     }
     return strings_.resolve(ms.atomNameIds[atomIndex]);
+}
+
+uint32_t SceneStructure::resolveSystemId(uint32_t requested) {
+    if (requested != UINT32_MAX && systemIndexById(requested) != UINT32_MAX) {
+        return requested;
+    }
+    if (currentSystemId_ != UINT32_MAX && systemIndexById(currentSystemId_) != UINT32_MAX) {
+        return currentSystemId_;
+    }
+    return addSystem();   // 无可用体系 → 自动新建
+}
+
+void SceneStructure::rebuildSystemMembership() {
+    for (auto& sys : systems_) {
+        sys.instanceIndices.clear();
+    }
+    for (uint32_t i = 0; i < instances_.size(); ++i) {
+        const uint32_t si = systemIndexById(instances_[i].systemId);
+        if (si != UINT32_MAX) {
+            systems_[si].instanceIndices.push_back(i);
+        }
+    }
 }
 
 } // namespace moleculens::entity

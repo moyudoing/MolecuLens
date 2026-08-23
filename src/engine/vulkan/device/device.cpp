@@ -7,7 +7,6 @@
 #include "engine/vulkan/device/device.h"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 #include <set>
 
@@ -75,13 +74,10 @@ int rateDevice(VkPhysicalDevice device) {
 } // namespace
 
 VulkanDevice::~VulkanDevice() {
-    fprintf(stderr, "[s] ~VulkanDevice\n");
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
-    fprintf(stderr, "[s] ~VulkanDevice idle\n");
     cleanupSwapchain();
-    fprintf(stderr, "[s] ~VulkanDevice swapchain cleaned\n");
     for (auto fence : inFlightFences_) {
         vkDestroyFence(device_, fence, nullptr);
     }
@@ -357,8 +353,9 @@ bool VulkanDevice::createLogicalDevice() {
     }
 
     VkPhysicalDeviceFeatures features{};
-    features.fillModeNonSolid = VK_TRUE;   // 线框支持（wireframe 风格预留）
+    features.fillModeNonSolid = VK_TRUE;   // 线框支持（体系线框模式）
     features.samplerAnisotropy = VK_TRUE;
+    features.largePoints = VK_TRUE;        // 点模式：gl_PointSize > 1（体系点模式）
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -437,14 +434,17 @@ VkPresentModeKHR VulkanDevice::choosePresentMode() const {
     std::vector<VkPresentModeKHR> modes(count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice_, surface_, &count,
                                               modes.data());
+    // vsync=true → FIFO（真垂直同步，等待 vblank，帧率被显示器刷新率锁定）。
+    // 之前优先 MAILBOX：MAILBOX 不等待 vblank、按提交速率尽力呈现 → 帧率不受限、
+    // GPU 满负荷空转（FPS 过高）。分子查看器静态画面用 FIFO 最合适。
     if (config_.vsync) {
         for (auto m : modes) {
-            if (m == VK_PRESENT_MODE_MAILBOX_KHR) {
+            if (m == VK_PRESENT_MODE_FIFO_KHR) {
                 return m;
             }
         }
     }
-    return VK_PRESENT_MODE_FIFO_KHR;
+    return VK_PRESENT_MODE_IMMEDIATE_KHR;
 }
 
 VkExtent2D VulkanDevice::chooseExtent() const {
@@ -596,22 +596,38 @@ VkCommandBuffer VulkanDevice::beginSingleTimeCommands() {
     alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     alloc.commandBufferCount = 1;
     VkCommandBuffer cmd;
-    vkAllocateCommandBuffers(device_, &alloc, &cmd);
+    if (vkAllocateCommandBuffers(device_, &alloc, &cmd) != VK_SUCCESS) {
+        spdlog::error("[backend] beginSingleTimeCommands: vkAllocateCommandBuffers failed");
+        return VK_NULL_HANDLE;
+    }
 
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &begin);
+    if (vkBeginCommandBuffer(cmd, &begin) != VK_SUCCESS) {
+        spdlog::error("[backend] beginSingleTimeCommands: vkBeginCommandBuffer failed");
+        return VK_NULL_HANDLE;
+    }
     return cmd;
 }
 
 void VulkanDevice::endSingleTimeCommands(VkCommandBuffer cmd) {
-    vkEndCommandBuffer(cmd);
+    if (cmd == VK_NULL_HANDLE) {
+        return;
+    }
+    if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+        spdlog::error("[backend] endSingleTimeCommands: vkEndCommandBuffer failed");
+        vkFreeCommandBuffers(device_, commandPool_, 1, &cmd);
+        return;
+    }
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
-    vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
+    const VkResult sub = vkQueueSubmit(graphicsQueue_, 1, &submit, VK_NULL_HANDLE);
+    if (sub != VK_SUCCESS) {
+        spdlog::error("[backend] endSingleTimeCommands: vkQueueSubmit failed ({})", static_cast<int>(sub));
+    }
     vkQueueWaitIdle(graphicsQueue_);
     vkFreeCommandBuffers(device_, commandPool_, 1, &cmd);
 }

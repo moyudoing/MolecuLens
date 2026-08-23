@@ -5,9 +5,11 @@
 
 #include "engine/rep/representer.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "engine/render/render_parameter.h"
+#include "engine/style/quicksurf/quicksurf.h"
 #include "entity/element/element.h"
 #include "entity/molecule/molecule.h"
 #include "entity/scene/scene.h"
@@ -20,9 +22,10 @@ void drawBallAndStick(const RepContext&, SceneCommandList&);
 void drawStick(const RepContext&, SceneCommandList&);
 void drawWireframe(const RepContext&, SceneCommandList&);
 void drawCartoon(const RepContext&, SceneCommandList&);
+void drawSurface(const RepContext&, SceneCommandList&);
+void drawQuickSurf(const RepContext&, SceneCommandList&);
 
-// 预留风格（M2 后落地）：surface/label
-void drawSurfacePlaceholder(const RepContext&, SceneCommandList&);
+// 预留风格（M2 后落地）：label
 void drawLabelPlaceholder(const RepContext&, SceneCommandList&);
 
 const Representer::DrawFn Representer::kDrawTable[
@@ -32,8 +35,9 @@ const Representer::DrawFn Representer::kDrawTable[
     drawBallAndStick,     // BallAndStick
     drawSpacefill,        // Spacefill
     drawCartoon,          // Cartoon
-    drawSurfacePlaceholder,  // Surface（P2）
+    drawSurface,          // Surface（vdW 表面，Marching Cubes）
     drawLabelPlaceholder,    // Label（M2）
+    drawQuickSurf,        // QuickSurf（高斯密度等值面）
 };
 
 namespace {
@@ -139,6 +143,20 @@ void Representer::generate(const Representation& rep,
     ctx.instanceIndex = instanceIndex;
     ctx.globalAtomBase = scene.globalAtomBase(instanceIndex);
     ctx.frameIndex = frameIndex;
+    // 体系渲染模式（每体系独立；后端据此切换 VkPipeline）
+    ctx.renderMode = 0;
+    if (mi.systemId != UINT32_MAX) {
+        const uint32_t si = scene.systemIndexById(mi.systemId);
+        if (si != UINT32_MAX) {
+            ctx.renderMode = static_cast<uint8_t>(scene.systems()[si].renderMode);
+        }
+    }
+
+    // 体系渲染模式命令：后端解码后切换到对应管线（实心/线框/透明/点）
+    RenderModeInst rmi;
+    rmi.mode = ctx.renderMode;
+    rmi.pad[0] = rmi.pad[1] = rmi.pad[2] = 0;
+    out.append(Cmd::RenderMode, &rmi, sizeof(rmi));
 
     // 材质状态（每表示一个材质，主方案 §6.6.3）
     MaterialBlock mat;
@@ -150,6 +168,9 @@ void Representer::generate(const Representation& rep,
     mat.metallic = rep.metallic;
     mat.roughness = rep.roughness;
     mat.opacity = rep.opacity;
+    if (ctx.renderMode == 2) {   // 透明模式：降低材质透明度（配合混合管线）
+        mat.opacity = std::min(mat.opacity, 0.5f);
+    }
     out.append(Cmd::MaterialBlock, &mat, sizeof(mat));
 
     // 分派
@@ -159,8 +180,7 @@ void Representer::generate(const Representation& rep,
     }
 }
 
-// —— 预留风格占位（M2/P2 落地）——
-void drawSurfacePlaceholder(const RepContext&, SceneCommandList&) {}
+// —— 预留风格占位（M2 落地）——
 void drawLabelPlaceholder(const RepContext&, SceneCommandList&) {}
 
 } // namespace moleculens::engine

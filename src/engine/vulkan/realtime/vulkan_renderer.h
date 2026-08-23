@@ -89,14 +89,17 @@ private:
         Buffer meshIdx;
         std::vector<SphereInst> spheres;
         std::vector<uint32_t> sphereMat;
+        std::vector<uint8_t>  sphereMode;   // 体系渲染模式（0实心/1线框/2透明/3点）
         std::vector<CylinderInst> cylinders;
         std::vector<uint32_t> cylinderMat;
+        std::vector<uint8_t>  cylinderMode;
         std::vector<LineInst> lines;
         std::vector<uint32_t> lineMat;
         struct Mesh {
             std::vector<TriMeshVertex> verts;
             std::vector<uint32_t> idx;
             uint32_t mat = 0;
+            uint8_t mode = 0;
         };
         std::vector<Mesh> meshes;
         std::vector<MaterialBlock> materials;
@@ -120,10 +123,20 @@ private:
     ShaderModule* lineFrag_ = nullptr;
     ShaderModule* meshVert_ = nullptr;
     ShaderModule* meshFrag_ = nullptr;
+    ShaderModule* pointVert_ = nullptr;
+    ShaderModule* pointFrag_ = nullptr;
+    // 每体系渲染模式一套管线（实心/线框/透明/点）
     Pipeline spherePipeline_;
+    Pipeline sphereWire_;
+    Pipeline sphereBlend_;
     Pipeline cylinderPipeline_;
-    Pipeline linePipeline_;
+    Pipeline cylinderWire_;
+    Pipeline cylinderBlend_;
     Pipeline meshPipeline_;
+    Pipeline meshWire_;
+    Pipeline meshBlend_;
+    Pipeline linePipeline_;
+    Pipeline point_;
 
     DescriptorSetLayout globalLayout_;
     UboDescriptorSet globalUbo_;
@@ -165,13 +178,14 @@ private:
 
     void recordFrame(const SceneCommandList& list, const RenderView& view);
     template <typename InstT>
-    void drawInstancedBatches(const std::vector<InstT>& instances,
-                              const std::vector<uint32_t>& mats,
-                              const std::vector<MaterialBlock>& materials,
-                              Buffer& instanceBuffer,
-                              const Buffer& mesh, const Buffer& meshIdx,
-                              uint32_t vertexCount, uint32_t indexCount,
-                              VkPipeline pipeline, VkDescriptorSet set);
+    void drawModeRuns(const std::vector<InstT>& instances,
+                      const std::vector<uint32_t>& mats,
+                      const std::vector<uint8_t>& modes,
+                      const std::vector<MaterialBlock>& materials,
+                      Buffer& instanceBuffer,
+                      const Buffer& mesh, const Buffer& meshIdx,
+                      uint32_t indexCount,
+                      const Pipeline* pipes[4], VkDescriptorSet set);
     VkPipelineLayout pipelineLayoutFor(VkPipeline pipeline) const;
 };
 

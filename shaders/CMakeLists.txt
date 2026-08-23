@@ -37,3 +37,8 @@ moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/pick_cyl.ver
                       ${CMAKE_BINARY_DIR}/gen/shaders/pick_cyl_vert.h)
 moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/pick.frag
                       ${CMAKE_BINARY_DIR}/gen/shaders/pick_frag.h)
+# 点模式（体系渲染模式 = 点）
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/point.vert
+                      ${CMAKE_BINARY_DIR}/gen/shaders/point_vert.h)
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/point.frag
+                      ${CMAKE_BINARY_DIR}/gen/shaders/point_frag.h)

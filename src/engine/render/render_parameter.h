@@ -15,6 +15,19 @@
 
 namespace moleculens::engine {
 
+// 光照参数（全局光/全局光照方案，无方向光/点光源；主方案 §6.6.4 光照 → 全局光）。
+// 全局 UBO 光照来源：RenderView 携带 → 各后端统一从 view 构建（而非各自硬编码）。
+// 语义与着色器 GlobalUBO 匹配：skyColor → lightDir 槽（天顶色）、groundColor →
+// lightColor 槽（地面色）、ambientColor+w → ambient 槽（基础色+半球光强度）。
+struct LightParams {
+    glm::vec3 skyColor{1.0f, 1.0f, 1.0f};         // 天顶色（半球上方）
+    glm::vec3 groundColor{0.35f, 0.4f, 0.5f};     // 地面色（半球下方）
+    glm::vec3 ambientColor{0.55f, 0.6f, 0.75f};   // 均匀环境光基础色
+    float ambientIntensity = 0.45f;               // 半球光强度
+
+    static LightParams defaults() { return {}; }
+};
+
 // 键渲染参数：计算键圆柱端点（保证"键不穿球、球不吞键"）
 struct BondRenderParams {
     // 输入：两端原子中心与球半径、键圆柱半径

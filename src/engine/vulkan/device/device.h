@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -55,7 +56,7 @@ public:
     void destroySwapchain();
     bool recreateSwapchain();          // resize/framebuffer 失效时
 
-    VkDevice device() const { return device_; }
+    [[nodiscard]] VkDevice device() const { return device_; }
     VkInstance instance() const { return instance_; }
     VkPhysicalDevice physicalDevice() const { return physicalDevice_; }
     VkSurfaceKHR surface() const { return surface_; }
@@ -86,6 +87,13 @@ public:
     // 资源辅助
     VkCommandBuffer beginSingleTimeCommands();
     void endSingleTimeCommands(VkCommandBuffer cmd);
+
+    // 队列提交互斥：后台导出/导入线程与主线程共用同一 graphics 队列时，
+    // 每次 vkQueueSubmit 前须持锁（Vulkan 要求队列提交外部同步）。
+    // 调用方在 beginSingleTimeCommands/endSingleTimeCommands 或 endFrame 提交前持锁。
+    std::unique_lock<std::mutex> lockQueue() {
+        return std::unique_lock<std::mutex>(queueMutex_);
+    }
     void createImage(VkFormat format, VkExtent2D extent, VkSampleCountFlagBits samples,
                      VkImageTiling tiling, VkImageUsageFlags usage,
                      VkImage* outImage, VkDeviceMemory* outMemory);
@@ -138,6 +146,7 @@ private:
     std::vector<VkSemaphore> imageAvailable_;
     std::vector<VkSemaphore> renderFinished_;
     std::vector<VkFence> inFlightFences_;
+    std::mutex queueMutex_;   // 队列提交互斥（见 lockQueue）
 };
 
 } // namespace moleculens::engine

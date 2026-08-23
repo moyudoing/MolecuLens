@@ -51,7 +51,7 @@ void drawBallAndStick(const RepContext& ctx, SceneCommandList& out) {
     }
 
     // Pass B 键（两端均命中的键）
-    const float cylR = 0.15f * ctx.rep->radiusScale;
+    const float cylR = 0.15f * ctx.rep->radiusScale * ctx.rep->bondScale;
     for (const entity::Bond& bnd : st.bonds) {
         if (bnd.a >= n || bnd.b >= n ||
             !atomSelected[bnd.a] || !atomSelected[bnd.b]) {

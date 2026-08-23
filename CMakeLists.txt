@@ -31,9 +31,15 @@ option(MOLECULENS_BUILD_PYTHON "Build python bindings" OFF)
 option(MOLECULENS_BUILD_TESTS  "Build tests" ON)
 option(MOLECULENS_ENABLE_ZMQ   "Enable ZMQ RPC" OFF)
 option(MOLECULENS_ENABLE_PLUGINS "Enable dlopen plugins" ON)
+# QuickSurf 表面：CUDA GPU 加速（需 CUDA 工具链；默认 OFF → CPU 标量/AVX2 回退）
+option(MOLECULENS_QUICKSURF_CUDA "Enable CUDA acceleration for QuickSurf surface" OFF)
+if(MOLECULENS_QUICKSURF_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 set(MOLECULENS_MSAA 4 CACHE STRING "MSAA samples")
 
-# —— 字体资源（主方案 §7.6：OPPO B.ttf；支持带空格文件名）——
+# —— 字体资源（主方案 §7.6：OPPO_B.ttf；支持带空格文件名）——
 set(MOLECULENS_FONT_SRC "${CMAKE_SOURCE_DIR}/data/font/OPPO B.ttf")
 if(NOT EXISTS ${MOLECULENS_FONT_SRC})
     set(MOLECULENS_FONT_SRC "${CMAKE_SOURCE_DIR}/data/font/OPPO_B.ttf")

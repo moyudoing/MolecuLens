@@ -19,6 +19,7 @@ public:
     float distance = 40.0f;
     float yaw = 0.0f;          // 方位角（弧度）
     float pitch = 0.5f;        // 俯仰角（弧度）
+    float roll = 0.0f;         // 绕屏幕法线（视图方向）旋转角（弧度）
     float fov = 45.0f;         // 垂直视场（度）
     bool  ortho = false;
     float orthoScale = 1.0f;   // 正交缩放（世界单位/像素比例系数）
@@ -26,18 +27,19 @@ public:
     float farClip = 10000.0f;
 
     // 相机位置（轨道推导）
-    glm::vec3 position() const;
+    [[nodiscard]] glm::vec3 position() const;
 
     // 视图矩阵
-    glm::mat4 viewMatrix() const;
+    [[nodiscard]] glm::mat4 viewMatrix() const;
     // 投影矩阵（aspect = 宽/高）
-    glm::mat4 projectionMatrix(float aspect) const;
-    glm::mat4 viewProjMatrix(float aspect) const;
+    [[nodiscard]] glm::mat4 projectionMatrix(float aspect) const;
+    [[nodiscard]] glm::mat4 viewProjMatrix(float aspect) const;
 
-    // 交互（主方案 §7.10：左键旋转/中键缩放/右键平移/滚轮 dolly）
+    // 交互（主方案 §7.10：左键旋转/中键缩放/右键滚转/滚轮 dolly）
     void orbit(float dx, float dy);              // 弧度增量
     void dolly(float factor);                    // 距离缩放
     void pan(const glm::vec2& ndcDelta);         // 平移（屏幕空间）
+    void rollView(float delta);                  // 绕屏幕法线旋转（正 = 逆时针）
     void setFov(float degrees);
 
     // 自动取景（主方案 §5.5）：radius = 包围球半径

@@ -15,12 +15,14 @@
 namespace moleculens::engine {
 
 // 全局 UBO 布局（与 shaders/global_ubo.glsl 对应，160B）
+// 光照为全局光方案（无方向光/点光源）：lightDir 槽存天顶色、lightColor 槽存地面色，
+// 着色器用半球环境光（mix(ground, sky, N.y)）计算，字段名保留以保证布局匹配。
 struct GlobalUBO {
     glm::mat4 viewProj;        // 0-64
     glm::vec4 cameraPos;       // 64
-    glm::vec4 lightDir;        // 80（指向光源方向）
-    glm::vec4 lightColor;      // 96
-    glm::vec4 ambient;         // 112（rgb 色 + w 强度）
+    glm::vec4 lightDir;        // 80（全局光：rgb = 天顶色）
+    glm::vec4 lightColor;      // 96（全局光：rgb = 地面色）
+    glm::vec4 ambient;         // 112（rgb = 基础环境色, w = 半球光强度）
     glm::vec4 fog;             // 128（x near, y far, z mode, w density）
     glm::vec4 sceneProps;      // 144（x 全局缩放，yzw 保留）
 };

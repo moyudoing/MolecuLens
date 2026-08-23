@@ -29,6 +29,16 @@ public:
     size_t frameCount(size_t index) const;
     bool moleculeVisible() const { return true; }
 
+    // 体系（组）列表：以体系为单位管理
+    size_t systemCount() const;
+    std::string systemName(size_t systemIndex) const;
+    bool systemVisible(size_t systemIndex) const;
+    uint32_t systemId(size_t systemIndex) const;                 // → SceneStructure 方法
+    uint32_t systemIdOfInstance(size_t instanceIndex) const;     // UINT32_MAX = 未归组
+    size_t systemMemberCount(size_t systemIndex) const;
+    // 体系内第 pos 个成员 → 全局实例下标（再经 moleculeName/atomCount 等查询）
+    uint32_t systemMemberInstance(size_t systemIndex, size_t posInSystem) const;
+
 private:
     const entity::SceneStructure* scene_ = nullptr;
 };

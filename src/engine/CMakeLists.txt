@@ -12,7 +12,9 @@ add_library(moleculens_engine STATIC
     style/stick/stick.h style/stick/stick.cpp
     style/wireframe/wireframe.h style/wireframe/wireframe.cpp
     style/cartoon/cartoon.h style/cartoon/cartoon.cpp
-    style/surface/surface.h
+    style/surface/surface.h style/surface/surface.cpp style/surface/mc_tables.h
+    style/quicksurf/quicksurf.h style/quicksurf/quicksurf.cpp
+    style/quicksurf/quicksurf_avx2.cpp
     style/label/label.h
     cmd/cmd.h cmd/command_list.cpp
     camera/camera.h camera/camera.cpp
@@ -21,6 +23,8 @@ add_library(moleculens_engine STATIC
     export/obj/obj_exporter.h export/obj/obj_exporter.cpp
     export/pov/pov_exporter.h export/pov/pov_exporter.cpp
     export/stl/stl_exporter.h export/stl/stl_exporter.cpp
+    export/png/png_encoder.h export/png/png_encoder.cpp
+    raytrace/ray_tracer.h raytrace/ray_tracer.cpp
     vulkan/device/device.h vulkan/device/device.cpp
     vulkan/memory/buffer.h vulkan/memory/buffer.cpp vulkan/memory/vma_impl.cpp
     vulkan/pipeline/pipeline.h vulkan/pipeline/pipeline.cpp
@@ -36,6 +40,22 @@ target_include_directories(moleculens_engine PUBLIC
 
 # Vulkan 函数经 volk 动态加载（主方案 §6.3）；VK_NO_PROTOTYPES 由 volk 要求
 target_compile_definitions(moleculens_engine PUBLIC VK_NO_PROTOTYPES)
+
+# QuickSurf AVX2 密度核：独立 TU 用 /arch:AVX2（-mavx2）编译，其它源不受影响
+if(MSVC)
+    set_source_files_properties(style/quicksurf/quicksurf_avx2.cpp
+        PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+else()
+    set_source_files_properties(style/quicksurf/quicksurf_avx2.cpp
+        PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+endif()
+
+# QuickSurf CUDA 加速（可选；需 CUDA 工具链，默认 OFF → CPU 标量/AVX2 回退）
+if(MOLECULENS_QUICKSURF_CUDA)
+    target_compile_definitions(moleculens_engine PUBLIC MOLECULENS_QUICKSURF_CUDA)
+    target_sources(moleculens_engine PRIVATE style/quicksurf/quicksurf_cuda.cu)
+    target_link_libraries(moleculens_engine PRIVATE CUDA::cudart)
+endif()
 target_link_libraries(moleculens_engine PUBLIC
     moleculens_entity
     glm::glm

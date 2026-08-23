@@ -27,7 +27,7 @@ inline constexpr uint32_t kCmdProtocolVersion = 1;        // 协议版本
 inline constexpr uint32_t kCmdAlign           = 16;       // 载荷 16B 对齐
 inline constexpr uint32_t kCmdMaxPayload      = 1u << 24; // 单命令载荷上限（16 MiB）
 
-// —— 命令类型（0–11，共 12 种）——
+// —— 命令类型（0–12，共 13 种）——
 enum class Cmd : uint8_t {
     SphereInst    = 0,   // 原子球（空间填充 / 球棍）
     CylinderInst  = 1,   // 键 / 棍圆柱
@@ -41,7 +41,8 @@ enum class Cmd : uint8_t {
     ClipPlane     = 9,   // 裁剪面
     SetBlend      = 10,  // 混合开关
     SetDepthWrite = 11,  // 深度写开关
-    Count         = 12,
+    RenderMode    = 12,  // 体系渲染模式（实心/线框/透明/点）→ 后端切换 VkPipeline
+    Count         = 13,
 };
 
 // —— 命令头（8B）——
@@ -137,6 +138,13 @@ struct StateFlag {
 };
 static_assert(sizeof(StateFlag) == 4);
 
+// 体系渲染模式：4B（与 SystemRenderMode 对应：0 实心/1 线框/2 透明/3 点）
+struct RenderModeInst {
+    uint8_t    mode;        // 0 实心 / 1 线框 / 2 透明 / 3 点
+    uint8_t    pad[3];      // 0
+};
+static_assert(sizeof(RenderModeInst) == 4);
+
 // —— 字节流基础设施（序列化用）——
 
 class ByteSink {
@@ -231,6 +239,7 @@ public:
     bool     empty() const;
     uint32_t size() const;                          // 命令池字节数
     uint64_t serial() const;                        // 重建即递增（缓存键，P5）
+    void     bumpSerial() { ++serial_; }            // 重建完成时调用（Renderer）
 
     bool first(CommandIterator&) const;
     bool next(CommandIterator&) const;

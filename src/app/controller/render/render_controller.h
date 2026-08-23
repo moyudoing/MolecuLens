@@ -18,6 +18,11 @@ public:
     bool setAmbient(float ambient);
     bool setFog(float near, float far, int mode, float density);
     bool setGlobalScale(float scale);
+    // 光照（写入 SceneProperties → DIRTY_PROPERTIES → 视口重渲染）
+    // 全局光方案：天顶/地面半球色 + 均匀环境光（无方向光/点光源）
+    bool setSkyColor(float r, float g, float b);
+    bool setGroundColor(float r, float g, float b);
+    bool setAmbientColor(float r, float g, float b);
 
     void onEvent(const Event&) override;
 

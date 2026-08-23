@@ -23,8 +23,8 @@ public:
     ~ShaderModule();
     bool create(VulkanDevice& device, VkShaderStageFlagBits stage,
                 const uint8_t* spv, size_t spvSize);
-    VkShaderModule module() const { return module_; }
-    VkPipelineShaderStageCreateInfo stage() const { return stageInfo_; }
+    [[nodiscard]] VkShaderModule module() const { return module_; }
+    [[nodiscard]] VkPipelineShaderStageCreateInfo stage() const { return stageInfo_; }
     void destroy();
 
 private:
@@ -39,9 +39,9 @@ public:
     Pipeline() = default;
     ~Pipeline() = default;
 
-    VkPipeline pipeline() const { return pipeline_; }
-    VkPipelineLayout layout() const { return layout_; }
-    bool valid() const { return pipeline_ != VK_NULL_HANDLE; }
+    [[nodiscard]] VkPipeline pipeline() const { return pipeline_; }
+    [[nodiscard]] VkPipelineLayout layout() const { return layout_; }
+    [[nodiscard]] bool valid() const { return pipeline_ != VK_NULL_HANDLE; }
 
     void destroy(VulkanDevice& device);
 
@@ -90,6 +90,7 @@ public:
     PipelineBuilder& cullMode(VkCullModeFlags mode) { cullMode_ = mode; return *this; }
     PipelineBuilder& frontFace(VkFrontFace face) { frontFace_ = face; return *this; }
     PipelineBuilder& lineWidth(float w) { lineWidth_ = w; return *this; }
+    PipelineBuilder& polygonMode(VkPolygonMode m) { polygonMode_ = m; return *this; }  // 线框
 
     bool build(VulkanDevice& device, Pipeline* out);
     void destroyAll(VulkanDevice& device);
@@ -109,6 +110,7 @@ private:
     VkCullModeFlags cullMode_ = VK_CULL_MODE_BACK_BIT;
     VkFrontFace frontFace_ = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     float lineWidth_ = 1.0f;
+    VkPolygonMode polygonMode_ = VK_POLYGON_MODE_FILL;
 };
 
 } // namespace moleculens::engine

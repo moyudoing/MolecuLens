@@ -82,11 +82,26 @@ void MaterialTool::presetParams(int index, float* ambient, float* diffuse,
 void MaterialTool::render(DataManager* dm, MolScene* scene) {
     (void)dm;
     (void)scene;
-    // 当前参数（M2 接入 RepresentationController；此处 UI 直通）
-    static float ambient[4] = {0.6f, 0.6f, 0.6f, 1};
-    static float diffuse[4] = {0.9f, 0.9f, 0.9f, 1};
-    static float specular[4] = {0.3f, 0.3f, 0.3f, 1};
-    static float shininess = 32, metallic = 0, roughness = 0.4f, opacity = 1;
+    if (!repCtl_) {
+        ImGui::TextDisabled("控制器未就绪");
+        return;
+    }
+    // 读取当前表示的真实材质（而非静态默认值）
+    const auto& reps = repCtl_->representations();
+    if (reps.empty()) {
+        ImGui::TextDisabled("无表示");
+        return;
+    }
+    constexpr int activeRep = 0;
+    const engine::Representation& rep = reps[activeRep];
+    float ambient[4], diffuse[4], specular[4];
+    for (int i = 0; i < 4; ++i) {
+        ambient[i] = rep.ambient[i];
+        diffuse[i] = rep.diffuse[i];
+        specular[i] = rep.specular[i];
+    }
+    float shininess = rep.shininess, metallic = rep.metallic;
+    float roughness = rep.roughness, opacity = rep.opacity;
 
     // 预设选择（detectPreset 容差回显；手动改参自动回"自定义"）
     Preset cur;
@@ -106,24 +121,30 @@ void MaterialTool::render(DataManager* dm, MolScene* scene) {
     int comboIdx = detected >= 0 ? detected : 8;
     ImGui::Text("材质预设");
     ImGui::SameLine();
+    bool materialChanged = false;
     if (ImGui::Combo("##preset", &comboIdx, presetNames, IM_ARRAYSIZE(presetNames))) {
         if (comboIdx < 8) {
             presetParams(comboIdx, ambient, diffuse, specular, &shininess, &metallic,
                          &roughness, &opacity);
+            materialChanged = true;
         }
     }
     UITheme::helpMarker("8 套预设：默认/金属/光泽/哑光/半透明/玻璃/粗糙金属/塑料");
 
     UITheme::sectionHeader("Phong 参数");
-    ImGui::ColorEdit3("环境色", ambient);
-    ImGui::ColorEdit3("漫反射色", diffuse);
-    ImGui::ColorEdit3("高光色", specular);
-    ImGui::SliderFloat("光泽度", &shininess, 1.0f, 256.0f, "%.0f");
+    materialChanged |= ImGui::ColorEdit3("环境色", ambient);
+    materialChanged |= ImGui::ColorEdit3("漫反射色", diffuse);
+    materialChanged |= ImGui::ColorEdit3("高光色", specular);
+    materialChanged |= ImGui::SliderFloat("光泽度", &shininess, 1.0f, 256.0f, "%.0f");
     UITheme::sectionHeader("PBR 扩展");
-    ImGui::SliderFloat("金属度", &metallic, 0.0f, 1.0f);
-    ImGui::SliderFloat("粗糙度", &roughness, 0.0f, 1.0f);
-    ImGui::SliderFloat("不透明度", &opacity, 0.05f, 1.0f);
-    // M2：apply → RepresentationController::setMaterial
+    materialChanged |= ImGui::SliderFloat("金属度", &metallic, 0.0f, 1.0f);
+    materialChanged |= ImGui::SliderFloat("粗糙度", &roughness, 0.0f, 1.0f);
+    materialChanged |= ImGui::SliderFloat("不透明度", &opacity, 0.05f, 1.0f);
+    // 变更即应用 → RepresentationController::setMaterial（DIRTY_REPRESENTATION）
+    if (materialChanged) {
+        repCtl_->setMaterial(activeRep, ambient, diffuse, specular, shininess,
+                             metallic, roughness, opacity);
+    }
 }
 
 } // namespace moleculens::app

@@ -38,9 +38,9 @@ public:
     void renderAll(RenderContext& ctx);
 
 private:
-    void renderViewport(RenderContext& ctx);
-    void renderTimeline(RenderContext& ctx);
-    void renderStatusBar(RenderContext& ctx);
+    static void renderViewport(RenderContext& ctx);
+    static void renderTimeline(RenderContext& ctx);
+    static void renderStatusBar(RenderContext& ctx);
 };
 
 } // namespace moleculens::app

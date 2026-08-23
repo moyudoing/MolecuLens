@@ -97,6 +97,7 @@ bool RenderPass::createMain(VulkanDevice& device, VkFormat colorFormat,
 }
 
 bool RenderPass::createOffscreen(VulkanDevice& device, VkFormat colorFormat,
+                                 VkFormat depthFormat,
                                  VkSampleCountFlagBits samples,
                                  VkImageLayout finalLayout) {
     destroy();
@@ -114,6 +115,18 @@ bool RenderPass::createOffscreen(VulkanDevice& device, VkFormat colorFormat,
     color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     color.finalLayout = msaa ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : finalLayout;
 
+    // 深度附件：离屏 framebuffer 含 depth（颜色管线 depthTest 需要）；
+    // 之前只有 color 附件，管线 depthTest=true 时深度缓冲未定义 → 全部片元失败 → 空白。
+    VkAttachmentDescription depth{};
+    depth.format = depthFormat;
+    depth.samples = samples;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkAttachmentDescription resolve{};
     resolve.format = colorFormat;
     resolve.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -124,21 +137,37 @@ bool RenderPass::createOffscreen(VulkanDevice& device, VkFormat colorFormat,
     resolve.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     resolve.finalLayout = finalLayout;
 
-    std::vector<VkAttachmentDescription> attachments = {color};
+    std::vector<VkAttachmentDescription> attachments = {color, depth};
     if (msaa) {
         attachments.push_back(resolve);
     }
 
     VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference resolveRef{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference resolveRef{2, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
     if (msaa) {
         subpass.pResolveAttachments = &resolveRef;
     }
+
+    // 显式外部依赖：确保附件从 UNDEFINED → 附件布局的初始转换在首个子pass
+    // 的写操作前完成（与 createMain 一致；隐式依赖虽也能完成转换，但显式声明
+    // 更明确，避免驱动特定差异导致首帧附件内容未就绪 → 空白）。
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -146,6 +175,8 @@ bool RenderPass::createOffscreen(VulkanDevice& device, VkFormat colorFormat,
     info.pAttachments = attachments.data();
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
+    info.dependencyCount = 1;
+    info.pDependencies = &dependency;
 
     if (vkCreateRenderPass(device.device(), &info, nullptr, &renderPass_) != VK_SUCCESS) {
         spdlog::error("[backend] vkCreateRenderPass (offscreen) failed");

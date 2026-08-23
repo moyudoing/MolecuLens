@@ -11,6 +11,7 @@ namespace moleculens::engine {
 
 enum class RepresentationType : uint8_t {
     Wireframe, Stick, BallAndStick, Spacefill, Cartoon, Surface, Label,
+    QuickSurf,   // 高斯密度等值面（radscale=radiusScale, gridspacing, isovalue）
     Count,
 };
 
@@ -25,8 +26,13 @@ struct Representation {
     RepresentationType type = RepresentationType::BallAndStick;
     std::string      selection;            // Selection 字符串（§4.6），"" = all
     ColorScheme      colorScheme = ColorScheme::ElementCPK;
-    float            radiusScale = 1.0f;
+    float            radiusScale = 1.0f;   // 球体/原子半径整体缩放
+    float            bondScale = 1.0f;     // 键圆柱半径缩放（§5.7.2 cylR = 0.15×radiusScale×bondScale）
     bool             visible = true;
+
+    // QuickSurf 参数（参考 other/QuickSurf：radscale 复用 radiusScale）
+    float            surfIsovalue = 0.5f;   // 等值面阈值（密度）
+    float            surfGridSpacing = 0.5f;  // 网格间距（Å）
 
     // 材质（MaterialBlock 参数，§6.6.2 预设；默认预设）
     float ambient[4]   = {0.60f, 0.60f, 0.60f, 1.0f};

@@ -89,7 +89,7 @@ bool PipelineBuilder::build(VulkanDevice& device, Pipeline* out) {
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.polygonMode = polygonMode_;   // FILL 实心 / LINE 线框（fillModeNonSolid 特性已开）
     rasterizer.lineWidth = lineWidth_;
     rasterizer.cullMode = cullMode_;
     rasterizer.frontFace = frontFace_;

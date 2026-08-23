@@ -30,6 +30,7 @@ struct RepContext {
     uint32_t globalAtomBase = 0;                  // 实例首原子在全局段的位置
     float dt = 0.0f;
     uint64_t frameIndex = 0;
+    uint8_t renderMode = 0;                       // 体系渲染模式（0实心/1线框/2透明/3点）
 };
 
 class Representer {

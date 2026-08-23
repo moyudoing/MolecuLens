@@ -29,7 +29,11 @@ public:
     bool setSelection(int32_t repId, const std::string& selection);
     bool setColorScheme(int32_t repId, engine::ColorScheme scheme);
     bool setRadiusScale(int32_t repId, float scale);
+    bool setBondScale(int32_t repId, float scale);
     bool setVisible(int32_t repId, bool visible);
+    // QuickSurf 参数（等值面阈值 / 网格间距）
+    bool setSurfIsovalue(int32_t repId, float v);
+    bool setSurfGridSpacing(int32_t repId, float s);
     // 材质（主方案 §6.6）
     bool setMaterial(int32_t repId, const float* ambient, const float* diffuse,
                      const float* specular, float shininess, float metallic,

@@ -27,20 +27,27 @@ void MainView::renderAll(RenderContext& ctx) {
 }
 
 void MainView::renderViewport(RenderContext& ctx) {
-    ImGui::Begin("3D 视口", nullptr,
-                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // "##" 前缀隐藏窗口显示名（ID 仍为 "3D 视口"，Dock 布局/设置兼容），
+    // 主视图标签不显示名称，视觉更简洁（主方案 §7.7 视口交互接缝不变）。
+    // NoTitleBar：隐藏主视图上方 Dock 标签栏（"工具栏/控制面板"），
+    // 视口区域顶部不再有标签条（主方案 §7.4 主视图沉浸式）。
+    ImGui::Begin("##3D 视口", nullptr,
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+                     ImGuiWindowFlags_NoTitleBar);
     // 取可用区 → molScene_->resizeViewport() 同步 FBO → render()（主方案 §7.7）
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     // 背景色：深蓝黑底（C_BG）
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ui::C_BG);
     ImGui::BeginChild("viewport_canvas", avail, false);
-    ctx.scene->render(ImGui::GetContentRegionAvail());
-    // 命中判断（Image() 之后；区分左/中/右键，主方案 §7.7）
-    if (ImGui::IsItemHovered()) {
+    // 鼠标交互在 render() 之前处理（IsWindowHovered 判断视口区域）：
+    // 相机变更当帧生效，消除一帧延迟；且 X/Y 任一有位移都转发（此前仅
+    // MouseDelta.x!=0 才转发 → 纯竖直拖拽（旋转/缩放）完全不响应）。
+    if (ImGui::IsWindowHovered()) {
         const ImGuiIO& io = ImGui::GetIO();
-        // 拖拽（左键轨道 / 中键缩放 / 右键平移）
+        // 拖拽（左键轨道 / 中键缩放 / 右键平移，Shift+右键滚转）
         for (int btn = 0; btn < 3; ++btn) {
-            if (io.MouseDown[btn] && io.MouseDelta.x != 0.0f) {
+            if (io.MouseDown[btn] &&
+                (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
                 ctx.scene->handleMouse(io.MouseDelta.x, io.MouseDelta.y, btn);
             }
         }
@@ -51,6 +58,7 @@ void MainView::renderViewport(RenderContext& ctx) {
             ctx.scene->handleClick();
         }
     }
+    ctx.scene->render(ImGui::GetContentRegionAvail());
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::End();

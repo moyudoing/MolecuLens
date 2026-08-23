@@ -31,7 +31,11 @@ VmaAllocator allocatorFor(VulkanDevice& device) {
     info.device = dev;
     info.physicalDevice = device.physicalDevice();
     info.instance = device.instance();
-    info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    // 不设置 VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT：该标志会让 VMA 给
+    // 所有内存分配附带 VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT，而本项目设备创建时
+    // 未启用 bufferDeviceAddress 特性 → vkAllocateMemory 校验失败/分配无效 →
+    // 顶点/实例缓冲无效 → 离屏 draw 无片元 → 视口空白；本项目未使用 buffer device
+    // address，去掉该标志即可（分配正常，管线照常取地址）。
     // VMA 3.x 动态函数（VMA_DYNAMIC_VULKAN_FUNCTIONS）要求显式传递 ProcAddr
     VmaVulkanFunctions vf{};
     vf.vkGetInstanceProcAddr = vkGetInstanceProcAddr;

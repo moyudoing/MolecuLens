@@ -13,6 +13,7 @@
 #include "engine/cmd/cmd.h"
 #include "engine/picking/picking.h"
 #include "engine/rep/representation.h"
+#include "engine/render/render_parameter.h"   // LightParams
 #include "entity/scene/scene.h"   // FrameData 完整类型（值成员 frameData_）
 
 namespace moleculens::entity {
@@ -24,11 +25,13 @@ namespace moleculens::engine {
 class VulkanRenderer;
 class OffscreenRenderer;
 
-// 渲染视图（draw 输入：相机 + 视口尺寸）
+// 渲染视图（draw 输入：相机 + 视口尺寸 + 光照 + 雾）
 struct RenderView {
     OrbitCamera camera;
     uint32_t width = 1, height = 1;
     float dt = 0.0f;
+    LightParams light;                          // 光照（默认参数；应用层从场景属性填装）
+    glm::vec4 fog{0.0f, 0.0f, 0.0f, 0.05f};     // 雾：x near, y far, z mode(0关), w density
 };
 
 class Renderer {
@@ -64,6 +67,9 @@ public:
 
     // 场景包围球（自动取景用）
     bool sceneBounds(glm::vec3* outCenter, float* outRadius) const;
+
+    // 从场景属性填装 RenderView 光照（应用层构建 RenderView 后调用）
+    void applySceneLighting(RenderView& view) const;
 
 private:
     void rebuildCommandList();            // 串行/并行生成命令流

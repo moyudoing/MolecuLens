@@ -79,11 +79,38 @@ bool RepresentationController::setRadiusScale(int32_t repId, float scale) {
     return true;
 }
 
+bool RepresentationController::setBondScale(int32_t repId, float scale) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].bondScale = scale;
+    touch();
+    return true;
+}
+
 bool RepresentationController::setVisible(int32_t repId, bool visible) {
     if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
         return false;
     }
     reps_[static_cast<size_t>(repId)].visible = visible;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setSurfIsovalue(int32_t repId, float v) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].surfIsovalue = v;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setSurfGridSpacing(int32_t repId, float s) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].surfGridSpacing = s;
     touch();
     return true;
 }
