@@ -36,7 +36,7 @@ struct Settings {
     std::string rpcToken;
     std::string pythonInitialScript;
 
-    nlohmann::json toJson() const;
+    [[nodiscard]] nlohmann::json toJson() const;
     void fromJson(const nlohmann::json&);
 };
 

@@ -40,7 +40,7 @@ public:
 
     // 场景指针（Renderer 负责置脏/清脏，主方案 §5.4 prepare 阶段）
     void setScene(entity::SceneStructure* scene) { scene_ = scene; }
-    const entity::SceneStructure* scene() const { return scene_; }
+    [[nodiscard]] const entity::SceneStructure* scene() const { return scene_; }
     void setVulkanRenderer(VulkanRenderer* vk) { vulkan_ = vk; }
 
     void update(float dt);
@@ -50,19 +50,19 @@ public:
 
     PickResult pick(uint32_t x, uint32_t y);
 
-    const SceneCommandList& commandList() const { return commandList_; }
+    [[nodiscard]] const SceneCommandList& commandList() const { return commandList_; }
     SceneCommandList& commandList() { return commandList_; }
-    uint64_t commandSerial() const { return commandList_.serial(); }
+    [[nodiscard]] uint64_t commandSerial() const { return commandList_.serial(); }
 
     // 表示列表（场景级）
     std::vector<Representation>& representations() { return representations_; }
-    const std::vector<Representation>& representations() const { return representations_; }
+    [[nodiscard]] const std::vector<Representation>& representations() const { return representations_; }
     void setRepresentations(std::vector<Representation> reps);
 
     // 帧数据（当前帧坐标段；由外部写 CoordsSoA 后刷新）
     void refreshFrameData();
 
-    bool prepareParallel() const { return prepareParallel_; }
+    [[nodiscard]] bool prepareParallel() const { return prepareParallel_; }
     void setPrepareParallel(bool on) { prepareParallel_ = on; }
 
     // 场景包围球（自动取景用）

@@ -15,8 +15,10 @@
 
 namespace moleculens::app {
 
+
 class RepresentationController : public Subscriber {
 public:
+
     explicit RepresentationController(AppServices& svc);
 
     // 表示列表管理（成功后发布 RepresentationChanged）
@@ -24,23 +26,33 @@ public:
                               engine::RepresentationType type,
                               const std::string& selection,
                               engine::ColorScheme scheme);
-    bool removeRepresentation(int32_t repId);
+
+    bool removeRepresentation(int32_t repId);  // 移除
+
     bool setType(int32_t repId, engine::RepresentationType type);
+
     bool setSelection(int32_t repId, const std::string& selection);
     bool setColorScheme(int32_t repId, engine::ColorScheme scheme);
     bool setRadiusScale(int32_t repId, float scale);
     bool setBondScale(int32_t repId, float scale);
     bool setVisible(int32_t repId, bool visible);
+
     // QuickSurf 参数（等值面阈值 / 网格间距）
     bool setSurfIsovalue(int32_t repId, float v);
     bool setSurfGridSpacing(int32_t repId, float s);
+
+    // 体系级表面：整体系（含溶剂分子）一个整体表面（Surface/QuickSurf 用）
+    bool setSystemSurface(int32_t repId, bool on);
+
     // 材质（主方案 §6.6）
     bool setMaterial(int32_t repId, const float* ambient, const float* diffuse,
                      const float* specular, float shininess, float metallic,
                      float roughness, float opacity);
 
-    const std::vector<engine::Representation>& representations() const;
+    [[nodiscard]] const std::vector<engine::Representation>& representations() const;
 
+
+    // 事件相关
     void onEvent(const Event&) override;
 
 private:

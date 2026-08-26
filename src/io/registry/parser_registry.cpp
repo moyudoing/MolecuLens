@@ -10,6 +10,7 @@
 
 #include "io/gro/gro_parser.h"
 #include "io/pdb/pdb_parser.h"
+#include "io/sdf/sdf_parser.h"
 #include "spdlog/spdlog.h"
 
 namespace moleculens::entity {
@@ -60,6 +61,7 @@ ParserRegistry& ParserRegistry::defaultRegistry() {
         ParserRegistry r;
         r.registerParser(std::make_shared<PdbParser>());
         r.registerParser(std::make_shared<GroParser>());
+        r.registerParser(std::make_shared<SdfParser>());
         return r;
     }();
     return registry;

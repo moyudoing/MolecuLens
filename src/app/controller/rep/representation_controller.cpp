@@ -11,9 +11,11 @@
 namespace moleculens::app {
 
 RepresentationController::RepresentationController(AppServices& svc) : svc_(svc) {
+
     if (svc_.bus) {
         svc_.bus->subscribe(this);
     }
+
     // 默认表示（主方案 §7.7：加载即显示球棍）
     reps_.push_back(engine::Representation{});
     reps_.back().name = "ballstick";
@@ -44,12 +46,14 @@ bool RepresentationController::removeRepresentation(int32_t repId) {
 }
 
 bool RepresentationController::setType(int32_t repId, engine::RepresentationType type) {
+
     if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
         return false;
     }
     reps_[static_cast<size_t>(repId)].type = type;
     touch();
     return true;
+
 }
 
 bool RepresentationController::setSelection(int32_t repId, const std::string& selection) {
@@ -111,6 +115,15 @@ bool RepresentationController::setSurfGridSpacing(int32_t repId, float s) {
         return false;
     }
     reps_[static_cast<size_t>(repId)].surfGridSpacing = s;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setSystemSurface(int32_t repId, bool on) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].systemSurface = on;
     touch();
     return true;
 }

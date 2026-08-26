@@ -35,7 +35,7 @@ public:
         return nullptr;
     }
 
-    const std::vector<std::unique_ptr<BaseToolView>>& modules() const { return modules_; }
+    [[nodiscard]] const std::vector<std::unique_ptr<BaseToolView>>& modules() const { return modules_; }
 
 private:
     std::vector<std::unique_ptr<BaseToolView>> modules_;

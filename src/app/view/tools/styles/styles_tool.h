@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "app/view/tool/base_tool_view.h"
+#include "app/view/tools/base_tool_view.h"
 
 namespace moleculens::app {
 

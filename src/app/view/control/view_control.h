@@ -74,7 +74,7 @@ public:
     void resetLayout();
 
     // 布局序列化（M5 落地 settings.json）
-    std::string serializeLayout();
+    static std::string serializeLayout();
     bool deserializeLayout(const std::string& base64);
 
     // 加载遮罩（主方案 §7.5）
@@ -115,7 +115,7 @@ private:
     void renderMainMenuBar();               // 自绘标题栏（主方案 §7.3）
     void setupDocking();                    // Dock 布局（主方案 §7.4）
     void renderLoadingOverlay();            // 加载遮罩（主方案 §7.5）
-    bool windowIsMaximized() const;         // 真实窗口最大化状态（Win32 查询）
+    [[nodiscard]] bool windowIsMaximized() const;         // 真实窗口最大化状态（Win32 查询）
 
     GLFWwindow* window_ = nullptr;
     bool windowShouldClose_ = false;
@@ -143,10 +143,12 @@ private:
     SceneController* sceneCtl_ = nullptr;
     RenderController* renderCtl_ = nullptr;
     RepresentationController* repCtl_ = nullptr;
+
     // 工具面板观察指针（注册进 tools_ 注册表；svc* 注入控制器）
     MolListTool* molListTool_ = nullptr;
     StylesTool* stylesTool_ = nullptr;
     MaterialTool* materialTool_ = nullptr;
+
 
     MainView mainView_;
     MolScene molScene_;
@@ -168,7 +170,7 @@ private:
     bool loadingActive_ = false;
 
     // 布局状态（M5 持久化）
-    bool layoutInitialized_ = false;
+    bool layoutInitialized_ = true;
 };
 
 } // namespace moleculens::app

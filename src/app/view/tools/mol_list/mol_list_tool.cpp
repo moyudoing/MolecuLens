@@ -8,7 +8,9 @@
 
 #include "app/view/tools/mol_list/mol_list_tool.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -137,22 +139,45 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
             }
         }
 
-        // —— 展开的成员分子列表 ——
+        // —— 展开的成员分子列表（同构聚合：md.gro 中多个 SOL 合并显示一条计数）——
         if (expandedSystem_ == si) {
             ImGui::Indent();
             const size_t mc = dm->systemMemberCount(si);
             if (mc == 0) {
                 ImGui::TextDisabled("（空体系）");
             }
+            // 按 (structureIndex) 聚合：同一体系内相同原子结构合并显示为一条带计数项
+            struct Group { uint32_t structureIndex = 0; uint32_t firstInst = 0; size_t count = 0; };
+            std::vector<Group> groups;
             for (size_t m = 0; m < mc; ++m) {
                 const uint32_t inst = dm->systemMemberInstance(si, m);
                 if (inst == UINT32_MAX || inst >= dm->moleculeCount()) {
                     continue;
                 }
-                ImGui::PushID(static_cast<int>(m * 7 + 2));
+                const auto* scp_ = scene ? scene->scene() : nullptr;
+                if (!scp_ || inst >= scp_->instances().size()) {
+                    continue;
+                }
+                const uint32_t siIdx = scp_->instances()[inst].structureIndex;
+                Group* g = nullptr;
+                for (auto& gg : groups) {
+                    if (gg.structureIndex == siIdx) { g = &gg; break; }
+                }
+                if (!g) { groups.push_back({siIdx, inst, 0}); g = &groups.back(); }
+                ++g->count;
+            }
+            for (size_t gi = 0; gi < groups.size(); ++gi) {
+                const uint32_t inst = groups[gi].firstInst;
+                ImGui::PushID(static_cast<int>(gi * 97 + 2));
                 std::string mname = displayName(dm->moleculeName(inst), "molecule", inst);
+                char row[128];
+                if (groups[gi].count > 1) {
+                    std::snprintf(row, sizeof(row), "%s × %zu", mname.c_str(), groups[gi].count);
+                } else {
+                    std::snprintf(row, sizeof(row), "%s", mname.c_str());
+                }
                 const bool mCur = (selectedInstance_ == static_cast<int>(inst));
-                if (ImGui::Selectable(mname.c_str(), mCur)) {
+                if (ImGui::Selectable(row, mCur)) {
                     selectedSystem_ = si;
                     selectedInstance_ = static_cast<int>(inst);
                 }
@@ -163,12 +188,33 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
                                   dm->frameCount(inst));
                     ImGui::TextDisabled("%s", info);
                 }
-                // 分子右键：定位 / 删除 / 跨组移交
+                // 分子/组右键：定位 / 删除（组删除全部）/ 跨组移交（组移交全部）
                 if (ImGui::BeginPopupContextItem("mol_ctx")) {
                     if (ImGui::MenuItem("定位到原点")) {
                         sceneCtl_->setInstancePosition(inst, glm::vec3(0.0f));
                     }
-                    if (ImGui::MenuItem("删除")) {
+                    if (groups[gi].count > 1) {
+                        if (ImGui::MenuItem("删除全部")) {
+                            const auto* scp2_ = scene ? scene->scene() : nullptr;
+                            for (int pass = 0; pass < 2; ++pass) {
+                                const size_t cc = dm->systemMemberCount(si);
+                                std::vector<uint32_t> victims;
+                                for (size_t m = 0; m < cc; ++m) {
+                                    const uint32_t ii = dm->systemMemberInstance(si, m);
+                                    if (ii >= dm->moleculeCount()) continue;
+                                    if (!scp2_ || ii >= scp2_->instances().size()) continue;
+                                    if (scp2_->instances()[ii].structureIndex == groups[gi].structureIndex) {
+                                        victims.push_back(ii);
+                                    }
+                                }
+                                if (victims.empty()) break;
+                                std::sort(victims.begin(), victims.end(), std::greater<uint32_t>());
+                                for (uint32_t v : victims) sceneCtl_->removeInstance(v);
+                                break;
+                            }
+                            selectedInstance_ = -1;
+                        }
+                    } else if (ImGui::MenuItem("删除")) {
                         spdlog::info("[ui] 删除分子 {}", inst);
                         sceneCtl_->removeInstance(inst);
                         selectedInstance_ = -1;
@@ -176,17 +222,47 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
                     ImGui::Separator();
                     if (ImGui::BeginMenu("移动到体系")) {
                         for (size_t ts = 0; ts < sysCount; ++ts) {
-                            if (ts == si) {
-                                continue;
-                            }
+                            if (ts == si) continue;
                             std::string tn = displayName(dm->systemName(ts), "system", ts);
                             if (ImGui::MenuItem(tn.c_str())) {
-                                sceneCtl_->moveInstanceToSystem(inst, dm->systemId(ts));
+                                const auto* scp3_ = scene ? scene->scene() : nullptr;
+                                if (groups[gi].count > 1) {
+                                    const size_t cc = dm->systemMemberCount(si);
+                                    std::vector<uint32_t> mov;
+                                    for (size_t m = 0; m < cc; ++m) {
+                                        const uint32_t ii = dm->systemMemberInstance(si, m);
+                                        if (ii >= dm->moleculeCount()) continue;
+                                        if (!scp3_ || ii >= scp3_->instances().size()) continue;
+                                        if (scp3_->instances()[ii].structureIndex == groups[gi].structureIndex) {
+                                            mov.push_back(ii);
+                                        }
+                                    }
+                                    std::sort(mov.begin(), mov.end(), std::greater<uint32_t>());
+                                    for (uint32_t v : mov) sceneCtl_->moveInstanceToSystem(v, dm->systemId(ts));
+                                } else {
+                                    sceneCtl_->moveInstanceToSystem(inst, dm->systemId(ts));
+                                }
                             }
                         }
                         if (ImGui::MenuItem("新建体系并移动")) {
                             const uint32_t nid = sceneCtl_->addSystem("");
-                            sceneCtl_->moveInstanceToSystem(inst, nid);
+                            if (groups[gi].count > 1) {
+                                const auto* scp4_ = scene ? scene->scene() : nullptr;
+                                const size_t cc = dm->systemMemberCount(si);
+                                std::vector<uint32_t> mov;
+                                for (size_t m = 0; m < cc; ++m) {
+                                    const uint32_t ii = dm->systemMemberInstance(si, m);
+                                    if (ii >= dm->moleculeCount()) continue;
+                                    if (!scp4_ || ii >= scp4_->instances().size()) continue;
+                                    if (scp4_->instances()[ii].structureIndex == groups[gi].structureIndex) {
+                                        mov.push_back(ii);
+                                    }
+                                }
+                                std::sort(mov.begin(), mov.end(), std::greater<uint32_t>());
+                                for (uint32_t v : mov) sceneCtl_->moveInstanceToSystem(v, nid);
+                            } else {
+                                sceneCtl_->moveInstanceToSystem(inst, nid);
+                            }
                         }
                         ImGui::EndMenu();
                     }

@@ -8,6 +8,7 @@ add_executable(moleculens_tests
     entity/identity/identity_tests.cpp
     entity/selection/selection_tests.cpp
     entity/serializer/serializer_tests.cpp
+    io/gro_parser_tests.cpp
     engine/camera/camera_tests.cpp
     engine/cartoon/cartoon_tests.cpp
     engine/export/png_encoder_tests.cpp

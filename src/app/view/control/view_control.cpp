@@ -33,11 +33,14 @@
 #include "app/shell/application.h"
 #include "app/view/theme/ui_theme.h"
 #include "app/view/timeline/time_axis.h"
+
 #include "app/view/tools/export/export_img_tool.h"
 #include "app/view/tools/material/material_tool.h"
 #include "app/view/tools/mol_list/mol_list_tool.h"
 #include "app/view/tools/paint/painting_tool.h"
 #include "app/view/tools/styles/styles_tool.h"
+#include "app/view/tools/theme/theme_tool.h"
+
 #include "engine/camera/camera.h"
 #include "engine/cmd/cmd.h"
 #include "engine/render/renderer.h"
@@ -57,7 +60,7 @@ std::string openFileDialog() {
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFilter =
-        "分子结构文件 (*.pdb;*.gro)\0*.pdb;*.gro\0"
+        "分子结构文件 (*.pdb;*.gro;*.sdf;*.mol)\0*.pdb;*.gro;*.sdf;*.mol\0"
         "场景文件 (*.mlscene)\0*.mlscene\0"
         "所有文件 (*.*)\0*.*\0";
     ofn.lpstrFile = path;
@@ -205,6 +208,7 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
             (void)settings;
         }
     }
+
     // 面板注册（主方案 §7.9：5 个工具面板 + 日志）
     {
         auto ml = std::make_unique<MolListTool>();
@@ -223,6 +227,9 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
     }
     addModule(std::make_unique<ExportImgTool>());
     addModule(std::make_unique<PaintingTool>());
+    addModule(std::make_unique<ThemeTool>());
+
+
     spdlog::info("[ui] init: panels registered");
     spdlog::info("[ui] init: MolScene viewport (offscreen renderer) ...");
     molScene_.init(renderer_, camera_, vk_);
@@ -315,6 +322,8 @@ void ViewControl::runLoop() {
     /// @brife 进入主循环
     /// frameStart记录本这一帧开始的时刻，后面用来算本帧一共花了多久，做帧率限制
     while (!windowShouldClose_) {
+
+        // 帧开始
         const double frameStart = glfwGetTime();
 
         // glfwPollEvents()：处理窗口所有系统事件：鼠标移动、按键、窗口缩放、点击关闭按钮。非阻塞，马上返回。
@@ -326,16 +335,20 @@ void ViewControl::runLoop() {
         const float dt = std::min(now - lastFrameTime_, 0.1f);
         lastFrameTime_ = now;
         fps_ = fps_ * 0.95f + (dt > 0.0f ? 1.0f / dt : 0.0f) * 0.05f;
+
         UITheme::advanceTime(dt);
         if (svc_->bus) {
             svc_->bus->poll();
         }
+
         // QS.5 文件导入多线程：后台解析完成 → 主线程合并（渲染器读场景须在主线程）
         if (ioCtl_) {
             ioCtl_->consumeParsed();
         }
 
+        // 帧更新
         newFrame(dt);
+
         render();
         ImGui::Render();
         // UI 回调注入（renderpass 内 3D 后调用，主方案 §6.3 帧循环）
@@ -360,6 +373,7 @@ void ViewControl::runLoop() {
             std::this_thread::sleep_for(std::chrono::duration<double>(remain));
         }
     }
+
     // 退出时保存设置（主方案 §12.2：布局 base64 + 相机）
     persist::Settings settings;
     auto loaded = persist::SettingsStore::load();
@@ -383,9 +397,10 @@ void ViewControl::render() {
     setupDocking();
 
     // 工具面板（ToolView 路由器，主方案 §7.1）
-    tools_.renderAll(dataMgr_, &molScene_);
+    tools_.renderAll(dataMgr_, &molScene_);  // 渲染
 
-    // 主区域容器（3D 视口 + 时间轴 + 状态栏）
+    /// 主区域容器（3D 视口 + 时间轴 + 状态栏）
+    // 构建参数
     RenderContext ctx;
     ctx.showTimeline = &showTimeline_;
     ctx.showStatusBar = &showStatusBar_;
@@ -395,7 +410,8 @@ void ViewControl::render() {
     ctx.timeline = timelineCtl_;
     ctx.selection = selectionCtl_;
     ctx.fps = fps_;
-    mainView_.renderAll(ctx);
+    // 主视图渲染
+    moleculens::app::MainView::renderAll(ctx);
 
     // 日志面板（spdlog 环形缓冲，主方案 §14.5）
     if (showLog_) {
@@ -699,6 +715,7 @@ void ViewControl::setupDocking() {
         }
         ImGui::DockBuilderDockWindow("分子列表", right);
         ImGui::DockBuilderDockWindow("渲染设置", rightBot);
+        ImGui::DockBuilderDockWindow("主题选择", rightBot);
         ImGui::DockBuilderDockWindow("材质选择", rightBot);
         ImGui::DockBuilderDockWindow("图像导出", rightBot);
         ImGui::DockBuilderDockWindow("绘图工具", rightBot);
@@ -749,7 +766,7 @@ bool ViewControl::deserializeLayout(const std::string& base64) {
     }
     // base64 解码
     static const std::array<int8_t, 256> kRev = [] {
-        std::array<int8_t, 256> table;
+        std::array<int8_t, 256> table{};
         table.fill(-1);
         const char* k =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

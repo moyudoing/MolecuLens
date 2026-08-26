@@ -74,6 +74,7 @@ struct MoleculeInstance {
     std::shared_ptr<Trajectory> trajectory;  // 静态文件则 frames.size()==1
     std::vector<uint32_t> globalAtomIds;     // 实例内原子 → 全局原子 ID（拾取回查）
     uint32_t systemId = UINT32_MAX;      // 所属体系（SystemGroup.id）；无 = 未归组
+    bool isSolvent = false;              // 溶剂分子（水等，可整体显隐）；默认否
 };
 
 // —— 体系 / 组（一次导入的多分子文件视为一个体系；主方案 §4.3 扩展）——
@@ -113,16 +114,23 @@ struct FrameData {
 // —— 场景（主方案 §4.4）——
 class SceneStructure {
 public:
+
     // 去重注册：命中既有 → 返回既有下标；未命中 → 追加
     uint32_t registerStructure(const MoleculeStructure&);
     // 写入 instances_，并在 coordsSoA_ 追加该结构长度 × 1 帧的坐标段
     // systemId = UINT32_MAX 时挂到当前体系（无则自动新建）
+
     uint32_t addInstance(uint32_t structureIndex, const Transform&,
                          uint32_t systemId = UINT32_MAX);
+
     // 追加轨迹实例（坐标段按帧数预留首帧）
+    // name：实例显示名（空 = 默认 molecule_N）；isSolvent：溶剂标记（可整体显隐）
     uint32_t addTrajectoryInstance(uint32_t structureIndex, const Transform&,
                                    std::shared_ptr<Trajectory> traj,
-                                   uint32_t systemId = UINT32_MAX);
+                                   uint32_t systemId = UINT32_MAX,
+                                   const std::string& name = std::string(),
+                                   bool isSolvent = false);
+
 
     // —— 体系（SystemGroup）管理 ——
     uint32_t addSystem(const std::string& name = std::string());
@@ -132,22 +140,26 @@ public:
     bool renameSystem(uint32_t systemId, const std::string& name);
     bool moveInstanceToSystem(uint32_t instanceIndex, uint32_t systemId);  // 跨组移交
     bool setSystemRenderMode(uint32_t systemId, SystemRenderMode mode);   // 体系渲染模式
-    const std::vector<SystemGroup>& systems() const { return systems_; }
+    [[nodiscard]] const std::vector<SystemGroup>& systems() const { return systems_; }
+
     // 实例 → 所属体系 id（UINT32_MAX = 未归组）
-    uint32_t systemIdOfInstance(uint32_t instanceIndex) const;
-    uint32_t systemIndexById(uint32_t systemId) const;    // id → systems_ 下标
-    uint32_t currentSystemId() const { return currentSystemId_; }
+    [[nodiscard]] uint32_t systemIdOfInstance(uint32_t instanceIndex) const;
+    [[nodiscard]] uint32_t systemIndexById(uint32_t systemId) const;    // id → systems_ 下标
+    [[nodiscard]] uint32_t currentSystemId() const { return currentSystemId_; }
     bool setCurrentSystem(uint32_t systemId);
 
     void setDirty(uint32_t bits) { dirty_ |= bits; }   // 接受 DIRTY_* 位或组合
-    uint32_t dirtyBits() const { return dirty_; }
+    [[nodiscard]] uint32_t dirtyBits() const { return dirty_; }
     void clearDirty() { dirty_ = 0; }
     uint64_t bumpSerial();               // 全局 serial（P5）
-    uint64_t serial() const { return serial_; }
+    [[nodiscard]] uint64_t serial() const { return serial_; }
 
     void removeInstance(uint32_t instanceIndex);
     void setInstanceVisible(uint32_t instanceIndex, bool visible);
     void setInstanceTransform(uint32_t instanceIndex, const Transform&);
+    // 溶剂整体显隐：按实例 isSolvent 标记置 visible（溶剂分子可在分子列表折叠，
+    // 见 io/gro 溶剂读取；置 DIRTY_INSTANCE 触发重渲染）
+    bool setSolventVisible(bool visible);
 
     // 写入当前帧坐标 → CoordsSoA（帧切路径，P4）
     void writeFramePositions(uint32_t instanceIndex, const std::vector<glm::vec3>& worldPositions);
@@ -183,6 +195,7 @@ private:
     void rebuildSystemMembership();                        // 按 instances_ 重建成员表
 
     std::vector<MoleculeStructure> structuresPool_;
+
     std::unordered_map<StructureKey, uint32_t, StructureKeyHash> structureIndex_;
     std::vector<MoleculeInstance>  instances_;
     CoordsSoA coordsSoA_;

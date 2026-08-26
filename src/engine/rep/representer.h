@@ -21,8 +21,11 @@ namespace moleculens::engine {
 
 // 生成上下文（每任务一份）
 struct RepContext {
+
     const entity::SceneStructure* scene = nullptr;
+
     const entity::MoleculeInstance* instance = nullptr;
+
     const entity::FrameData* frame = nullptr;
     const Representation* rep = nullptr;
     const std::vector<bool>* mask = nullptr;      // Selection 掩码（全局顺序）
@@ -35,6 +38,7 @@ struct RepContext {
 
 class Representer {
 public:
+
     // 生成：rep × instance × frame → 命令流（准备可并行；独立命令段合并由调用方负责）
     void generate(const Representation& rep,
                   const entity::SceneStructure& scene,

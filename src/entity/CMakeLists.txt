@@ -15,6 +15,7 @@ add_library(moleculens_entity STATIC
     ../io/registry/ifile_reader.h ../io/registry/parser_registry.h ../io/registry/parser_registry.cpp
     ../io/pdb/pdb_parser.h ../io/pdb/pdb_parser.cpp
     ../io/gro/gro_parser.h ../io/gro/gro_parser.cpp
+    ../io/sdf/sdf_parser.h ../io/sdf/sdf_parser.cpp
     ../persist/mlscene/mlscene.h ../persist/mlscene/scene_serializer.h ../persist/mlscene/scene_serializer.cpp
     ../persist/settings/settings.h ../persist/settings/settings.cpp
     ../persist/cache/cache.h ../persist/cache/cache.cpp

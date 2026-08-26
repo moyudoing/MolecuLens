@@ -32,13 +32,58 @@ void BondSearch::search(const std::vector<glm::vec3>& positions,
         return;
     }
 
-    // 1) 计算每原子判键距离 + 体系最大判键距离（cell 尺寸）
+    // 周期盒子（可选）：3 分量对角线长度（Å）。提供且全 > 0 时，判键位移用
+    // 最小镜像（解决跨盒子边界的分子内键被漏判）。注意盒子边界原子的最近邻
+    // 经最小镜像可能落于盒子外 —— 网格包围盒仍按原始坐标建，判键位移逐对折算。
+    glm::vec3 box(0.0f);
+    const bool usePbc = opts.periodicBox != nullptr &&
+                        opts.periodicBox[0] > 0.0f && opts.periodicBox[1] > 0.0f &&
+                        opts.periodicBox[2] > 0.0f;
+    if (usePbc) {
+        box = glm::vec3(opts.periodicBox[0], opts.periodicBox[1], opts.periodicBox[2]);
+    }
+    auto minImage = [&](glm::vec3 d) -> glm::vec3 {
+        if (!usePbc) {
+            return d;
+        }
+        // 逐分量最小镜像：d' = d - L*round(d/L)
+        d.x -= box.x * std::round(d.x / box.x);
+        d.y -= box.y * std::round(d.y / box.y);
+        d.z -= box.z * std::round(d.z / box.z);
+        return d;
+    };
+
+    // 1) 计算每原子判键距离 + 体系最大判键距离（cell 尺寸）。
+    //    正确距离判键（主方案 §4.7 参考 VMD guessbonds / RDKit 距离规则）：
+    //      bond 判据：dist ≤ cov(a) + cov(b) + tolerance，
+    //      其中 tolerance 默认 0.45Å；对含 H 的键收窄为 0.40Å（H 键长更短，
+    //      可避免水分子 O–H…O 氢键/跨溶剂假键），金属/Unknown 原子不参与判键
+    //      （共价半径 0 → 0 半径假键），原子本身 Unknown → 跳过。
     std::vector<float> cutoff(n);
     float maxCutoff = 0.0f;
     for (size_t i = 0; i < n; ++i) {
-        const float cov = elementInfo(elements[i]).covalentRadius;
-        cutoff[i] = 2.0f * cov + opts.tolerance;
+        const ElementInfo& info = elementInfo(elements[i]);
+        const float cov = info.covalentRadius;
+        if (elements[i] == ElementType::Unknown || cov <= 0.0f) {
+            cutoff[i] = 0.0f;   // Unknown/金属：不参与判键（无共价半径 → 假键）
+            continue;
+        }
+        // 含 H 原子判键阈值略紧（O–H 0.40、C–H 0.38、N–H 0.40 容差更合理）
+        const float tol = (elements[i] == ElementType::Hydrogen) ? 0.40f : opts.tolerance;
+        cutoff[i] = 2.0f * cov + tol;
         maxCutoff = std::max(maxCutoff, cutoff[i]);
+    }
+    if (maxCutoff <= 0.0f) {
+        return;   // 全部 Unknown / 无共价半径 → 无键（返回空，避免假键）
+    }
+    if (usePbc) {
+        // 周期边界下的邻域半径不得超过盒子半长（否则最小镜像会与自身/复制重合
+        // 且判断含糊）；取 min(判键距离, 盒半长) 保证最近邻选取唯一。
+        const glm::vec3 half = box * 0.5f;
+        const float cellCap = std::min({half.x, half.y, half.z});
+        if (cellCap > 1e-3f) {
+            maxCutoff = std::min(maxCutoff, cellCap);
+        }
     }
     if (maxCutoff <= 0.0f) {
         return;
@@ -102,9 +147,17 @@ void BondSearch::search(const std::vector<glm::vec3>& positions,
                     for (int dz = -1; dz <= 1; ++dz) {
                         for (int dy = -1; dy <= 1; ++dy) {
                             for (int dx = -1; dx <= 1; ++dx) {
-                                const int nx = cx + dx, ny = cy + dy, nz = cz + dz;
-                                if (nx < 0 || ny < 0 || nz < 0 || nx >= dimX ||
-                                    ny >= dimY || nz >= dimZ) {
+                                int nx = cx + dx, ny = cy + dy, nz = cz + dz;
+                                if (usePbc) {
+                                    // 周期边界：邻域按网格维度取模环绕 —— 靠近
+                                    // 盒子相对面的 cell 互为邻居，跨边界分子内键
+                                    // 的候选原子对才进入判键（位移再按最小镜像折
+                                    // 算）。冗余对的最终 sort+unique 去重。
+                                    nx = (nx + dimX) % dimX;
+                                    ny = (ny + dimY) % dimY;
+                                    nz = (nz + dimZ) % dimZ;
+                                } else if (nx < 0 || ny < 0 || nz < 0 ||
+                                           nx >= dimX || ny >= dimY || nz >= dimZ) {
                                     continue;
                                 }
                                 const Cell& ncell =
@@ -122,12 +175,27 @@ void BondSearch::search(const std::vector<glm::vec3>& positions,
                                         if (a >= b) {
                                             continue;
                                         }
-                                        // 判键条件：dist ≤ cov(a)+cov(b)+0.45 Å（主方案 §4.7）
+                                        // 判键条件：dist ≤ cov(a)+cov(b)+tol（主方案 §4.7 距离法）
+                                        // Unknown/金属原子（共价半径 0）不构成共价键 → 跳过
+                                        const ElementInfo& ea = elementInfo(elements[a]);
+                                        const ElementInfo& eb = elementInfo(elements[b]);
+                                        if (elements[a] == ElementType::Unknown ||
+                                            elements[b] == ElementType::Unknown ||
+                                            ea.covalentRadius <= 0.0f ||
+                                            eb.covalentRadius <= 0.0f) {
+                                            continue;
+                                        }
+                                        // 含 H 的键阈值略紧（避免氢键/跨溶剂假键）
+                                        float tol = opts.tolerance;
+                                        if (elements[a] == ElementType::Hydrogen ||
+                                            elements[b] == ElementType::Hydrogen) {
+                                            tol = std::min(tol, 0.40f);
+                                        }
                                         const float threshold =
-                                            elementInfo(elements[a]).covalentRadius +
-                                            elementInfo(elements[b]).covalentRadius +
-                                            opts.tolerance;
-                                        const glm::vec3 d = positions[b] - positions[a];
+                                            ea.covalentRadius + eb.covalentRadius + tol;
+                                        // 周期边界：用最小镜像位移判键（跨盒子边界
+                                        // 的分子内键才正确命中，见 bond_search.h）。
+                                        const glm::vec3 d = minImage(positions[b] - positions[a]);
                                         if (glm::dot(d, d) <= threshold * threshold) {
                                             pairs.emplace_back(a, b);
                                         }

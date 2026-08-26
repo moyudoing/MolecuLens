@@ -17,6 +17,7 @@ namespace moleculens::app {
 MainView::~MainView() = default;
 
 void MainView::renderAll(RenderContext& ctx) {
+
     renderViewport(ctx);
     if (ctx.showTimeline && *ctx.showTimeline) {
         renderTimeline(ctx);
@@ -24,9 +25,11 @@ void MainView::renderAll(RenderContext& ctx) {
     if (ctx.showStatusBar && *ctx.showStatusBar) {
         renderStatusBar(ctx);
     }
+
 }
 
 void MainView::renderViewport(RenderContext& ctx) {
+
     // "##" 前缀隐藏窗口显示名（ID 仍为 "3D 视口"，Dock 布局/设置兼容），
     // 主视图标签不显示名称，视觉更简洁（主方案 §7.7 视口交互接缝不变）。
     // NoTitleBar：隐藏主视图上方 Dock 标签栏（"工具栏/控制面板"），
@@ -58,7 +61,10 @@ void MainView::renderViewport(RenderContext& ctx) {
             ctx.scene->handleClick();
         }
     }
+
+    // 渲染场景
     ctx.scene->render(ImGui::GetContentRegionAvail());
+
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::End();

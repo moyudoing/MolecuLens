@@ -7,11 +7,17 @@ add_library(moleculens_engine STATIC
     scene/scene_node.h scene/scene_graph.h
     scheduler/frame_scheduler.h scheduler/frame_scheduler.cpp
     rep/representation.h rep/representer.h rep/representer.cpp
+    style/base_style.h
+    style/style_registry.h style/style_registry.cpp
     style/spacefill/spacefill.h style/spacefill/spacefill.cpp
     style/ballstick/ballstick.h style/ballstick/ballstick.cpp
     style/stick/stick.h style/stick/stick.cpp
     style/wireframe/wireframe.h style/wireframe/wireframe.cpp
     style/cartoon/cartoon.h style/cartoon/cartoon.cpp
+    style/licorice/licorice.h style/licorice/licorice.cpp
+    style/tube/tube.h style/tube/tube.cpp
+    style/ribbon/ribbon.h style/ribbon/ribbon.cpp
+    style/newcartoon/newcartoon.h style/newcartoon/newcartoon.cpp
     style/surface/surface.h style/surface/surface.cpp style/surface/mc_tables.h
     style/quicksurf/quicksurf.h style/quicksurf/quicksurf.cpp
     style/quicksurf/quicksurf_avx2.cpp

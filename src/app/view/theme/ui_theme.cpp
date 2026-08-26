@@ -1,6 +1,7 @@
 // =============================================================================
 // MolecuLens · app · view/theme/ui_theme.cpp —— 设计系统实现
 // 规格来源：主方案 §7.6（配色映射；动画引擎；组件库）
+// 新增：多主题支持
 // =============================================================================
 
 #include "app/view/theme/ui_theme.h"
@@ -20,7 +21,25 @@
 
 namespace moleculens::app {
 
+// 全局主题配色（可动态切换）
+namespace ui {
+ImVec4 C_BG(0.102f, 0.106f, 0.149f, 1.0f);
+ImVec4 C_SURFACE(0.122f, 0.137f, 0.208f, 1.0f);
+ImVec4 C_FRAME(0.165f, 0.180f, 0.259f, 1.0f);
+ImVec4 C_ACCENT(0.478f, 0.635f, 0.969f, 1.0f);
+ImVec4 C_ACCENT_HI(0.490f, 0.812f, 1.000f, 1.0f);
+ImVec4 C_OK(0.620f, 0.808f, 0.416f, 1.0f);
+ImVec4 C_WARN(0.878f, 0.686f, 0.408f, 1.0f);
+ImVec4 C_DANGER(0.969f, 0.463f, 0.557f, 1.0f);
+ImVec4 C_TEXT(0.753f, 0.792f, 0.961f, 1.0f);
+ImVec4 C_TEXT_MUTED(0.337f, 0.373f, 0.537f, 1.0f);
+} // namespace ui
+
 bool UITheme::fontsLoaded_ = false;
+UIThemePreset UITheme::currentTheme_ = UIThemePreset::TokyoNight;
+ImFont* UITheme::fontDefault_ = nullptr;
+ImFont* UITheme::fontTitle_ = nullptr;
+ImFont* UITheme::fontSmall_ = nullptr;
 
 float& UITheme::gTime() {
     static float t = 0.0f;
@@ -32,6 +51,32 @@ void UITheme::advanceTime(float dt) {
     if (gTime() > 1e9f) {
         gTime() = 0.0f;
     }
+}
+
+void UITheme::setTheme(UIThemePreset preset) {
+    currentTheme_ = preset;
+    ThemeColors colors = getThemeColors(preset);
+
+    // 更新全局配色
+    ui::C_BG = colors.bg;
+    ui::C_SURFACE = colors.surface;
+    ui::C_FRAME = colors.frame;
+    ui::C_ACCENT = colors.accent;
+    ui::C_ACCENT_HI = colors.accentHi;
+    ui::C_OK = colors.ok;
+    ui::C_WARN = colors.warn;
+    ui::C_DANGER = colors.danger;
+    ui::C_TEXT = colors.text;
+    ui::C_TEXT_MUTED = colors.textMuted;
+
+    // 重新应用主题到 ImGui
+    applyTheme();
+
+    spdlog::info("[ui] 主题切换: {}", getThemeNameZh(preset));
+}
+
+UIThemePreset UITheme::currentTheme() {
+    return currentTheme_;
 }
 
 void UITheme::applyTheme() {
@@ -192,12 +237,11 @@ bool UITheme::loadFont(const char* fontPath) {
     }
     // 三档字号（主方案 §7.6：16/20/13）
     io.FontDefault = font;
-    ImFont* fontTitle = io.Fonts->AddFontFromFileTTF(path.c_str(), 20.0f, nullptr,
-                                                     ranges.Data);
-    ImFont* fontSmall = io.Fonts->AddFontFromFileTTF(path.c_str(), 13.0f, nullptr,
-                                                     ranges.Data);
-    (void)fontTitle;
-    (void)fontSmall;
+    fontDefault_ = font;
+    fontTitle_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 20.0f, nullptr,
+                                             ranges.Data);
+    fontSmall_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 13.0f, nullptr,
+                                             ranges.Data);
     fontsLoaded_ = true;
     spdlog::info("[ui] font loaded: {}", path);
     return true;

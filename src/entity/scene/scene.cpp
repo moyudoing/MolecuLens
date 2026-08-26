@@ -88,16 +88,19 @@ uint32_t SceneStructure::addInstance(uint32_t structureIndex, const Transform& t
 uint32_t SceneStructure::addTrajectoryInstance(uint32_t structureIndex,
                                                const Transform& tm,
                                                std::shared_ptr<Trajectory> traj,
-                                               uint32_t systemId) {
+                                               uint32_t systemId,
+                                               const std::string& name,
+                                               bool isSolvent) {
     if (structureIndex >= structuresPool_.size() || !traj || traj->frames.empty()) {
         return UINT32_MAX;
     }
     MoleculeInstance mi;
     mi.structureIndex = structureIndex;
     mi.transform = tm;
-    mi.name = "molecule_" + std::to_string(instances_.size());
+    mi.name = name.empty() ? ("molecule_" + std::to_string(instances_.size())) : name;
     mi.trajectory = std::move(traj);
     mi.systemId = resolveSystemId(systemId);
+    mi.isSolvent = isSolvent;
 
     const uint32_t index = static_cast<uint32_t>(instances_.size());
     instances_.push_back(std::move(mi));
@@ -246,6 +249,20 @@ void SceneStructure::setInstanceVisible(uint32_t instanceIndex, bool visible) {
     }
     instances_[instanceIndex].visible = visible;
     setDirty(DIRTY_INSTANCE);
+}
+
+bool SceneStructure::setSolventVisible(bool visible) {
+    bool changed = false;
+    for (auto& inst : instances_) {
+        if (inst.isSolvent && inst.visible != visible) {
+            inst.visible = visible;
+            changed = true;
+        }
+    }
+    if (changed) {
+        setDirty(DIRTY_INSTANCE);
+    }
+    return changed;
 }
 
 void SceneStructure::setInstanceTransform(uint32_t instanceIndex, const Transform& tm) {

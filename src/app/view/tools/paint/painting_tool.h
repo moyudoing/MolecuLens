@@ -12,7 +12,7 @@ namespace moleculens::app {
 
 class PaintingTool : public BaseToolView {
 public:
-    const char* getTitle() const override { return "绘图工具"; }
+    [[nodiscard]] const char* getTitle() const override { return "绘图工具"; }
     void render(DataManager* dm, MolScene* scene) override;
 };
 

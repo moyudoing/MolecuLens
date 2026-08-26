@@ -62,10 +62,12 @@ void MolScene::shutdown() {
 }
 
 void MolScene::render(const ImVec2& size) {
+
     if (!renderer_ || !camera_ || !offscreen_ || !renderer_->scene()) {
         ImGui::Text("3D 视口未初始化（先打开文件）");
         return;
     }
+
     // 记录逻辑显示尺寸（拖拽平移用：屏幕像素 ↔ NDC 换算须用逻辑尺寸）
     displayW_ = static_cast<uint32_t>(std::max(1.0f, size.x));
     displayH_ = static_cast<uint32_t>(std::max(1.0f, size.y));
@@ -75,11 +77,13 @@ void MolScene::render(const ImVec2& size) {
         isDragging_ = false;
         dragButton_ = -1;
     }
+
     // CPU 光线追踪预览：整个视口由 RT 渲染（相机/场景变化时重渲）
     if (rayTracePreview_) {
         renderRayTracePreview(size);
         return;
     }
+
     // 离屏渲染目标用物理像素分辨率（logical × DisplayFramebufferScale）：
     // 否则高 DPI（缩放 >1）下纹理为逻辑分辨率，放大到物理像素后模糊。
     const ImGuiIO& io = ImGui::GetIO();
@@ -87,6 +91,7 @@ void MolScene::render(const ImVec2& size) {
     const float fsy = io.DisplayFramebufferScale.y > 0.0f ? io.DisplayFramebufferScale.y : 1.0f;
     const uint32_t w = static_cast<uint32_t>(std::max(1.0f, size.x * fsx));
     const uint32_t h = static_cast<uint32_t>(std::max(1.0f, size.y * fsy));
+
     if (w != viewportW_ || h != viewportH_) {
         offscreen_->resize(w, h);
         viewportW_ = w;
@@ -94,6 +99,7 @@ void MolScene::render(const ImVec2& size) {
         dirty_ = true;
         texture_ = ImTextureID(0);   // FBO 重建 → 纹理重建
     }
+
     // 相机移动 / 场景脏 → 重渲染
     // 除 yaw/pitch/distance/target 外还须检测 fov/ortho（工具栏切换视角）与
     // 场景脏位（背景/表示变更），否则改了视角/背景视图不刷新。
@@ -103,12 +109,16 @@ void MolScene::render(const ImVec2& size) {
                               camera_->fov != lastFov_ || camera_->ortho != lastOrtho_ ||
                               camera_->roll != lastRoll_);
     const bool sceneDirty = renderer_->scene()->dirtyBits() != 0;
+
+    // 判断变化 是否需要渲染器更新
     if (dirty_ || cameraMoved || sceneDirty ||
         renderer_->commandSerial() != lastSerial_) {
+
         renderer_->update(0.0f);   // 脏位域 → needsRebuild_（prepare 阶段重建命令流）
         const auto& props = renderer_->scene()->properties();
         offscreen_->setBackground(props.bgColor);
         renderer_->prepare();
+
         // 诊断（一次性/数量变化时）：数据→命令流几何是否生成，定位断点
         {
             uint32_t nSphere = 0, nCyl = 0, nLine = 0, nMesh = 0;
@@ -130,12 +140,14 @@ void MolScene::render(const ImVec2& size) {
                              nSphere, nCyl, nLine, nMesh, cl.serial());
             }
         }
+
         engine::RenderView view;
         view.camera = *camera_;
         view.width = w;
         view.height = h;
         renderer_->applySceneLighting(view);   // 场景光照/雾 → UBO（光照更新机制）
         offscreen_->execute(renderer_->commandList(), view);
+
         // 一次性诊断：回读离屏图像统计非背景像素——区分"渲染空白"（draw 未写入）
         // 与"图像正常但显示失败"（ImGui 纹理未显示）。
         {
@@ -146,11 +158,13 @@ void MolScene::render(const ImVec2& size) {
                 if (offscreen_->readbackPixels(px, engine::PixelFormat::Rgba8)) {
                     uint32_t nonBg = 0;
                     uint32_t centerR = 0, centerG = 0, centerB = 0;
+
                     for (size_t i = 0; i + 3 < px.size(); i += 4) {
                         if (px[i] > 45 || px[i + 1] > 45 || px[i + 2] > 50) {
                             ++nonBg;
                         }
                     }
+
                     const size_t c = (static_cast<size_t>(viewportH_) / 2 *
                                           static_cast<size_t>(viewportW_) +
                                       static_cast<size_t>(viewportW_) / 2) *

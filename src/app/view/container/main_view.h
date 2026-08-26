@@ -35,7 +35,7 @@ public:
     ~MainView();
 
     // 统一渲染"3D 视口 + 时间轴 + 状态栏"（主方案 §7.1）
-    void renderAll(RenderContext& ctx);
+    static void renderAll(RenderContext& ctx);
 
 private:
     static void renderViewport(RenderContext& ctx);

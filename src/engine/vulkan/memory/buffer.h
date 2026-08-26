@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <vector>
 
+#include <glm/glm.hpp>   // SurfaceCompParams（vulkan/compute/surface_compute.h）依赖 glm 布局
+
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
@@ -29,7 +31,8 @@ public:
     Buffer& operator=(const Buffer&) = delete;
 
     bool create(VulkanDevice& device, VkDeviceSize size, VkBufferUsageFlags usage,
-                VmaMemoryUsage memUsage);
+                VmaMemoryUsage memUsage,
+                VmaAllocationCreateFlags extraFlags = 0);
     // 上传（staging → device-local 或直接 memcpy HOST_VISIBLE）
     void upload(VulkanDevice& device, const void* data, VkDeviceSize bytes,
                 VkDeviceSize offset = 0);
@@ -37,6 +40,8 @@ public:
                      VkDeviceSize bytes, VkDeviceSize offset = 0);
     void* map();
     void unmap();
+    // 回读：GPU 写 HOST_VISIBLE 后使主机端缓存失效（读取新数据）。配合 map() 使用。
+    void invalidate(VkDeviceSize size);
 
     VkBuffer buffer() const { return buffer_; }
     VkDeviceSize size() const { return size_; }

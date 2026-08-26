@@ -18,7 +18,7 @@ class BaseToolView {
 public:
     virtual ~BaseToolView() = default;
 
-    virtual const char* getTitle() const = 0;
+    [[nodiscard]] virtual const char* getTitle() const = 0;
     virtual bool* getVisible() { return nullptr; }   // nullptr = 常显
     virtual void render(DataManager* dm, MolScene* scene) = 0;
 

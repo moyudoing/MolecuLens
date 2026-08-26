@@ -18,26 +18,42 @@ namespace moleculens::engine {
 
 // —— 风格生成器实现（各风格 cpp；统一签名 DrawFn）——
 void drawSpacefill(const RepContext&, SceneCommandList&);
+void drawVdw(const RepContext&, SceneCommandList&);
 void drawBallAndStick(const RepContext&, SceneCommandList&);
 void drawStick(const RepContext&, SceneCommandList&);
 void drawWireframe(const RepContext&, SceneCommandList&);
 void drawCartoon(const RepContext&, SceneCommandList&);
 void drawSurface(const RepContext&, SceneCommandList&);
 void drawQuickSurf(const RepContext&, SceneCommandList&);
+void drawLicorice(const RepContext&, SceneCommandList&);
+void drawTube(const RepContext&, SceneCommandList&);
+void drawNewCartoon(const RepContext&, SceneCommandList&);
+void drawRibbon(const RepContext&, SceneCommandList&);
 
 // 预留风格（M2 后落地）：label
 void drawLabelPlaceholder(const RepContext&, SceneCommandList&);
 
+// 注意：表长必须 = RepresentationType::Count（13 项），下标严格对齐枚举。
+// 此前只有 8 项且 QuickSurf 误置到 Vdw 槽位：选择 VDW 会分派到 drawQuickSurf
+// （画出高斯表面而非范德华球），而 QuickSurf（枚举下标 8）落在表末越界
+// （第 9 项被零初始化 → 空函数指针 → 选择"快速表面/QuickSurf"崩溃）。
+// 修复：Vdw 槽位用 drawVdw（全范德华半径），QuickSurf 移到 index 8。
+// 新增：Licorice(9), Tube(10), NewCartoon(11), Ribbon(12)
 const Representer::DrawFn Representer::kDrawTable[
     static_cast<int>(RepresentationType::Count)] = {
-    drawWireframe,        // Wireframe
-    drawStick,            // Stick
-    drawBallAndStick,     // BallAndStick
-    drawSpacefill,        // Spacefill
-    drawCartoon,          // Cartoon
-    drawSurface,          // Surface（vdW 表面，Marching Cubes）
-    drawLabelPlaceholder,    // Label（M2）
-    drawQuickSurf,        // QuickSurf（高斯密度等值面）
+    drawWireframe,        // [0] Wireframe
+    drawStick,            // [1] Stick
+    drawBallAndStick,     // [2] BallAndStick
+    drawSpacefill,        // [3] Spacefill（CPK）
+    drawCartoon,          // [4] Cartoon
+    drawSurface,          // [5] Surface（vdW 表面，Marching Cubes）
+    drawLabelPlaceholder, // [6] Label（M2）
+    drawVdw,              // [7] Vdw（全范德华半径空间填充，不受 radiusScale）
+    drawQuickSurf,        // [8] QuickSurf（高斯密度等值面）
+    drawLicorice,         // [9] Licorice（甘草棍，粗棍状）
+    drawTube,             // [10] Tube（管状，backbone 平滑管）
+    drawNewCartoon,       // [11] NewCartoon（改进卡通，更平滑）
+    drawRibbon,           // [12] Ribbon（丝带，薄带状 backbone）
 };
 
 namespace {

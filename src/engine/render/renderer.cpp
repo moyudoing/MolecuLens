@@ -9,6 +9,8 @@
 #include <algorithm>
 
 #include "engine/rep/representer.h"
+#include "engine/style/quicksurf/quicksurf.h"
+#include "engine/style/surface/surface.h"
 #include "engine/vulkan/realtime/vulkan_renderer.h"
 #include "entity/element/element.h"
 #include "entity/scene/scene.h"
@@ -71,37 +73,77 @@ void Renderer::rebuildCommandList() {
     refreshFrameData();
 
     SceneCommandList fresh;
-    // 每 (实例, 表示) 一个生成段（P10 并行；此处串行实现，M2 接入 TaskPool）
-    for (const auto& inst : scene_->instances()) {
-        if (!inst.visible) {
+    // 每 (表示, 实例) 生成段（P10 并行；此处串行实现，M2 接入 TaskPool）——
+    // Selection 掩码对整个场景求值一次（与实例无关），本表示全部实例复用。
+    for (const auto& rep : representations_) {
+        if (!rep.visible) {
             continue;
         }
-        // 体系显隐：整个体系隐藏则其成员整体不渲染（体系作为整体对象）
-        if (inst.systemId != UINT32_MAX) {
-            const uint32_t si = scene_->systemIndexById(inst.systemId);
-            if (si != UINT32_MAX && !scene_->systems()[si].visible) {
-                continue;
+        // Selection 求值（跨实例全局掩码）
+        std::vector<bool> mask;
+        if (rep.selection.empty()) {
+            mask.assign(scene_->coordsSoA().atomIds.size(), true);
+        } else {
+            entity::Selection sel;
+            const entity::ParseTable& table = entity::ParseTable::defaultTable();
+            if (sel.parse(rep.selection, table)) {
+                sel.evaluate(*scene_, frameData_, 0);
+                mask = sel.mask();
+            } else {
+                mask.assign(scene_->coordsSoA().atomIds.size(), true);
             }
         }
-        for (const auto& rep : representations_) {
-            if (!rep.visible) {
+
+        // 体系级表面（G5）：整体系（含溶剂分子）一个整体表面，只发射一次（而非
+        // 每分子一个独立小表面）。surface/quicksurf 表示设置 rep.systemSurface 时生效。
+        if (rep.systemSurface &&
+            (rep.type == RepresentationType::Surface ||
+             rep.type == RepresentationType::QuickSurf)) {
+            // 整体表面是单一 TriMesh，恒以体系渲染模式「实心」(mode0) 绘制；
+            // 必须先重置 RenderMode 与材质：若此前其它表示的最后一条 RenderMode/
+            // MaterialBlock 命令残留，表面网格会继承错误的管线（线框/透明）或全零
+            // 默认材质（diffuse=0）→ 烘焙后顶点色全黑 → 表面不可见。
+            RenderModeInst rmi0;
+            rmi0.mode = 0;
+            rmi0.pad[0] = rmi0.pad[1] = rmi0.pad[2] = 0;
+            fresh.append(Cmd::RenderMode, &rmi0, sizeof(rmi0));
+            MaterialBlock mat0;
+            mat0.ambient = glm::vec4(rep.ambient[0], rep.ambient[1], rep.ambient[2],
+                                     rep.ambient[3]);
+            mat0.diffuse = glm::vec4(rep.diffuse[0], rep.diffuse[1], rep.diffuse[2],
+                                     rep.diffuse[3]);
+            mat0.specular = glm::vec4(rep.specular[0], rep.specular[1], rep.specular[2],
+                                      rep.specular[3]);
+            mat0.shininess = rep.shininess;
+            mat0.metallic = rep.metallic;
+            mat0.roughness = rep.roughness;
+            mat0.opacity = rep.opacity;
+            fresh.append(Cmd::MaterialBlock, &mat0, sizeof(mat0));
+
+            RepContext sctx;
+            sctx.scene = scene_;
+            sctx.frame = &frameData_;
+            sctx.rep = &rep;
+            sctx.mask = &mask;
+            if (rep.type == RepresentationType::Surface) {
+                drawSystemSurface(sctx, fresh);
+            } else {
+                drawSystemQuickSurf(sctx, fresh);
+            }
+            continue;   // 跳过逐实例生成（整体系一个表面已足够）
+        }
+
+        for (const auto& inst : scene_->instances()) {
+            if (!inst.visible) {
                 continue;
             }
-            // Selection 求值（跨实例全局掩码）
-            std::vector<bool> mask;
-            if (rep.selection.empty()) {
-                mask.assign(scene_->coordsSoA().atomIds.size(), true);
-            } else {
-                entity::Selection sel;
-                const entity::ParseTable& table = entity::ParseTable::defaultTable();
-                if (sel.parse(rep.selection, table)) {
-                    sel.evaluate(*scene_, frameData_, 0);
-                    mask = sel.mask();
-                } else {
-                    mask.assign(scene_->coordsSoA().atomIds.size(), true);
+            // 体系显隐：整个体系隐藏则其成员整体不渲染（体系作为整体对象）
+            if (inst.systemId != UINT32_MAX) {
+                const uint32_t si = scene_->systemIndexById(inst.systemId);
+                if (si != UINT32_MAX && !scene_->systems()[si].visible) {
+                    continue;
                 }
             }
-
             // 实例下标查找
             uint32_t instIdx = 0;
             for (uint32_t i = 0; i < scene_->instances().size(); ++i) {

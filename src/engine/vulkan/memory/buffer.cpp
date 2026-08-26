@@ -80,7 +80,7 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
 }
 
 bool Buffer::create(VulkanDevice& device, VkDeviceSize size, VkBufferUsageFlags usage,
-                    VmaMemoryUsage memUsage) {
+                    VmaMemoryUsage memUsage, VmaAllocationCreateFlags extraFlags) {
     destroy();
     device_ = &device;
     allocator_ = allocatorFor(device);
@@ -95,8 +95,11 @@ bool Buffer::create(VulkanDevice& device, VkDeviceSize size, VkBufferUsageFlags 
 
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = memUsage;
-    if (memUsage == VMA_MEMORY_USAGE_AUTO_PREFER_HOST ||
-        memUsage == VMA_MEMORY_USAGE_AUTO) {
+    if (extraFlags != 0) {
+        // 调用方显式指定标志（如表面计算回读需 HOST_ACCESS_RANDOM + MAPPED）
+        allocInfo.flags = extraFlags;
+    } else if (memUsage == VMA_MEMORY_USAGE_AUTO_PREFER_HOST ||
+               memUsage == VMA_MEMORY_USAGE_AUTO) {
         allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                           VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
@@ -171,6 +174,11 @@ void Buffer::unmap() {
     if (valid()) {
         vmaUnmapMemory(allocator_, allocation_);
     }
+}
+
+void Buffer::invalidate(VkDeviceSize size) {
+    // GPU 写 HOST_VISIBLE 后，主机端读缓存可能还持有旧数据；回读前必须 invalidate，
+    // 否则读到陈旧字段（全 0/垃圾）。与 map()/unmap() 配合（表面计算回读，见\n surface_compute.cpp\n）。\n    if (valid() && size > 0) {\n        vmaInvalidateAllocation(allocator_, allocation_, 0, size);\n    }
 }
 
 void Buffer::destroy() {

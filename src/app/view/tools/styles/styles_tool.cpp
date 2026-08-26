@@ -43,17 +43,20 @@ bool sliderWithReset(const char* label, float* value, float min, float max,
 } // namespace
 
 void StylesTool::render(DataManager* dm, MolScene* scene) {
+
     (void)dm;
     if (!repCtl_ || !scene || !scene->getCamera()) {
         ImGui::TextDisabled("视口/控制器未就绪");
         return;
     }
+
     // 当前表示（UI 作用目标：第一个表示；读取其真实状态而非静态默认值）
     const auto& reps = repCtl_->representations();
     if (reps.empty()) {
         ImGui::TextDisabled("无表示");
         return;
     }
+
     constexpr int activeRep = 0;
     const engine::Representation& rep = reps[activeRep];
     const auto* sc = scene->scene();
@@ -73,32 +76,40 @@ void StylesTool::render(DataManager* dm, MolScene* scene) {
     // 名称 → 类型显式映射（此前用下标直接 cast 枚举，名称与类型错位：
     //  "球棍" 实为 Stick、"CPK" 实为 BallAndStick、VDW 不可用）
     static const char* styleNames[] = {"线状", "棍状", "球棍", "CPK", "VDW",
-                                       "甘草棍", "表面", "QuickSurf"};
-    static const engine::RepresentationType styleTypes[] = {
+                                       "甘草棍", "表面", "QuickSurf", "丝带",
+                                       "管状", "新卡通"};
+    static constexpr engine::RepresentationType styleTypes[] = {
         engine::RepresentationType::Wireframe,
         engine::RepresentationType::Stick,
         engine::RepresentationType::BallAndStick,
-        engine::RepresentationType::Spacefill,   // CPK：范德华半径空间填充
-        engine::RepresentationType::Spacefill,   // VDW：范德华空间填充
+        engine::RepresentationType::Spacefill,   // CPK：范德华半径空间填充（受球体缩放）
+        engine::RepresentationType::Vdw,         // VDW：全范德华半径空间填充（不受缩放）
         engine::RepresentationType::Cartoon,
         engine::RepresentationType::Surface,
         engine::RepresentationType::QuickSurf,   // 高斯密度等值面
+        engine::RepresentationType::Ribbon,      // 丝带：平滑 CA 骨架带状
+        engine::RepresentationType::Tube,        // 管状：圆管骨架
+        engine::RepresentationType::NewCartoon,  // 新卡通：改进的二级结构渲染
     };
-    int styleIdx = 2;   // 默认球棍
+
+    int styleIdx = 2;   // 2 默认球棍
     for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(styleTypes)); ++i) {
         if (styleTypes[i] == rep.type) {
             styleIdx = i;
             break;
         }
     }
+
+    // 样式选项
     ImGui::Text("样式");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0f);
     if (ImGui::Combo("##style", &styleIdx, styleNames, IM_ARRAYSIZE(styleNames))) {
         repCtl_->setType(activeRep, styleTypes[styleIdx]);
     }
+    // UITheme::helpMarker("CPK/VDW = 范德华空间填充；QuickSurf = 高斯密度等值面（可调阈值/网格）");
     ImGui::SameLine();
-    UITheme::helpMarker("CPK/VDW = 范德华空间填充；QuickSurf = 高斯密度等值面（可调阈值/网格）");
+
     // QuickSurf 参数（等值面阈值 / 网格间距；radscale 复用上方"球体缩放"）
     if (rep.type == engine::RepresentationType::QuickSurf) {
         float iso = rep.surfIsovalue;
@@ -110,6 +121,19 @@ void StylesTool::render(DataManager* dm, MolScene* scene) {
             repCtl_->setSurfGridSpacing(activeRep, gs);
         }
         UITheme::helpMarker("网格间距越小表面越精细（计算越慢）；等值面阈值控制表面贴合度");
+    }
+    // 体系级表面：Surface/QuickSurf 整体系（含溶剂分子）一个整体表面——
+    // 溶剂化大体系（md.gro 大量 SOL）每分子一个独立小表面既慢又碎，
+    // 开启后按整个体系聚合为一个连续表面（渲染器 drawSystemSurface/drawSystemQuickSurf）
+    if (rep.type == engine::RepresentationType::Surface ||
+        rep.type == engine::RepresentationType::QuickSurf) {
+        bool ss = rep.systemSurface;
+        if (ImGui::Checkbox("整体系合并表面", &ss)) {
+            repCtl_->setSystemSurface(activeRep, ss);
+        }
+        UITheme::helpMarker("开启后按整个体系生成一个整体表面（含溶剂分子），"
+                            "而非每个分子各自一个独立小表面；溶剂化大体系（如 md.gro）用");
+        ImGui::Separator();
     }
 
     // 着色方案

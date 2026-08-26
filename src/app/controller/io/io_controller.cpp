@@ -94,8 +94,9 @@ void mergeParsedScene(const entity::SceneStructure& src,
         }
         entity::Transform tm = inst.transform;
         tm.translation -= center;   // 体系中心 → 原点（体系内分子相对排布保留）
-        dst.addTrajectoryInstance(structMap[inst.structureIndex], tm,
-                                  inst.trajectory, sysId);
+        // 保留实例名与溶剂标记（gro 按残基拆分子：名 = 残基名#序号、isSolvent 标记）
+        dst.addTrajectoryInstance(structMap[inst.structureIndex], tm, inst.trajectory,
+                                  sysId, inst.name, inst.isSolvent);
     }
 }
 

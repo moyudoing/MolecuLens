@@ -18,6 +18,10 @@ struct BondSearchOptions {
     float tolerance = 0.45f;      // 判键容差（Å）
     bool  multiThreaded = true;
     int   threadCount = 0;        // 0 = 自动（硬件并发）
+    // 周期盒子（Å，3 分量对角线长度）。非空且全>0 时判键位移用最小镜像
+    // d' = d - L*round(d/L)（解决分子跨盒子边界的分子内键被漏判的问题，
+    // 见 moleculens-fixes —— gro 溶剂化体系 md.gro 40.28Å 盒）。
+    const float* periodicBox = nullptr;
 };
 
 class BondSearch {

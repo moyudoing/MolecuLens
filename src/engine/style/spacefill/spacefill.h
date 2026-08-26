@@ -13,5 +13,7 @@ namespace moleculens::engine {
 
 // kDrawTable 分派入口（实现见 spacefill.cpp）
 void drawSpacefill(const RepContext&, SceneCommandList&);
+// VDW：范德华全半径空间填充（不受 radiusScale 缩放，区别于 CPK/Spacefill）
+void drawVdw(const RepContext&, SceneCommandList&);
 
 } // namespace moleculens::engine
