@@ -16,6 +16,7 @@
     },
     "spdlog",
     "nlohmann-json",
+    "lodepng",
     { "name": "cppzmq", "platform": "!windows" },
     "cli11",
     "catch2"

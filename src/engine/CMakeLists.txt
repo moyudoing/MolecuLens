@@ -71,4 +71,5 @@ target_link_libraries(moleculens_engine PUBLIC
     volk::volk
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
-    glfw)
+    glfw
+    lodepng)

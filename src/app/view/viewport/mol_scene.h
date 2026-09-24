@@ -67,11 +67,14 @@ public:
     [[nodiscard]] uint32_t displayWidth() const { return displayW_; }
     [[nodiscard]] uint32_t displayHeight() const { return displayH_; }
 
-    // 导出：离屏渲染到指定分辨率 → RGBA8 回读 → PNG 写出（M4 落地）
-    // bgOverride = nullptr 用场景背景；否则用给定 RGB（导出"白色背景"用）。
-    // ssaa = 超采样倍数（1 无；≥2 先渲染到 width*ssaa 再盒式降采样 → 抗锯齿）。
+    // 导出：离屏渲染到指定分辨率 → 回读 → PNG 写出。
+    //   bgOverride   = nullptr 用场景背景；否则用给定 RGB（"白色背景"用）
+    //   ssaa         = 超采样倍数（1 无；≥2 先渲染到 width*ssaa 再盒式降采样）
+    //   colorDepth   = 8 或 16（16 时在浮点上求平均再量化，保留超采样的额外精度）
+    //   transparentBg= true 时背景 alpha=0（PNG 可作合成素材；几何仍不透明）
     bool exportToPng(uint32_t width, uint32_t height, const std::string& path,
-                     const float bgOverride[3] = nullptr, int ssaa = 1);
+                     const float bgOverride[3] = nullptr, int ssaa = 1,
+                     int colorDepth = 8, bool transparentBg = false);
 
     // 导出：自研 CPU 光线追踪（一.7）→ PNG；samplesPerPixel = 每像素子采样
     bool exportRayTracedToPng(uint32_t width, uint32_t height, const std::string& path,

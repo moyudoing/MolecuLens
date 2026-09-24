@@ -13,6 +13,11 @@ find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
+# lodepng：PNG 编解码（单文件、MIT、有 CMake target）。
+# 选它而不是 stb_image_write：后者**不支持 16-bit PNG**（API 只有 8-bit，源码亦无
+# 16-bit 分支），而 16-bit 恰是高清导出的需求之一；lodepng 同时覆盖 8/16-bit 且
+# 自带真实 deflate 压缩 —— 是同一用途下的超集。
+find_package(lodepng CONFIG REQUIRED)
 
 if(MOLECULENS_BUILD_TESTS)
     find_package(Catch2 CONFIG REQUIRED)
@@ -33,7 +38,7 @@ endif()
 #       imgui(docking) 提供 imgui::imgui。
 #       验证每个目标存在性，缺失时给出明确错误。
 foreach(tgt volk::volk Vulkan::Headers GPUOpen::VulkanMemoryAllocator glfw imgui::imgui
-        spdlog::spdlog nlohmann_json::nlohmann_json glm::glm)
+        spdlog::spdlog nlohmann_json::nlohmann_json glm::glm lodepng)
     if(NOT TARGET ${tgt})
         message(FATAL_ERROR "Required dependency target '${tgt}' not found. "
                 "Check vcpkg.json and rerun: vcpkg install")

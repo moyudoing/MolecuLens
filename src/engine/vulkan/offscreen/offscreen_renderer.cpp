@@ -119,15 +119,28 @@ void OffscreenRenderer::shutdown() {
     device_ = nullptr;
 }
 
-void OffscreenRenderer::setBackground(const float* rgb) {
+void OffscreenRenderer::setBackground(const float* rgb, float alpha) {
     clearColor_[0] = rgb[0];
     clearColor_[1] = rgb[1];
     clearColor_[2] = rgb[2];
-    clearColor_[3] = 1.0f;
+    clearColor_[3] = alpha;
 }
 
 bool OffscreenRenderer::createFramebuffer() {
     destroyFramebuffer();
+    // 尺寸上限防护：超过 maxImageDimension2D 时 vkCreateImage 直接失败，
+    // 而调用方此前只能看到一句 "framebuffer failed"，无从判断是尺寸过大。
+    // 高分辨率导出（4K/8K + SSAA）很容易撞上限，故在此显式检查并报出具体数字。
+    {
+        VkPhysicalDeviceProperties devProps{};
+        vkGetPhysicalDeviceProperties(device_->physicalDevice(), &devProps);
+        const uint32_t maxDim = devProps.limits.maxImageDimension2D;
+        if (width_ > maxDim || height_ > maxDim) {
+            spdlog::error("[backend] 离屏尺寸 {}x{} 超出设备上限 maxImageDimension2D={}",
+                          width_, height_, maxDim);
+            return false;
+        }
+    }
     // 无 MSAA（主方案 §12.5：导出 MSAA 可配，M1 先 1x；M4 支持 msaa 参数）
     const VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
     const VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;

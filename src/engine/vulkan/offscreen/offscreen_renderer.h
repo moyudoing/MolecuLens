@@ -64,7 +64,9 @@ public:
     VkSampler sampler() const { return sampler_; }
     // 附件布局（execute 后为 SHADER_READ_ONLY_OPTIMAL，可供采样）
     VkImageLayout colorLayout() const { return colorLayout_; }
-    void setBackground(const float* rgb);   // 清屏色（主方案 §4.4 背景）
+    // 清屏色（主方案 §4.4 背景）。alpha 用于透明背景导出：
+    // 几何以不透明管线绘制（写自身 alpha），背景留 alpha=0 → PNG 可作合成素材。
+    void setBackground(const float* rgb, float alpha = 1.0f);
 
 private:
     bool createFramebuffer();

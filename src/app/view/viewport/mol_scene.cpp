@@ -350,7 +350,7 @@ void MolScene::handleScroll(float scrollY) {
 
 bool MolScene::exportToPng(uint32_t width, uint32_t height,
                            const std::string& path, const float bgOverride[3],
-                           int ssaa) {
+                           int ssaa, int colorDepth, bool transparentBg) {
     if (!renderer_ || !camera_ || !offscreen_ || !renderer_->scene()) {
         spdlog::error("[io] export: 渲染器/相机/场景未就绪");
         return false;
@@ -362,6 +362,16 @@ bool MolScene::exportToPng(uint32_t width, uint32_t height,
     const int ss = std::max(1, ssaa);
     const uint32_t rw = width * static_cast<uint32_t>(ss);
     const uint32_t rh = height * static_cast<uint32_t>(ss);
+    // 内存防护：8K(7680×4320) + SSAA4 的离屏缓冲约 2.1 GB，此前无任何上限检查，
+    // 会直接把进程推向 OOM。此处给一个明确上限并报出实际需要量，而不是任其失败。
+    constexpr uint64_t kMaxExportBytes = 1ull << 31;   // 2 GiB（含回读副本则 ×2）
+    const uint64_t frameBytes = static_cast<uint64_t>(rw) * rh * 4u;
+    if (frameBytes > kMaxExportBytes) {
+        spdlog::error("[io] export: {}x{} (SSAA {}) 需 {} MiB 离屏缓冲，超出上限 {} MiB"
+                      " —— 请降低分辨率或超采样倍数",
+                      rw, rh, ss, frameBytes >> 20, kMaxExportBytes >> 20);
+        return false;
+    }
     // 确保命令流最新（脏则重建）
     renderer_->update(0.0f);
     renderer_->prepare();
@@ -381,10 +391,12 @@ bool MolScene::exportToPng(uint32_t width, uint32_t height,
         exportTarget_->resize(rw, rh);
     }
     const auto& props = renderer_->scene()->properties();
+    // 透明背景：清屏 alpha 置 0，几何由不透明管线写入自身 alpha（=1）
+    const float bgAlpha = transparentBg ? 0.0f : 1.0f;
     if (bgOverride) {
-        exportTarget_->setBackground(bgOverride);
+        exportTarget_->setBackground(bgOverride, bgAlpha);
     } else {
-        exportTarget_->setBackground(props.bgColor);
+        exportTarget_->setBackground(props.bgColor, bgAlpha);
     }
     engine::RenderView view = renderer_->viewFor(*camera_, rw, rh);
     exportTarget_->execute(renderer_->commandList(), view);
@@ -392,6 +404,40 @@ bool MolScene::exportToPng(uint32_t width, uint32_t height,
     if (!exportTarget_->readbackPixels(px, engine::PixelFormat::Rgba8)) {
         spdlog::error("[io] export: 像素回读失败");
         return false;
+    }
+    // 16-bit 输出：在浮点上求平均后再量化到 16 bit。
+    // 这是 16-bit 唯一**真实**有意义的来源 —— N 个 8-bit 样本的平均值携带超过
+    // 8 bit 的信息量，直接量化回 8 bit 会丢弃它（ss=1 时无超采样，16-bit 只是
+    // 容器变宽，无额外精度，UI 侧已注明）。
+    if (colorDepth == 16) {
+        std::vector<uint16_t> out16(static_cast<size_t>(width) * height * 4u);
+        const float inv = 1.0f / static_cast<float>(ss * ss);
+        for (uint32_t y = 0; y < height; ++y) {
+            for (uint32_t x = 0; x < width; ++x) {
+                float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                for (int dy = 0; dy < ss; ++dy) {
+                    for (int dx = 0; dx < ss; ++dx) {
+                        const size_t s = (static_cast<size_t>(y * ss + dy) * rw +
+                                          static_cast<size_t>(x * ss + dx)) * 4u;
+                        for (int c = 0; c < 4; ++c) {
+                            acc[c] += static_cast<float>(px[s + c]);
+                        }
+                    }
+                }
+                const size_t d = (static_cast<size_t>(y) * width + x) * 4u;
+                for (int c = 0; c < 4; ++c) {
+                    // 8-bit 区间 [0,255] 映射到 16-bit [0,65535]：乘 257
+                    const float v = acc[c] * inv * 257.0f;
+                    out16[d + c] =
+                        static_cast<uint16_t>(std::clamp(v, 0.0f, 65535.0f) + 0.5f);
+                }
+            }
+        }
+        if (!engine::writePng16(path, width, height, out16)) {
+            spdlog::error("[io] export: PNG(16-bit) 编码/写入失败");
+            return false;
+        }
+        return true;
     }
     // 超采样（SSAA）：把 rw×rh 盒式降采样回 width×height → 抗锯齿
     if (ss > 1) {
