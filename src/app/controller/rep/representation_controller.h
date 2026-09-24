@@ -51,6 +51,13 @@ public:
 
     [[nodiscard]] const std::vector<engine::Representation>& representations() const;
 
+    // 装配：把本控制器持有的表示列表绑定给渲染器（此后每次变更由 touch() 重新绑定）。
+    // 控制器是表示数据的唯一持有者，渲染器只持只读视图 → 变更不再整表深拷贝。
+    void attachToRenderer();
+
+    // 整体替换表示列表（载入 .mlscene 等"整场景替换"用）。
+    // 换入后调用 touch()：递增修订号、重新绑定渲染器、置 DIRTY_REPRESENTATION。
+    void replaceAll(std::vector<engine::Representation> reps);
 
     // 事件相关
     void onEvent(const Event&) override;
@@ -58,6 +65,7 @@ public:
 private:
     AppServices& svc_;
     std::vector<engine::Representation> reps_;
+    uint64_t revision_ = 0;   // 表示修订号（每次变更递增；渲染器据此判断需否重建）
     void touch();
 };
 

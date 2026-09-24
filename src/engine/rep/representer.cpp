@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "engine/render/render_parameter.h"
+#include "engine/style/style_registry.h"
 #include "engine/style/quicksurf/quicksurf.h"
 #include "entity/element/element.h"
 #include "entity/molecule/molecule.h"
@@ -16,45 +17,51 @@
 
 namespace moleculens::engine {
 
-// —— 风格生成器实现（各风格 cpp；统一签名 DrawFn）——
-void drawSpacefill(const RepContext&, SceneCommandList&);
-void drawVdw(const RepContext&, SceneCommandList&);
-void drawBallAndStick(const RepContext&, SceneCommandList&);
-void drawStick(const RepContext&, SceneCommandList&);
-void drawWireframe(const RepContext&, SceneCommandList&);
-void drawCartoon(const RepContext&, SceneCommandList&);
-void drawSurface(const RepContext&, SceneCommandList&);
-void drawQuickSurf(const RepContext&, SceneCommandList&);
-void drawLicorice(const RepContext&, SceneCommandList&);
-void drawTube(const RepContext&, SceneCommandList&);
-void drawNewCartoon(const RepContext&, SceneCommandList&);
-void drawRibbon(const RepContext&, SceneCommandList&);
+// —— 风格生成器实现（各风格 cpp；统一签名 StyleDrawFn）——
+// 分派经 style_registry 的 styleFor()（先运行时覆盖层、后编译期静态表）——
+// 单一事实来源。各 draw* 入口的声明统一由 base_style.h 提供
+// （经下方 style_registry.h 转递包含），此处不再重复声明。
 
-// 预留风格（M2 后落地）：label
-void drawLabelPlaceholder(const RepContext&, SceneCommandList&);
+namespace {
 
-// 注意：表长必须 = RepresentationType::Count（13 项），下标严格对齐枚举。
-// 此前只有 8 项且 QuickSurf 误置到 Vdw 槽位：选择 VDW 会分派到 drawQuickSurf
-// （画出高斯表面而非范德华球），而 QuickSurf（枚举下标 8）落在表末越界
-// （第 9 项被零初始化 → 空函数指针 → 选择"快速表面/QuickSurf"崩溃）。
-// 修复：Vdw 槽位用 drawVdw（全范德华半径），QuickSurf 移到 index 8。
-// 新增：Licorice(9), Tube(10), NewCartoon(11), Ribbon(12)
-const Representer::DrawFn Representer::kDrawTable[
-    static_cast<int>(RepresentationType::Count)] = {
-    drawWireframe,        // [0] Wireframe
-    drawStick,            // [1] Stick
-    drawBallAndStick,     // [2] BallAndStick
-    drawSpacefill,        // [3] Spacefill（CPK）
-    drawCartoon,          // [4] Cartoon
-    drawSurface,          // [5] Surface（vdW 表面，Marching Cubes）
-    drawLabelPlaceholder, // [6] Label（M2）
-    drawVdw,              // [7] Vdw（全范德华半径空间填充，不受 radiusScale）
-    drawQuickSurf,        // [8] QuickSurf（高斯密度等值面）
-    drawLicorice,         // [9] Licorice（甘草棍，粗棍状）
-    drawTube,             // [10] Tube（管状，backbone 平滑管）
-    drawNewCartoon,       // [11] NewCartoon（改进卡通，更平滑）
-    drawRibbon,           // [12] Ribbon（丝带，薄带状 backbone）
-};
+// —— 中文名（representation.h 声明、此处定义；样式名以 style_registry 为唯一来源）——
+const char* representationTypeZhImpl(RepresentationType type) noexcept {
+    // 样式名转调 style_registry 的 styleDisplayName（权威中文名，消除 styles_tool 重复表）
+    if (const char* name = styleDisplayName(type); name != nullptr) {
+        return name;
+    }
+    return "未知";
+}
+
+const char* colorSchemeZhImpl(ColorScheme scheme) noexcept {
+    switch (scheme) {
+        case ColorScheme::ElementCPK: return "元素 CPK";
+        case ColorScheme::Chain:       return "按链";
+        case ColorScheme::Residue:     return "按残基";
+        case ColorScheme::BFactor:     return "按 BFactor";
+        case ColorScheme::Uniform:     return "统一色";
+        default:                       return "未知";
+    }
+}
+
+} // namespace
+
+// representation.h 声明的英文/中文名（统一入口，UI 与日志共用）
+const char* representationTypeName(RepresentationType type) noexcept {
+    return representationTypeZhImpl(type);
+}
+
+const char* representationTypeZh(RepresentationType type) noexcept {
+    return representationTypeZhImpl(type);
+}
+
+const char* colorSchemeName(ColorScheme scheme) noexcept {
+    return colorSchemeZhImpl(scheme);
+}
+
+const char* colorSchemeZh(ColorScheme scheme) noexcept {
+    return colorSchemeZhImpl(scheme);
+}
 
 namespace {
 
@@ -189,10 +196,9 @@ void Representer::generate(const Representation& rep,
     }
     out.append(Cmd::MaterialBlock, &mat, sizeof(mat));
 
-    // 分派
-    const int idx = static_cast<int>(rep.type);
-    if (idx >= 0 && idx < static_cast<int>(RepresentationType::Count)) {
-        kDrawTable[idx](ctx, out);
+    // 分派：经 style_registry 统一入口 styleFor()（先运行时覆盖层、后编译期静态表）
+    if (StyleDrawFn draw = styleFor(rep.type); draw != nullptr) {
+        draw(ctx, out);
     }
 }
 

@@ -1,0 +1,74 @@
+// =============================================================================
+// MolecuLens · engine · style/quicksurf/quicksurf.h —— QuickSurf 高斯表面
+// 规格来源：参考 other/QuickSurf（高斯密度和等值面抽取；radscale/gridspacing/isovalue）
+// 实现：对原子集合计算高斯密度场（density = Σ exp(-|p-c|²/(2(radscale·r)²))），
+//       用 Marching Cubes 抽取密度 == isovalue 的等值面 → TriMesh。
+//       密度与梯度在多线程/向量化/CUDA 后端中计算（见 quickSurfMesh）。
+// =============================================================================
+
+#pragma once
+
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "engine/cmd/cmd.h"
+
+namespace moleculens::engine {
+
+struct RepContext;
+
+// QuickSurf 网格结果（顶点/法线/颜色/索引；法线 = 密度梯度方向，颜色 = 密度加权原子色）
+struct QuickSurfMesh {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec3> colors;   // 无原子色时为空
+    std::vector<uint32_t> indices;
+};
+
+// 计算高斯密度等值面网格。
+// centers/radii = 原子中心（Å）与 vdW 半径（Å）；
+// radscale = 原子半径缩放；gridspacing = 网格间距（Å，越小越精细）；isovalue = 等值面阈值。
+// 密度/梯度计算自动选择后端：CUDA（启用时）→ AVX2（支持时）→ 标量多线程（默认）。
+bool quickSurfMesh(const std::vector<glm::vec3>& centers,
+                   const std::vector<float>& radii,
+                   float radscale, float gridspacing, float isovalue,
+                   QuickSurfMesh& out);
+
+// representer 分派（QuickSurf 渲染模式）
+void drawQuickSurf(const RepContext& ctx, SceneCommandList& out);
+// 体系级 QuickSurf（G5）：聚合全部可见实例原子（含溶剂）为一个整体高斯密度表面
+void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out);
+
+// —— 计算后端（QS.2：CUDA → AVX2 → 标量多线程；运行时自动选择或强制指定）——
+
+// 后端类型（Auto = 运行时自动选择；其它强制指定，便于测试/调优）
+enum class QuickSurfBackend : int {
+    Auto = 0,
+    Scalar = 1,
+    Avx2 = 2,
+    Cuda = 3,
+};
+
+// 设置后端（0=Auto）；quickSurfBackend 返回当前生效的后端
+void quickSurfSetBackend(int backend);
+int quickSurfBackend();
+
+// 各后端密度核（xyzr = 每原子 4 float：cx,cy,cz,radius；处理 [a0,a1) 原子）。
+// 向 density/colormap 累加密度与密度加权原子色；grad 累加密度梯度（外向法线）。
+void computeDensityScalarMT(const float* xyzr, int natoms, const float* colors, int a0, int a1,
+                            float radscale, float gridspacing, float gausslim,
+                            const float origin[3], const int dims[3],
+                            float* density, float* grad, float* colormap);
+bool avx2KernelAvailable();
+void computeDensityAvx2(const float* xyzr, int natoms, const float* colors, int a0, int a1,
+                        float radscale, float gridspacing, float gausslim,
+                        const float origin[3], const int dims[3],
+                        float* density, float* grad, float* colormap);
+bool cudaKernelAvailable();
+void computeDensityCuda(const float* xyzr, int natoms, const float* colors,
+                        float radscale, float gridspacing, float gausslim,
+                        const float origin[3], const int dims[3],
+                        float* density, float* grad, float* colormap);
+
+} // namespace moleculens::engine

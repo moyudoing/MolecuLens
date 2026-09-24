@@ -13,8 +13,10 @@
 #include <volk.h>
 
 #include "engine/cmd/cmd.h"
+#include "engine/vulkan/backend/draw_list.h"
 #include "engine/vulkan/desc/descriptors.h"
 #include "engine/vulkan/device/device.h"
+#include "engine/vulkan/draw/draw_geometry.h"
 #include "engine/vulkan/memory/buffer.h"
 #include "engine/vulkan/pipeline/pipeline.h"
 #include "engine/vulkan/renderpass/render_pass.h"
@@ -33,7 +35,6 @@ public:
 
     OffscreenRenderer(const OffscreenRenderer&) = delete;
     OffscreenRenderer& operator=(const OffscreenRenderer&) = delete;
-    // 移动也删除：DrawBuffers 不完整类型成员（unique_ptr 析构需在 cpp 实例化）
     OffscreenRenderer(OffscreenRenderer&&) = delete;
     OffscreenRenderer& operator=(OffscreenRenderer&&) = delete;
 
@@ -66,47 +67,8 @@ public:
     void setBackground(const float* rgb);   // 清屏色（主方案 §4.4 背景）
 
 private:
-    // 每帧绘制缓冲（完整定义于头文件：OffscreenRenderer 被 app 层 unique_ptr 持有，
-    // 跨 TU 析构需完整类型——DrawBuffers 成员均为完整头文件类型）
-    struct DrawBuffers {
-        Buffer sphereInst;
-        Buffer cylinderInst;
-        Buffer lineVerts;
-        Buffer meshVerts;
-        Buffer meshIdx;
-        std::vector<SphereInst> spheres;
-        std::vector<uint32_t> sphereMat;
-        std::vector<uint8_t>  sphereMode;     // 每球所属体系渲染模式（0实心/1线框/2透明/3点）
-        std::vector<CylinderInst> cylinders;
-        std::vector<uint32_t> cylinderMat;
-        std::vector<uint8_t>  cylinderMode;
-        std::vector<LineInst> lines;
-        std::vector<uint32_t> lineMat;
-        struct Mesh {
-            std::vector<TriMeshVertex> verts;
-            std::vector<uint32_t> idx;
-            uint32_t mat = 0;
-            uint8_t mode = 0;   // 体系渲染模式
-        };
-        std::vector<Mesh> meshes;
-        std::vector<MaterialBlock> materials;
-    };
-
     bool createFramebuffer();
     void destroyFramebuffer();
-    // 按 (模式, 材质) 连续批次绘制实例化几何；每个模式对应不同 VkPipeline（pipes[4]）。
-    // 点模式（mode==3）用 GL_POINTS 点管线；线框/透明用对应管线。
-    template <typename InstT>
-    void drawModeRuns(VkCommandBuffer cmd,
-                      const std::vector<InstT>& instances,
-                      const std::vector<uint32_t>& mats,
-                      const std::vector<uint8_t>& modes,
-                      const std::vector<MaterialBlock>& materials,
-                      Buffer& instanceBuffer, const Buffer& mesh,
-                      const Buffer& meshIdx,
-                      uint32_t indexCount,
-                      const Pipeline* pipes[4],
-                      VkDescriptorSet set);
 
     VulkanDevice* device_ = nullptr;             // 指向当前设备（自建或共享）
     std::unique_ptr<VulkanDevice> ownedDevice_;  // headless 模式自建设备（共享模式为空）
@@ -124,30 +86,15 @@ private:
     RenderPass renderPass_;
     Framebuffer framebuffer_;
 
-    // 管线（每体系渲染模式一套：实心/线框/透明 + 点；见 SystemRenderMode）
-    Pipeline spherePipeline_;      // 实心
-    Pipeline sphereWire_;          // 线框（polygon LINE）
-    Pipeline sphereBlend_;         // 透明（混合）
-    Pipeline cylinderPipeline_;
-    Pipeline cylinderWire_;
-    Pipeline cylinderBlend_;
-    Pipeline meshPipeline_;
-    Pipeline meshWire_;
-    Pipeline meshBlend_;
-    Pipeline linePipeline_;
-    Pipeline point_;               // 点模式（GL_POINTS）
+    // 标准管线集（10 条管线 + 着色器模块；见 vulkan/pipeline/pipeline.h）
+    PipelineSet pipelines_;
     DescriptorSetLayout globalLayout_;
     UboDescriptorSet globalUbo_;
 
-    // 共享网格（顶点 + 索引）
-    std::unique_ptr<Buffer> icosphere_;
-    std::unique_ptr<Buffer> icosphereIdx_;
-    std::unique_ptr<Buffer> cylinder_;
-    std::unique_ptr<Buffer> cylinderIdx_;
-    uint32_t icosphereVerts_ = 0, icosphereIndices_ = 0;
-    uint32_t cylinderVerts_ = 0, cylinderIndices_ = 0;
-
-    std::unique_ptr<DrawBuffers> drawBuffers_;
+    // 共享网格与每帧绘制状态（定义见 vulkan/draw/draw_geometry.h）
+    SharedMeshes    meshes_;     // 球/柱单位网格（各离屏实例一份）
+    FrameGpuBuffers gpu_;        // 每帧 GPU 缓冲（HOST_VISIBLE，帧内复用）
+    DrawList        drawList_;   // 每帧 CPU 绘制列表（解码结果）
 
     // 回读
     VkBuffer readbackBuffer_ = VK_NULL_HANDLE;

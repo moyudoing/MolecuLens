@@ -148,6 +148,10 @@ public:
     [[nodiscard]] uint32_t currentSystemId() const { return currentSystemId_; }
     bool setCurrentSystem(uint32_t systemId);
 
+    // 清空为初始状态（载入 .mlscene 等"整体替换场景"的场景需要；此前的唯一
+    // 入口是 mergeParsedScene 式的追加合并，无法替换）。置 DIRTY_ALL 并递增 serial。
+    void clear();
+
     void setDirty(uint32_t bits) { dirty_ |= bits; }   // 接受 DIRTY_* 位或组合
     [[nodiscard]] uint32_t dirtyBits() const { return dirty_; }
     void clearDirty() { dirty_ = 0; }
@@ -156,6 +160,9 @@ public:
 
     void removeInstance(uint32_t instanceIndex);
     void setInstanceVisible(uint32_t instanceIndex, bool visible);
+    // 设置实例轨迹（导入轨迹文件后调用）。帧坐标常驻内存；置 DIRTY_COORDS 并
+    // 用首帧刷新坐标段。传 nullptr 清除轨迹（退回静态单帧）。
+    bool setInstanceTrajectory(uint32_t instanceIndex, std::shared_ptr<Trajectory> traj);
     void setInstanceTransform(uint32_t instanceIndex, const Transform&);
     // 溶剂整体显隐：按实例 isSolvent 标记置 visible（溶剂分子可在分子列表折叠，
     // 见 io/gro 溶剂读取；置 DIRTY_INSTANCE 触发重渲染）

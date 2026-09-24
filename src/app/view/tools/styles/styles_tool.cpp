@@ -9,6 +9,7 @@
 
 #include <cmath>
 
+#include "app/controller/camera/camera_controller.h"
 #include "app/controller/rep/representation_controller.h"
 #include "app/controller/render/render_controller.h"
 #include "app/data/data_manager.h"
@@ -75,22 +76,28 @@ void StylesTool::render(DataManager* dm, MolScene* scene) {
     // 样式（表示类型，主方案 §7.9：线状/棍状/球棍/CPK/VDW/甘草棍/表面）
     // 名称 → 类型显式映射（此前用下标直接 cast 枚举，名称与类型错位：
     //  "球棍" 实为 Stick、"CPK" 实为 BallAndStick、VDW 不可用）
+    // 序号与 styleTypes 必须逐项对应——两者是并排的两个数组，错位不会编译报错，
+    // 只会让下拉框选到的名字与画出来的东西对不上（"甘草棍" 曾指向 Cartoon）。
     static const char* styleNames[] = {"线状", "棍状", "球棍", "CPK", "VDW",
-                                       "甘草棍", "表面", "QuickSurf", "丝带",
-                                       "管状", "新卡通"};
+                                       "甘草棍", "卡通", "新卡通", "丝带",
+                                       "管状", "表面", "QuickSurf"};
     static constexpr engine::RepresentationType styleTypes[] = {
         engine::RepresentationType::Wireframe,
         engine::RepresentationType::Stick,
         engine::RepresentationType::BallAndStick,
         engine::RepresentationType::Spacefill,   // CPK：范德华半径空间填充（受球体缩放）
         engine::RepresentationType::Vdw,         // VDW：全范德华半径空间填充（不受缩放）
-        engine::RepresentationType::Cartoon,
-        engine::RepresentationType::Surface,
-        engine::RepresentationType::QuickSurf,   // 高斯密度等值面
+        engine::RepresentationType::Licorice,    // 甘草棍：粗圆棍，无端帽球
+        engine::RepresentationType::Cartoon,     // 卡通：蛋白质骨架 6 步风格
+        engine::RepresentationType::NewCartoon,  // 新卡通：改进的二级结构渲染
         engine::RepresentationType::Ribbon,      // 丝带：平滑 CA 骨架带状
         engine::RepresentationType::Tube,        // 管状：圆管骨架
-        engine::RepresentationType::NewCartoon,  // 新卡通：改进的二级结构渲染
+        engine::RepresentationType::Surface,     // 表面：vdW 等值面
+        engine::RepresentationType::QuickSurf,   // 高斯密度等值面
     };
+    // 两个数组项数必须一致，且与下拉框显示顺序一一对应
+    static_assert(IM_ARRAYSIZE(styleNames) == IM_ARRAYSIZE(styleTypes),
+                  "styleNames 与 styleTypes 项数不一致（名称与类型会错位）");
 
     int styleIdx = 2;   // 2 默认球棍
     for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(styleTypes)); ++i) {
@@ -107,8 +114,9 @@ void StylesTool::render(DataManager* dm, MolScene* scene) {
     if (ImGui::Combo("##style", &styleIdx, styleNames, IM_ARRAYSIZE(styleNames))) {
         repCtl_->setType(activeRep, styleTypes[styleIdx]);
     }
-    // UITheme::helpMarker("CPK/VDW = 范德华空间填充；QuickSurf = 高斯密度等值面（可调阈值/网格）");
-    ImGui::SameLine();
+    // 此处的 SameLine() 是给已被注释掉的 helpMarker 留的（它要与下拉框同一行）。
+    // 保留会让下面的"着色"标签落到同一行，配色下拉框被挤出面板宽度之外
+    // （除 Surface/QuickSurf 外都点不到）——故不保留。
 
     // QuickSurf 参数（等值面阈值 / 网格间距；radscale 复用上方"球体缩放"）
     if (rep.type == engine::RepresentationType::QuickSurf) {
@@ -147,17 +155,6 @@ void StylesTool::render(DataManager* dm, MolScene* scene) {
         repCtl_->setColorScheme(activeRep, static_cast<engine::ColorScheme>(colorIdx));
     }
 
-    // // 正交/透视 + FOV（读取相机当前状态，写入即生效）
-    // engine::OrbitCamera* cam = scene->getCamera();
-    // bool ortho = cam->ortho;
-    // if (ImGui::Checkbox("正交投影", &ortho)) {
-    //     cam->ortho = ortho;
-    // }
-    // float fov = cam->fov;
-    // if (sliderWithReset("FOV (°)", &fov, 10.0f, 120.0f, 45.0f)) {
-    //     cam->setFov(fov);
-    // }
-
     // 球体缩放 / 键半径（表示控制器）
     float sphereScale = rep.radiusScale;
     if (sliderWithReset("球体缩放", &sphereScale, 0.1f, 3.0f, 1.0f)) {
@@ -166,6 +163,32 @@ void StylesTool::render(DataManager* dm, MolScene* scene) {
     float bondRadius = rep.bondScale;
     if (sliderWithReset("键半径", &bondRadius, 0.2f, 3.0f, 1.0f)) {
         repCtl_->setBondScale(activeRep, bondRadius);
+    }
+
+    // 视角：正交/透视 + FOV（规格 §7.9 —— 此前是被注释掉的死代码，且背后的
+    // CameraController::setPerspective/setFov 也一直无人调用；现经相机控制器接通，
+    // 与视口鼠标交互走同一入口）
+    UITheme::sectionHeader("视角");
+    if (cameraCtl_ && scene && scene->getCamera()) {
+        engine::OrbitCamera* cam = scene->getCamera();
+        bool ortho = cam->ortho;
+        if (ImGui::Checkbox("正交投影", &ortho)) {
+            cameraCtl_->setPerspective(ortho);
+        }
+        UITheme::helpMarker("正交投影无近大远小，适合比对结构差异；透视更接近肉眼观感");
+
+        float fov = cam->fov;
+        if (sliderWithReset("FOV (°)", &fov, 10.0f, 120.0f, 45.0f)) {
+            cameraCtl_->setFov(fov);
+        }
+        UITheme::helpMarker("垂直视场角；正交投影下不参与投影，仅影响切回透视后的取景");
+
+        if (ImGui::Button("复位视角")) {
+            cameraCtl_->reset();   // 清 yaw/pitch/roll + 重新自动取景
+        }
+        UITheme::helpMarker("恢复默认朝向并按当前场景包围球重新取景");
+    } else {
+        ImGui::TextDisabled("相机未就绪（先打开文件）");
     }
 
     // 背景（RenderController 写入场景属性 → DIRTY_PROPERTIES → 视口重渲染）

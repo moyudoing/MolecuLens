@@ -7,9 +7,11 @@ add_library(moleculens_entity STATIC
     element/element.h element/element.cpp
     atom/atom.h
     molecule/molecule.h
+    structure/structure_kind.h structure/structure_kind.cpp
     identity/identity.h identity/identity.cpp
     scene/scene.h scene/scene.cpp scene/transform.h
-    trajectory/timestep.h trajectory/trajectory.h trajectory/trajectory_reader.h
+    trajectory/trajectory_reader.h
+    trajectory/dcd_reader.h trajectory/dcd_reader.cpp
     selection/selection.h selection/selection.cpp selection/parse_table.h
     search/bond_search.h search/bond_search.cpp
     ../io/registry/ifile_reader.h ../io/registry/parser_registry.h ../io/registry/parser_registry.cpp
@@ -18,7 +20,6 @@ add_library(moleculens_entity STATIC
     ../io/sdf/sdf_parser.h ../io/sdf/sdf_parser.cpp
     ../persist/mlscene/mlscene.h ../persist/mlscene/scene_serializer.h ../persist/mlscene/scene_serializer.cpp
     ../persist/settings/settings.h ../persist/settings/settings.cpp
-    ../persist/cache/cache.h ../persist/cache/cache.cpp
 )
 target_include_directories(moleculens_entity PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/..

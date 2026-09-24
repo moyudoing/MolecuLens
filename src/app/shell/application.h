@@ -29,7 +29,6 @@ class SelectionController;
 class TimelineController;
 class CameraController;
 class IoController;
-class ScriptController;
 
 // 控制器服务注入（组合根装配；主方案 §3.3 依赖注入）
 struct AppServices {
@@ -71,7 +70,6 @@ private:
     std::unique_ptr<TimelineController> timelineCtl_;
     std::unique_ptr<CameraController> cameraCtl_;
     std::unique_ptr<IoController> ioCtl_;
-    std::unique_ptr<ScriptController> scriptCtl_;
     std::unique_ptr<DataManager> dataMgr_;
     std::unique_ptr<ViewControl> view_;
 };

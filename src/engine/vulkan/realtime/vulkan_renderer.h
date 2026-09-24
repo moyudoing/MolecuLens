@@ -14,8 +14,10 @@
 #include <volk.h>
 
 #include "engine/cmd/cmd.h"
+#include "engine/vulkan/backend/draw_list.h"
 #include "engine/vulkan/desc/descriptors.h"
 #include "engine/vulkan/device/device.h"
+#include "engine/vulkan/draw/draw_geometry.h"
 #include "engine/vulkan/memory/buffer.h"
 #include "engine/vulkan/pipeline/pipeline.h"
 #include "engine/vulkan/renderpass/render_pass.h"
@@ -62,14 +64,6 @@ public:
     uint32_t frameIndex() const { return frameIndex_; }
     VkCommandBuffer frameCommand() const { return frameCommand_; }
 
-    // 共享网格（引擎启动创建一次常驻；主方案 §5.7.1）
-    const Buffer& icosphere() const { return *icosphere_; }
-    const Buffer& cylinder() const { return *cylinder_; }
-    uint32_t icosphereVertexCount() const { return icosphereVerts_; }
-    uint32_t icosphereIndexCount() const { return icosphereIndices_; }
-    uint32_t cylinderVertexCount() const { return cylinderVerts_; }
-    uint32_t cylinderIndexCount() const { return cylinderIndices_; }
-
     // 拾取 ID Pass 支持（M2）
     bool createPickResources();
     void destroyPickResources();
@@ -80,33 +74,7 @@ private:
     struct PickResources {
         // M2 落地：离屏 R32_UINT FBO + pick 管线
     };
-    // 每帧绘制缓冲（完整定义于头文件：跨 TU 析构需完整类型，成员均为头文件类型）
-    struct DrawBuffers {
-        Buffer sphereInst;
-        Buffer cylinderInst;
-        Buffer lineVerts;
-        Buffer meshVerts;
-        Buffer meshIdx;
-        std::vector<SphereInst> spheres;
-        std::vector<uint32_t> sphereMat;
-        std::vector<uint8_t>  sphereMode;   // 体系渲染模式（0实心/1线框/2透明/3点）
-        std::vector<CylinderInst> cylinders;
-        std::vector<uint32_t> cylinderMat;
-        std::vector<uint8_t>  cylinderMode;
-        std::vector<LineInst> lines;
-        std::vector<uint32_t> lineMat;
-        struct Mesh {
-            std::vector<TriMeshVertex> verts;
-            std::vector<uint32_t> idx;
-            uint32_t mat = 0;
-            uint8_t mode = 0;
-        };
-        std::vector<Mesh> meshes;
-        std::vector<MaterialBlock> materials;
-    };
-
     bool createPipelines();
-    void createSharedMeshes();
     void createImGuiPool();
     bool createMainFramebuffers();      // MSAA 附件 + 深度 + 每交换链图像 framebuffer
     void destroyMainFramebuffers();
@@ -114,29 +82,8 @@ private:
     VulkanDevice device_;
     RenderConfig config_;
 
-    // 管线
-    ShaderModule* sphereVert_ = nullptr;
-    ShaderModule* sphereFrag_ = nullptr;
-    ShaderModule* cylinderVert_ = nullptr;
-    ShaderModule* cylinderFrag_ = nullptr;
-    ShaderModule* lineVert_ = nullptr;
-    ShaderModule* lineFrag_ = nullptr;
-    ShaderModule* meshVert_ = nullptr;
-    ShaderModule* meshFrag_ = nullptr;
-    ShaderModule* pointVert_ = nullptr;
-    ShaderModule* pointFrag_ = nullptr;
-    // 每体系渲染模式一套管线（实心/线框/透明/点）
-    Pipeline spherePipeline_;
-    Pipeline sphereWire_;
-    Pipeline sphereBlend_;
-    Pipeline cylinderPipeline_;
-    Pipeline cylinderWire_;
-    Pipeline cylinderBlend_;
-    Pipeline meshPipeline_;
-    Pipeline meshWire_;
-    Pipeline meshBlend_;
-    Pipeline linePipeline_;
-    Pipeline point_;
+    // 标准管线集（10 条管线 + 着色器模块；见 vulkan/pipeline/pipeline.h）
+    PipelineSet pipelines_;
 
     DescriptorSetLayout globalLayout_;
     UboDescriptorSet globalUbo_;
@@ -147,16 +94,10 @@ private:
     Image depthImage_;
     std::vector<Framebuffer> swapchainFramebuffers_;
 
-    // 共享网格（顶点 + 索引）
-    std::unique_ptr<Buffer> icosphere_;
-    std::unique_ptr<Buffer> icosphereIdx_;
-    std::unique_ptr<Buffer> cylinder_;
-    std::unique_ptr<Buffer> cylinderIdx_;
-    uint32_t icosphereVerts_ = 0, icosphereIndices_ = 0;
-    uint32_t cylinderVerts_ = 0, cylinderIndices_ = 0;
-
-    // 每帧缓冲（HOST_VISIBLE，帧内复用）
-    std::unique_ptr<DrawBuffers> drawBuffers_;
+    // 共享网格与每帧绘制状态（定义见 vulkan/draw/draw_geometry.h）
+    SharedMeshes    meshes_;     // 球/柱单位网格（启动创建一次常驻）
+    FrameGpuBuffers gpu_;        // 每帧 GPU 缓冲（HOST_VISIBLE，帧内复用）
+    DrawList        drawList_;   // 每帧 CPU 绘制列表（解码结果）
 
     // 帧状态
     uint32_t frameIndex_ = 0;
@@ -177,16 +118,6 @@ private:
     std::unique_ptr<PickResources> pickResources_;
 
     void recordFrame(const SceneCommandList& list, const RenderView& view);
-    template <typename InstT>
-    void drawModeRuns(const std::vector<InstT>& instances,
-                      const std::vector<uint32_t>& mats,
-                      const std::vector<uint8_t>& modes,
-                      const std::vector<MaterialBlock>& materials,
-                      Buffer& instanceBuffer,
-                      const Buffer& mesh, const Buffer& meshIdx,
-                      uint32_t indexCount,
-                      const Pipeline* pipes[4], VkDescriptorSet set);
-    VkPipelineLayout pipelineLayoutFor(VkPipeline pipeline) const;
 };
 
 } // namespace moleculens::engine

@@ -27,7 +27,6 @@ public:
     size_t atomCount(size_t index) const;
     size_t bondCount(size_t index) const;
     size_t frameCount(size_t index) const;
-    bool moleculeVisible() const { return true; }
 
     // 体系（组）列表：以体系为单位管理
     size_t systemCount() const;

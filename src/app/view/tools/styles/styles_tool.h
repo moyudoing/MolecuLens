@@ -6,10 +6,11 @@
 
 #pragma once
 
-#include "app/view/tools/base_tool_view.h"
+#include "app/view/tool/base_tool_view.h"
 
 namespace moleculens::app {
 
+class CameraController;
 class RepresentationController;
 class RenderController;
 
@@ -21,10 +22,12 @@ public:
     // 控制器注入（Application 装配后由 ViewControl::svc* 调用）
     void setRepController(RepresentationController* ctl) { repCtl_ = ctl; }
     void setRenderController(RenderController* ctl) { renderCtl_ = ctl; }
+    void setCameraController(CameraController* ctl) { cameraCtl_ = ctl; }
 
 private:
     RepresentationController* repCtl_ = nullptr;
     RenderController* renderCtl_ = nullptr;
+    CameraController* cameraCtl_ = nullptr;
 };
 
 } // namespace moleculens::app

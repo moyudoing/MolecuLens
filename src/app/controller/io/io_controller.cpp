@@ -6,17 +6,35 @@
 #include "app/controller/io/io_controller.h"
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
+#include "entity/trajectory/dcd_reader.h"
+
+#include "app/controller/rep/representation_controller.h"
+#include "engine/camera/camera.h"
 #include "engine/render/renderer.h"
+#include "engine/serialize/scene_bridge.h"
 #include "entity/scene/scene.h"
 #include "io/registry/parser_registry.h"
+#include "persist/mlscene/scene_serializer.h"
 #include "spdlog/spdlog.h"
 
 namespace moleculens::app {
 
 namespace {
+
+// 源文件指纹（轨迹以"引用 + 指纹"写入 .mlscene；文件被替换时据此提示重新加载）
+void fileFingerprint(const std::filesystem::path& p, uint64_t* size, int64_t* mtime) {
+    std::error_code ec;
+    *size = std::filesystem::file_size(p, ec);
+    if (ec) {
+        *size = 0;
+    }
+    const auto t = std::filesystem::last_write_time(p, ec);
+    *mtime = ec ? 0 : static_cast<int64_t>(t.time_since_epoch().count());
+}
 
 // 解析器返回的是独立 SceneStructure（自带 StringPool/链/残基表），
 // 这里把其中的结构与实例装配进应用场景：原子名重 intern、链/残基 id 重映射
@@ -127,6 +145,24 @@ bool IoController::openFile(const std::filesystem::path& path) {
     };
     report(1, -1.0f, nullptr);   // ReadingFile（排队；实际解析在后台线程）
 
+    // .mlscene 是"整场景替换"语义（clear + 还原），不是解析某种分子格式，
+    // 故不走 ParserRegistry 与后台解析线程，同步载入。
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext == ".mlscene") {
+        if (parseThread_.joinable()) {
+            parseThread_.join();
+        }
+        const bool ok = openSceneFile(path);
+        report(ok ? 4 : 5, ok ? 1.0f : 0.0f, nullptr);
+        return ok;
+    }
+
+    // 记录源文件指纹（供 saveScene 写入轨迹引用）
+    currentSourcePath_ = path.string();
+    fileFingerprint(path, &currentSourceSize_, &currentSourceMtime_);
+
     // 等待上一次后台解析线程结束（同一时刻只允许一次导入）
     if (parseThread_.joinable()) {
         parseThread_.join();
@@ -195,8 +231,9 @@ void IoController::mergeParsed(std::shared_ptr<entity::SceneStructure> parsed,
         svc_.scene->bumpSerial();
     }
     if (svc_.renderer) {
+        // 表示数据由 RepresentationController 唯一持有并已绑定（零拷贝只读视图），
+        // 此处不再回写表示列表——只需刷新帧数据并置脏（主方案 §5.8.1）。
         svc_.renderer->setScene(svc_.scene);
-        svc_.renderer->setRepresentations(repList());
         svc_.renderer->refreshFrameData();
         if (svc_.scene) {
             svc_.scene->setDirty(entity::DIRTY_ALL);
@@ -208,17 +245,156 @@ void IoController::mergeParsed(std::shared_ptr<entity::SceneStructure> parsed,
     }
 }
 
-std::vector<engine::Representation> IoController::repList() {
-    // 表示列表来自 RepresentationController（由 Application 装配后注入）
-    return svc_.renderer->representations().empty()
-               ? std::vector<engine::Representation>{}
-               : svc_.renderer->representations();
-}
-
 bool IoController::saveScene(const std::filesystem::path& path) {
     (void)path;
-    spdlog::warn("[io] saveScene: M4 落地（.mlscene 序列化）");
-    return false;
+    if (svc_.scene == nullptr) {
+        spdlog::error("[io] saveScene: 场景未就绪");
+        return false;
+    }
+    // 场景 → 快照：表示取自渲染器绑定的只读视图（其唯一持有者是表示控制器），
+    // 相机取自 AppServices，命令流由桥接层用 SceneCommandList::writeTo 序列化。
+    engine::SnapshotSource in;
+    in.scene = svc_.scene;
+    in.representations = svc_.renderer ? &svc_.renderer->representations() : nullptr;
+    in.camera = svc_.camera;
+    in.commandStream = svc_.renderer ? &svc_.renderer->commandList() : nullptr;
+    in.trajectorySourcePath = currentSourcePath_;
+    in.trajectorySourceSize = currentSourceSize_;
+    in.trajectorySourceMtime = currentSourceMtime_;
+
+    const auto snap = engine::makeSnapshot(in);
+    auto result = persist::mlscene::MlSceneSerializer::save(snap, path);
+    if (!result) {
+        spdlog::error("[io] saveScene 失败: {}", result.errorMessage());
+        return false;
+    }
+    spdlog::info("[io] 场景已保存: {} ({} 结构 / {} 体系 / {} 实例)", path.string(),
+                 snap.structures.size(), snap.systems.size(), snap.instances.size());
+    return true;
+}
+
+// 导入轨迹：读取器 → 逐帧读入内存 → 挂到目标实例 → 广播 SceneOpened 让时间轴激活
+bool IoController::importTrajectory(const std::filesystem::path& path) {
+    if (svc_.scene == nullptr) {
+        return false;
+    }
+    // 读取器分派（按扩展名；当前内建 DCD）
+    std::unique_ptr<entity::ITrajectoryReader> reader;
+    {
+        entity::DcdReader probe;
+        if (probe.canOpen(path)) {
+            reader = std::make_unique<entity::DcdReader>();
+        }
+    }
+    if (!reader) {
+        spdlog::error("[io] 不支持的轨迹格式（当前支持 .dcd）: {}", path.string());
+        return false;
+    }
+    auto opened = reader->open(path);
+    if (!opened) {
+        spdlog::error("[io] 轨迹打开失败: {}", opened.errorMessage());
+        return false;
+    }
+
+    const auto& insts = svc_.scene->instances();
+    if (insts.empty()) {
+        spdlog::error("[io] 请先打开结构文件，再导入轨迹（轨迹文件不含拓扑）");
+        return false;
+    }
+    // 目标实例：当前体系的首个实例；无体系归属则取第一个实例
+    uint32_t target = 0;
+    const uint32_t cur = svc_.scene->currentSystemId();
+    for (uint32_t i = 0; i < insts.size(); ++i) {
+        if (insts[i].systemId == cur) {
+            target = i;
+            break;
+        }
+    }
+    const auto& st = svc_.scene->structures()[insts[target].structureIndex];
+    if (reader->atomCount() != st.elements.size()) {
+        spdlog::error("[io] 轨迹原子数({}) 与目标结构原子数({}) 不一致 —— "
+                      "DCD 不含拓扑，须与同源结构文件（PDB/GRO）配对导入",
+                      reader->atomCount(), st.elements.size());
+        return false;
+    }
+
+    // 逐帧读入内存。轨迹文件通常数十 MB（1000 帧 × 6000 原子 ≈ 72 MB），
+    // 常驻内存换取实现简单；后续若需超长轨迹可改为按需读取（见 ITrajectoryReader）。
+    auto traj = std::make_shared<entity::Trajectory>();
+    traj->dt = reader->dt();
+    traj->frames.reserve(static_cast<size_t>(reader->frameCount()));
+    for (uint64_t f = 0; f < reader->frameCount(); ++f) {
+        auto fr = reader->readFrame(f);
+        if (!fr) {
+            break;
+        }
+        traj->frames.push_back(std::move(fr.value()));
+    }
+    if (traj->frames.empty()) {
+        spdlog::error("[io] 轨迹不含有效帧");
+        return false;
+    }
+
+    if (!svc_.scene->setInstanceTrajectory(target, traj)) {
+        return false;
+    }
+    // 广播 SceneOpened：时间轴据此重新激活并发布首帧（帧坐标 → 世界坐标的
+    // 变换由时间轴统一负责，此处不重复实现）
+    if (svc_.bus) {
+        svc_.bus->publish({EventType::SceneOpened, 0});
+    }
+    spdlog::info("[io] 轨迹已导入: {} → 实例 {} ({} 帧, dt={} ps)", path.string(),
+                 target, traj->frames.size(), traj->dt);
+    return true;
+}
+
+// .mlscene 同步载入：整场景替换（clear → 还原 → 刷渲染器 → 事件）
+bool IoController::openSceneFile(const std::filesystem::path& path) {
+    auto loaded = persist::mlscene::MlSceneSerializer::load(path);
+    if (!loaded) {
+        spdlog::error("[io] 场景载入失败: {}", loaded.errorMessage());
+        return false;
+    }
+    if (svc_.scene == nullptr) {
+        return false;
+    }
+    const auto& snap = loaded.value();
+    svc_.scene->clear();
+
+    engine::RestoreTarget target;
+    target.scene = svc_.scene;
+    target.camera = svc_.camera;
+    target.commandStream = svc_.renderer ? &svc_.renderer->commandList() : nullptr;
+    std::vector<engine::Representation> reps;
+    target.representations = &reps;
+    engine::applySnapshot(snap, target);
+
+    if (repCtl_ != nullptr && !reps.empty()) {
+        repCtl_->replaceAll(std::move(reps));   // 表示的唯一持有者：由它换入并重新绑定
+    }
+
+    // 轨迹源引用（帧数据未内嵌，重放需按需加载 —— 见 P4 轨迹导入）
+    if (!snap.instances.empty()) {
+        currentSourcePath_ = snap.instances[0].trajectory.sourcePath;
+        currentSourceSize_ = snap.instances[0].trajectory.sourceSize;
+        currentSourceMtime_ = snap.instances[0].trajectory.sourceMtime;
+    } else {
+        currentSourcePath_.clear();
+        currentSourceSize_ = 0;
+        currentSourceMtime_ = 0;
+    }
+
+    if (svc_.renderer) {
+        svc_.renderer->setScene(svc_.scene);
+        svc_.renderer->refreshFrameData();
+    }
+    if (svc_.bus) {
+        svc_.bus->publish({EventType::SceneOpened, 0});
+        svc_.bus->publish({EventType::MoleculeChanged, 0});
+    }
+    spdlog::info("[io] 场景已载入: {} ({} 结构 / {} 体系 / {} 实例)", path.string(),
+                 snap.structures.size(), snap.systems.size(), snap.instances.size());
+    return true;
 }
 
 bool IoController::exportPng(const std::filesystem::path& path, int scale) {
@@ -228,11 +404,8 @@ bool IoController::exportPng(const std::filesystem::path& path, int scale) {
     return false;
 }
 
-void IoController::onEvent(const Event& ev) {
-    if (ev.type == EventType::ScriptRequest) {
-        // M4：脚本请求解析为文件打开
-        spdlog::debug("[io] script request: {}", ev.payload);
-    }
+void IoController::onEvent(const Event&) {
+    // 当前无 IoController 关心的事件（原 ScriptRequest 通道随 ScriptController 移除）
 }
 
 } // namespace moleculens::app

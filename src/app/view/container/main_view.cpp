@@ -7,6 +7,7 @@
 
 #include <cstdio>
 
+#include "app/controller/selection/selection_controller.h"
 #include "app/data/data_manager.h"
 #include "app/view/theme/ui_theme.h"
 #include "app/view/timeline/time_axis.h"
@@ -19,6 +20,7 @@ MainView::~MainView() = default;
 void MainView::renderAll(RenderContext& ctx) {
 
     renderViewport(ctx);
+
     if (ctx.showTimeline && *ctx.showTimeline) {
         renderTimeline(ctx);
     }
@@ -57,8 +59,17 @@ void MainView::renderViewport(RenderContext& ctx) {
         if (io.MouseWheel != 0.0f) {
             ctx.scene->handleScroll(io.MouseWheel);
         }
-        if (io.MouseClicked[0]) {
-            ctx.scene->handleClick();
+        // 左键点击 → 拾取：屏幕坐标 → 视口 NDC → 世界射线（相机层）→ 场景求交
+        if (io.MouseClicked[0] && ctx.selection) {
+            const ImVec2 mouse = ImGui::GetMousePos();
+            const ImVec2 origin = ImGui::GetCursorScreenPos();   // 视口内容区左上角
+            const ImVec2 pickRect = ImGui::GetContentRegionAvail();
+            if (pickRect.x > 0.0f && pickRect.y > 0.0f) {
+                const float ndcX = (mouse.x - origin.x) / pickRect.x * 2.0f - 1.0f;
+                const float ndcY = 1.0f - (mouse.y - origin.y) / pickRect.y * 2.0f;
+                ctx.selection->pickRay(ndcX, ndcY, static_cast<int>(pickRect.x),
+                                       static_cast<int>(pickRect.y));
+            }
         }
     }
 
@@ -85,6 +96,15 @@ void MainView::renderStatusBar(RenderContext& ctx) {
     std::snprintf(buf, sizeof(buf), "FPS %.1f   分子 %zu   当前分子 %s", ctx.fps, count,
                   cur.c_str());
     ImGui::TextUnformatted(buf);
+
+    // 选择状态：SelectionController 的选择语言求值结果（SelectionChanged 的消费者）。
+    // 未选择时不占位，避免状态栏常驻空行。
+    if (ctx.selection && !ctx.selection->expression().empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("|  选择 \"%s\" → %zu 个原子",
+                            ctx.selection->expression().c_str(),
+                            ctx.selection->selectedCount());
+    }
     ImGui::End();
 }
 

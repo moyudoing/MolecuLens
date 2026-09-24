@@ -11,14 +11,17 @@ add_executable(moleculens_tests
     io/gro_parser_tests.cpp
     engine/camera/camera_tests.cpp
     engine/cartoon/cartoon_tests.cpp
+    engine/export/exporter_tests.cpp
     engine/export/png_encoder_tests.cpp
     engine/quicksurf/quicksurf_tests.cpp
     engine/raytrace/ray_tracer_tests.cpp
     engine/rep/render_mode_tests.cpp
     engine/render/scene_bounds_tests.cpp
+    engine/serialize/scene_bridge_tests.cpp
     engine/scheduler/frame_scheduler_tests.cpp
     engine/surface/surface_tests.cpp
     entity/scene/system_tests.cpp
+    entity/trajectory/dcd_reader_tests.cpp
     vulkan/line_smoke.cpp
     vulkan/mesh_smoke.cpp
     vulkan/offscreen_smoke.cpp

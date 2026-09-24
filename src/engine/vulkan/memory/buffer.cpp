@@ -178,7 +178,10 @@ void Buffer::unmap() {
 
 void Buffer::invalidate(VkDeviceSize size) {
     // GPU 写 HOST_VISIBLE 后，主机端读缓存可能还持有旧数据；回读前必须 invalidate，
-    // 否则读到陈旧字段（全 0/垃圾）。与 map()/unmap() 配合（表面计算回读，见\n surface_compute.cpp\n）。\n    if (valid() && size > 0) {\n        vmaInvalidateAllocation(allocator_, allocation_, 0, size);\n    }
+    // 否则读到陈旧字段（全 0/垃圾）。与 map()/unmap() 配合（表面计算回读）。
+    if (valid() && size > 0) {
+        vmaInvalidateAllocation(allocator_, allocation_, 0, size);
+    }
 }
 
 void Buffer::destroy() {

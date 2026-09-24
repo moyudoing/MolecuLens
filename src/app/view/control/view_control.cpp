@@ -26,10 +26,12 @@
 #include <GLFW/glfw3native.h>
 #endif
 
+#include "app/controller/camera/camera_controller.h"
 #include "app/controller/io/io_controller.h"
 #include "app/controller/selection/selection_controller.h"
 #include "app/controller/timeline/timeline_controller.h"
 #include "app/data/data_manager.h"
+#include "app/data/log_buffer.h"
 #include "app/shell/application.h"
 #include "app/view/theme/ui_theme.h"
 #include "app/view/timeline/time_axis.h"
@@ -66,6 +68,27 @@ std::string openFileDialog() {
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (GetOpenFileNameA(&ofn)) {
+        return path;
+    }
+#else
+    // 非 Windows：占位（M5 接入 native dialog）
+#endif
+    return {};
+}
+
+// 轨迹文件打开对话框（.dcd；.xtc 待接入）
+std::string openTrajectoryDialog() {
+#ifdef _WIN32
+    char path[MAX_PATH] = {};
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter =
+        "轨迹文件 (*.dcd)\0*.dcd\0"
+        "所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn)) {
         return path;
     }
@@ -119,21 +142,28 @@ void drawWindowGlyph(const ImVec2& pos, const ImVec2& size, WindowGlyph glyph) {
 // 平台原生"另存为"对话框（Windows 资源管理器；PNG 过滤器）。
 // 用户确认返回所选路径；取消返回空串。成功后记忆目录供下次默认定位。
 std::string ViewControl::saveFileDialog(const char* defaultName) {
+    return saveFileDialogEx(defaultName, "PNG 图像 (*.png)\0*.png\0所有文件 (*.*)\0*.*\0",
+                            "png");
+}
+
+std::string ViewControl::saveFileDialogEx(const char* defaultName, const char* filter,
+                                          const char* defExt) {
 #ifdef _WIN32
     char path[MAX_PATH] = {};
-    // 默认文件名（无扩展名自动补 .png）
-    std::string name = (defaultName && *defaultName) ? defaultName : "image.png";
+    // 默认文件名（无扩展名时按 defExt 补齐）
+    std::string name = (defaultName && *defaultName) ? defaultName : "untitled";
     if (name.find('.') == std::string::npos) {
-        name += ".png";
+        name += ".";
+        name += defExt;
     }
     std::snprintf(path, sizeof(path), "%s", name.c_str());
 
     OPENFILENAMEA ofn{};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "PNG 图像 (*.png)\0*.png\0所有文件 (*.*)\0*.*\0";
+    ofn.lpstrFilter = filter;
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = "png";   // 用户未输扩展名时自动补
+    ofn.lpstrDefExt = defExt;   // 用户未输扩展名时自动补
     // OFN_NOCHANGEDIR：对话框不改应用当前工作目录（避免相对路径副作用）；
     // OFN_OVERWRITEPROMPT：覆盖前询问；OFN_PATHMUSTEXIST：路径必须存在。
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -240,6 +270,10 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
 void ViewControl::shutdown() {
     // ImGui 后端与窗口清理（Vulkan 设备由 VulkanRenderer 管理）
     if (window_) {
+        // 先释放 MolScene 注册的纹理描述符：它们由 ImGui 描述符池分配，
+        // 而池在后端 Shutdown 时销毁 —— 之后释放会操作已销毁的池。
+        // （MolScene 的析构发生在 ViewControl 成员销毁阶段，晚于此处。）
+        molScene_.releaseImGuiTextures();
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -349,8 +383,12 @@ void ViewControl::runLoop() {
         // 帧更新
         newFrame(dt);
 
+
+        // 渲染
         render();
         ImGui::Render();
+
+
         // UI 回调注入（renderpass 内 3D 后调用，主方案 §6.3 帧循环）
         vk_->setUiRenderCallback(&ViewControl::renderImGuiUi);
         int fbW = 1280, fbH = 800;
@@ -416,9 +454,55 @@ void ViewControl::render() {
     // 日志面板（spdlog 环形缓冲，主方案 §14.5）
     if (showLog_) {
         ImGui::Begin("日志", &showLog_);
-        ImGui::TextDisabled("spdlog 分级消息（环形缓冲 2000 条）");
+
+        auto& ring = LogRingBuffer::instance();
+        if (ImGui::SmallButton("清空")) {
+            ring.clear();
+            logSnapshot_.clear();
+            logSeen_ = ring.totalPushed();
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("自动滚动", &logAutoScroll_);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu 条 / 上限 %zu", logSnapshot_.size(),
+                            LogRingBuffer::kCapacity);
         ImGui::Separator();
-        ImGui::TextWrapped("打开文件（Ctrl+O）后在此查看 [io]/[backend] 日志。");
+
+        // 有新日志才重取快照（缓冲满后 size() 恒定，靠累计计数判断）
+        if (ring.totalPushed() != logSeen_) {
+            logSnapshot_ = ring.snapshot();
+            logSeen_ = ring.totalPushed();
+        }
+
+        ImGui::BeginChild("##log_scroll", ImVec2(0, 0), false,
+                          ImGuiWindowFlags_HorizontalScrollbar);
+        for (const auto& rec : logSnapshot_) {
+            ImVec4 col(0.78f, 0.80f, 0.85f, 1.0f);   // 默认：正文灰
+            switch (rec.level) {
+                case spdlog::level::trace:
+                case spdlog::level::debug:  col = ImVec4(0.55f, 0.58f, 0.65f, 1.0f); break;
+                case spdlog::level::warn:   col = ImVec4(0.95f, 0.75f, 0.35f, 1.0f); break;
+                case spdlog::level::err:    col = ImVec4(0.95f, 0.45f, 0.42f, 1.0f); break;
+                case spdlog::level::critical: col = ImVec4(1.00f, 0.35f, 0.35f, 1.0f); break;
+                default: break;
+            }
+            // spdlog 的 to_string_view 返回 fmt::string_view（非 std::string_view
+            // 也不保证 NUL 结尾），先格式化到定长缓冲再交给 ImGui
+            char lvl[16] = {};
+            const auto sv = spdlog::level::to_string_view(rec.level);
+            std::snprintf(lvl, sizeof(lvl), "%-8.*s",
+                          static_cast<int>(sv.size()), sv.data());
+            ImGui::TextColored(col, "%s", rec.time.c_str());
+            ImGui::SameLine();
+            ImGui::TextColored(col, "[%s]", lvl);
+            ImGui::SameLine();
+            ImGui::TextColored(col, "%s", rec.text.c_str());
+        }
+        // 自动滚动：仅在用户没有上翻（已在底部）时跟随
+        if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+            ImGui::SetScrollHereY(1.0f);
+        }
+        ImGui::EndChild();
         ImGui::End();
     }
 
@@ -454,8 +538,23 @@ void ViewControl::renderMainMenuBar() {
                     ioCtl_->openFile(path);
                 }
             }
-            ImGui::MenuItem("导入轨迹", nullptr, false);
+            if (ImGui::MenuItem("保存场景 (Ctrl+S)")) {
+                static const char* kSceneFilter =
+                    "MolecuLens 场景 (*.mlscene)\0*.mlscene\0所有文件 (*.*)\0*.*\0";
+                const std::string path =
+                    saveFileDialogEx("scene.mlscene", kSceneFilter, "mlscene");
+                if (!path.empty() && ioCtl_) {
+                    ioCtl_->saveScene(path);
+                }
+            }
+            if (ImGui::MenuItem("导入轨迹 (.dcd)")) {
+                const std::string path = openTrajectoryDialog();
+                if (!path.empty() && ioCtl_) {
+                    ioCtl_->importTrajectory(path);
+                }
+            }
             if (ImGui::BeginMenu("导出")) {
+                // 图像导出面板已可用（ExportImgTool）；此处保留入口占位
                 ImGui::MenuItem("图像 (PNG)", nullptr, false);
                 ImGui::MenuItem("场景 (OBJ/STL)", nullptr, false);
                 ImGui::EndMenu();
@@ -471,7 +570,11 @@ void ViewControl::renderMainMenuBar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("视图")) {
-            ImGui::MenuItem("重置视角", "R", false, false);
+            if (ImGui::MenuItem("重置视角", "R")) {
+                if (cameraCtl_) {
+                    cameraCtl_->reset();   // 经相机控制器（唯一入口）
+                }
+            }
             ImGui::Separator();
             ImGui::MenuItem("分子列表", nullptr, &showMolList_);
             ImGui::MenuItem("渲染设置", nullptr, &showStyles_);
@@ -488,7 +591,7 @@ void ViewControl::renderMainMenuBar() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("帮助")) {
-            ImGui::MenuItem("关于 MolecuLens 0.1.0", nullptr, false);
+            ImGui::MenuItem("关于 MolecuLens V1.0", nullptr, false);
             ImGui::EndMenu();
         }
 
@@ -715,7 +818,7 @@ void ViewControl::setupDocking() {
         }
         ImGui::DockBuilderDockWindow("分子列表", right);
         ImGui::DockBuilderDockWindow("渲染设置", rightBot);
-        ImGui::DockBuilderDockWindow("主题选择", rightBot);
+        ImGui::DockBuilderDockWindow("主题设置", rightBot);
         ImGui::DockBuilderDockWindow("材质选择", rightBot);
         ImGui::DockBuilderDockWindow("图像导出", rightBot);
         ImGui::DockBuilderDockWindow("绘图工具", rightBot);
@@ -889,6 +992,16 @@ void ViewControl::svcRep(RepresentationController* ctl) {
     }
     if (materialTool_) {
         materialTool_->setRepController(ctl);
+    }
+}
+
+void ViewControl::svcCamera(CameraController* ctl) {
+    cameraCtl_ = ctl;
+    // 视口交互补注入（ViewControl::init 早于控制器装配，构造期拿不到控制器）
+    molScene_.setCameraController(ctl);
+    // 相机面板（正交/透视 + FOV/复位）直通相机控制器 —— 与视口交互同一入口
+    if (stylesTool_) {
+        stylesTool_->setCameraController(ctl);
     }
 }
 

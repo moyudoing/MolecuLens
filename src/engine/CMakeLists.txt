@@ -4,7 +4,6 @@
 # =============================================================================
 
 add_library(moleculens_engine STATIC
-    scene/scene_node.h scene/scene_graph.h
     scheduler/frame_scheduler.h scheduler/frame_scheduler.cpp
     rep/representation.h rep/representer.h rep/representer.cpp
     style/base_style.h
@@ -21,16 +20,20 @@ add_library(moleculens_engine STATIC
     style/surface/surface.h style/surface/surface.cpp style/surface/mc_tables.h
     style/quicksurf/quicksurf.h style/quicksurf/quicksurf.cpp
     style/quicksurf/quicksurf_avx2.cpp
-    style/label/label.h
     cmd/cmd.h cmd/command_list.cpp
     camera/camera.h camera/camera.cpp
     picking/picking.h picking/picking.cpp
     render/renderer.h render/renderer.cpp render/render_parameter.h
+    serialize/scene_bridge.h serialize/scene_bridge.cpp
+    export/tessellate/tessellate.h
     export/obj/obj_exporter.h export/obj/obj_exporter.cpp
     export/pov/pov_exporter.h export/pov/pov_exporter.cpp
     export/stl/stl_exporter.h export/stl/stl_exporter.cpp
     export/png/png_encoder.h export/png/png_encoder.cpp
     raytrace/ray_tracer.h raytrace/ray_tracer.cpp
+    vulkan/geometry/geometry.h vulkan/geometry/geometry.cpp
+    vulkan/backend/draw_list.h vulkan/backend/decode.h vulkan/backend/decode.cpp
+    vulkan/draw/draw_geometry.h vulkan/draw/draw_geometry.cpp
     vulkan/device/device.h vulkan/device/device.cpp
     vulkan/memory/buffer.h vulkan/memory/buffer.cpp vulkan/memory/vma_impl.cpp
     vulkan/pipeline/pipeline.h vulkan/pipeline/pipeline.cpp

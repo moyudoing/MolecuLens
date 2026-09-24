@@ -1,0 +1,161 @@
+// =============================================================================
+// MolecuLens · shaders/surface.comp —— 表面/QuickSurf 高斯表面计算着色器
+// 规格来源：主方案 §5.7.6（vdW 表面/SES）+ style/quicksurf（高斯密度等值面）
+// 功能：mode=0 → 到原子 vdW 球面最小距离场 f(p)=min_i(|p-c_i|-r_i)；
+//       mode=1 → 高斯密度场 Σexp(-|p-c|²/(2·r²)) + 密度梯度(外向法线)
+//               + 密度加权原子色（hasColor）。
+// 每 1 线程处理 1 个体素：经 cell-list（cellOffsets/cellCounts/cellList）遍历
+// 邻近 cell 内原子，避免逐体素×全原子。输出 density[]（+grad[3x]、colormap[3x]
+// 仅模式 1/hasColor）→ CPU 端 Marching Cubes 抽取等值面。
+// push constant 恒为 8 个 16B 成员（vec4/ivec4），共 128B（对齐安全，见
+// SurfaceCompute::ParamsPC 一一对应）。
+// =============================================================================
+#version 450
+
+layout(push_constant) uniform PushCtl {
+    ivec4 uGrid;        // x,y,z = 体素网格维度
+    vec4  uOrigin;      // xyz = 体素网格原点
+    vec4  uInvSpacing;  // xyz = 1/间距
+    ivec4 uParams;      // x=mode(0 Surface /1 QuickSurf), y=hasColor(0/1)
+    vec4  uParams2;     // x=isovalue, z=gausslim
+    ivec4 uCellDims;    // x,y,z = cell 网格维度
+    vec4  uCellOrigin;  // xyz = cell 网格原点
+    vec4  uCellSize;    // x = cell 边长
+} pc;
+
+// —— SSBO ——
+layout(std430, binding = 0) readonly buffer AtB {
+    vec4 atoms[];        // xyz + r（r 已乘 radscale）
+};
+layout(std430, binding = 1) readonly buffer CellOffB {
+    uint cellOffsets[];  // [ncells] 每 cell 起始原子下标（稠密展平 cellList）
+};
+layout(std430, binding = 2) readonly buffer CellCntB {
+    uint cellCounts[];   // [ncells]
+};
+layout(std430, binding = 3) readonly buffer CellListB {
+    uint cellList[];     // 全部 cell 原子下标（稠密展平）
+};
+layout(std430, binding = 4) readonly buffer ColB {
+    vec4 atomColors[];   // rgba（仅 hasColor）
+};
+layout(std430, binding = 5) buffer DensB {
+    float density[];     // [nvox]
+};
+layout(std430, binding = 6) buffer GradB {
+    float gradient[];    // [nvox*3]
+};
+layout(std430, binding = 7) buffer ColorMapB {
+    float colormap[];    // [nvox*3]（仅 hasColor）
+};
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+int cellIndexF(int cx, int cy, int cz) {
+    return cz * pc.uCellDims.x * pc.uCellDims.y + cy * pc.uCellDims.x + cx;
+}
+
+void main() {
+    const int x = int(gl_GlobalInvocationID.x);
+    const int y = int(gl_GlobalInvocationID.y);
+    const int z = int(gl_GlobalInvocationID.z);
+    if (x >= pc.uGrid.x || y >= pc.uGrid.y || z >= pc.uGrid.z) {
+        return;
+    }
+    const vec3 p = pc.uOrigin +
+                   vec3(float(x), float(y), float(z)) / pc.uInvSpacing;
+
+    const int ccx = clamp(int((p.x - pc.uCellOrigin.x) / pc.uCellSize.x), 0,
+                          pc.uCellDims.x - 1);
+    const int ccy = clamp(int((p.y - pc.uCellOrigin.y) / pc.uCellSize.x), 0,
+                          pc.uCellDims.y - 1);
+    const int ccz = clamp(int((p.z - pc.uCellOrigin.z) / pc.uCellSize.x), 0,
+                          pc.uCellDims.z - 1);
+
+    const int addr = (z * pc.uGrid.y + y) * pc.uGrid.x + x;
+
+    if (pc.uParams.x == 0) {
+        // —— Surface：min_i(|p-c|-r) ——
+        float best = 1e30;
+        int nearest = 0;
+        // 27 邻域 cell 内原子（cellSize≥2·max r 时贡献原子必在邻域内）
+        const int ncx = pc.uCellDims.x;
+        const int ncy = pc.uCellDims.y;
+        const int ncz = pc.uCellDims.z;
+        for (int cz = -1; cz <= 1; ++cz)
+        for (int cy = -1; cy <= 1; ++cy)
+        for (int cx = -1; cx <= 1; ++cx) {
+            const int nx = ccx + cx;
+            const int ny = ccy + cy;
+            const int nz = ccz + cz;
+            if (nx < 0 || ny < 0 || nz < 0 || nx >= ncx || ny >= ncy || nz >= ncz) {
+                continue;
+            }
+            const int ci = cellIndexF(nx, ny, nz);
+            const uint off = cellOffsets[ci];
+            const uint cnt = cellCounts[ci];
+            for (uint k = 0u; k < cnt; ++k) {
+                const uint ai = cellList[off + k];
+                const vec3 c = atoms[ai].xyz;
+                const float r = atoms[ai].w;
+                const float dist = length(p - c) - r;
+                if (dist < best) {
+                    best = dist;
+                    nearest = int(ai);
+                }
+            }
+        }
+        density[addr] = best;
+        return;
+    }
+
+    // —— QuickSurf：高斯密度 + 梯度 + 密度加权色 ——
+    float dens = 0.0;
+    vec3 grad = vec3(0.0);
+    vec3 col = vec3(0.0);
+    const float gausslim = pc.uParams2.z;
+    const float on_has = pc.uParams.y > 0 ? 1.0 : 0.0;
+    const int ncx = pc.uCellDims.x;
+    const int ncy = pc.uCellDims.y;
+    const int ncz = pc.uCellDims.z;
+    for (int cz = -1; cz <= 1; ++cz)
+    for (int cy = -1; cy <= 1; ++cy)
+    for (int cx = -1; cx <= 1; ++cx) {
+        const int nx = ccx + cx;
+        const int ny = ccy + cy;
+        const int nz = ccz + cz;
+        if (nx < 0 || ny < 0 || nz < 0 || nx >= ncx || ny >= ncy || nz >= ncz) {
+            continue;
+        }
+        const int ci = cellIndexF(nx, ny, nz);
+        const uint off = cellOffsets[ci];
+        const uint cnt = cellCounts[ci];
+        for (uint k = 0u; k < cnt; ++k) {
+            const uint ai = cellList[off + k];
+            const vec3 c = atoms[ai].xyz;
+            const float r = atoms[ai].w;      // 已乘 radscale
+            if (r < 1e-4) continue;
+            const float arinv = 1.0 / (2.0 * r * r);
+            const float radlim = gausslim * r;
+            const float radlim2 = radlim * radlim;
+            const vec3 d = p - c;
+            const float r2 = dot(d, d);
+            if (r2 >= radlim2) continue;      // 高斯截断
+            const float g = exp(-r2 * arinv);
+            dens += g;
+            grad += 2.0 * arinv * (c - p) * g;   // 外向法线 = -∂dens/∂p
+            if (on_has > 0.0) {
+                col += g * atomColors[ai].rgb;
+            }
+        }
+    }
+    density[addr] = dens;
+    gradient[3 * addr + 0] = grad.x;
+    gradient[3 * addr + 1] = grad.y;
+    gradient[3 * addr + 2] = grad.z;
+    if (on_has > 0.0) {
+        colormap[3 * addr + 0] = col.x;
+        colormap[3 * addr + 1] = col.y;
+        colormap[3 * addr + 2] = col.z;
+    }
+}

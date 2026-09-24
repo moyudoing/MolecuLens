@@ -4,9 +4,22 @@
 
 #include "engine/vulkan/pipeline/pipeline.h"
 
+#include <cstddef>
 #include <cstring>
 
 #include "spdlog/spdlog.h"
+
+// 内嵌 SPIR-V 生成头（cmake/shaders.cmake；仅本 TU 需要，不进任何公共头）
+#include "gen/shaders/sphere_vert.h"
+#include "gen/shaders/sphere_frag.h"
+#include "gen/shaders/cylinder_vert.h"
+#include "gen/shaders/cylinder_frag.h"
+#include "gen/shaders/line_vert.h"
+#include "gen/shaders/line_frag.h"
+#include "gen/shaders/mesh_vert.h"
+#include "gen/shaders/mesh_frag.h"
+#include "gen/shaders/point_vert.h"
+#include "gen/shaders/point_frag.h"
 
 namespace moleculens::engine {
 
@@ -157,6 +170,235 @@ bool PipelineBuilder::build(VulkanDevice& device, Pipeline* out) {
     out->pipeline_ = pipeline;
     out->layout_ = layout;
     return true;
+}
+
+// =============================================================================
+// PipelineSet
+// =============================================================================
+
+namespace {
+
+// 一条管线的描述（顶点布局 + 状态 + 着色器对）
+struct PipeSpec {
+    const VkPipelineShaderStageCreateInfo* stages = nullptr;   // vert / frag
+    std::vector<VkVertexInputBindingDescription> bindings;
+    std::vector<VkVertexInputAttributeDescription> attrs;
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    bool blend = false;
+    bool depthWrite = true;
+    VkPolygonMode polygon = VK_POLYGON_MODE_FILL;
+    const char* name = "pipeline";
+};
+
+} // namespace
+
+bool PipelineSet::create(VulkanDevice& device, VkRenderPass renderPass,
+                         VkSampleCountFlagBits samples, VkDescriptorSetLayout globalLayout,
+                         std::string* outError) {
+    auto loadShader = [&](ShaderModule& out, VkShaderStageFlagBits stage,
+                          const uint8_t* spv, size_t size) -> bool {
+        return out.create(device, stage, spv, size);
+    };
+    if (!loadShader(sphereVert_, VK_SHADER_STAGE_VERTEX_BIT, sphere_vert, sphere_vert_len) ||
+        !loadShader(sphereFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, sphere_frag, sphere_frag_len) ||
+        !loadShader(cylinderVert_, VK_SHADER_STAGE_VERTEX_BIT, cylinder_vert, cylinder_vert_len) ||
+        !loadShader(cylinderFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, cylinder_frag, cylinder_frag_len) ||
+        !loadShader(lineVert_, VK_SHADER_STAGE_VERTEX_BIT, line_vert, line_vert_len) ||
+        !loadShader(lineFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, line_frag, line_frag_len) ||
+        !loadShader(meshVert_, VK_SHADER_STAGE_VERTEX_BIT, mesh_vert, mesh_vert_len) ||
+        !loadShader(meshFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, mesh_frag, mesh_frag_len) ||
+        !loadShader(pointVert_, VK_SHADER_STAGE_VERTEX_BIT, point_vert, point_vert_len) ||
+        !loadShader(pointFrag_, VK_SHADER_STAGE_FRAGMENT_BIT, point_frag, point_frag_len)) {
+        if (outError) *outError = "shader module creation failed";
+        return false;
+    }
+
+    auto buildPipe = [&](const PipeSpec& s, Pipeline* out) -> bool {
+        PipelineBuilder pb;
+        pb.renderPass(renderPass).samples(samples).topology(s.topology)
+            .shaders(s.stages, 2)
+            .vertexInput(s.bindings, s.attrs)
+            .descriptorLayouts({globalLayout})
+            .pushConstants(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(MaterialBlock))
+            .depthTest(true).depthWrite(s.depthWrite).blend(s.blend)
+            .polygonMode(s.polygon).cullMode(VK_CULL_MODE_NONE);
+        if (!pb.build(device, out)) {
+            if (outError) *outError = std::string(s.name) + " pipeline build failed";
+            return false;
+        }
+        return true;
+    };
+
+    // —— 球（SphereInst 实例化）：实心 / 线框 / 透明 ——
+    {
+        const VkPipelineShaderStageCreateInfo stages[] = {sphereVert_.stage(),
+                                                          sphereFrag_.stage()};
+        const VkVertexInputBindingDescription bindings[] = {
+            {0, sizeof(glm::vec3), VK_VERTEX_INPUT_RATE_VERTEX},
+            {1, sizeof(SphereInst), VK_VERTEX_INPUT_RATE_INSTANCE},
+        };
+        const VkVertexInputAttributeDescription attrs[] = {
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+            {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(SphereInst, posRadius)},
+            {2, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(SphereInst, color)},
+            {3, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pickId)},
+            {4, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pad)},
+        };
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 2);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 5);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_FILL, "sphere"}, &sphereSolid_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_LINE, "sphere-wire"}, &sphereWire_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL, "sphere-blend"}, &sphereBlend_)) {
+            return false;
+        }
+    }
+
+    // —— 键圆柱（CylinderInst）：实心 / 线框 / 透明 ——
+    {
+        const VkPipelineShaderStageCreateInfo stages[] = {cylinderVert_.stage(),
+                                                          cylinderFrag_.stage()};
+        const VkVertexInputBindingDescription bindings[] = {
+            {0, sizeof(glm::vec3), VK_VERTEX_INPUT_RATE_VERTEX},
+            {1, sizeof(CylinderInst), VK_VERTEX_INPUT_RATE_INSTANCE},
+        };
+        const VkVertexInputAttributeDescription attrs[] = {
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+            {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(CylinderInst, aPos)},
+            {2, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(CylinderInst, bPos)},
+            {3, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(CylinderInst, radius)},
+            {4, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(CylinderInst, color)},
+            {5, 1, VK_FORMAT_R32G32_UINT, offsetof(CylinderInst, pickId_pad)},
+        };
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 2);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 6);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_FILL, "cylinder"}, &cylinderSolid_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_LINE, "cylinder-wire"}, &cylinderWire_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL, "cylinder-blend"}, &cylinderBlend_)) {
+            return false;
+        }
+    }
+
+    // —— 线段（LineInst；点模式的键也走此管线）——
+    {
+        const VkPipelineShaderStageCreateInfo stages[] = {lineVert_.stage(),
+                                                          lineFrag_.stage()};
+        // 顶点布局 = pos(float4) + color(float4) 交错 = 32B/顶点（line.vert）；
+        // 曾用 48B stride 与数据不匹配 → 取数错位 → 线框渲染错乱。
+        const VkVertexInputBindingDescription bindings[] = {
+            {0, 32, VK_VERTEX_INPUT_RATE_VERTEX},
+        };
+        const VkVertexInputAttributeDescription attrs[] = {
+            {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0},
+            {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 16},
+        };
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 1);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 2);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL, "line"}, &line_)) {
+            return false;
+        }
+    }
+
+    // —— 三角网格（TriMeshVertex 48B）：实心 / 线框 / 透明 ——
+    {
+        const VkPipelineShaderStageCreateInfo stages[] = {meshVert_.stage(),
+                                                          meshFrag_.stage()};
+        const VkVertexInputBindingDescription bindings[] = {
+            {0, sizeof(TriMeshVertex), VK_VERTEX_INPUT_RATE_VERTEX},
+        };
+        const VkVertexInputAttributeDescription attrs[] = {
+            {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(TriMeshVertex, pos)},
+            {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(TriMeshVertex, normal)},
+            {2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(TriMeshVertex, color)},
+        };
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 1);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 3);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_FILL, "mesh"}, &meshSolid_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
+                        VK_POLYGON_MODE_LINE, "mesh-wire"}, &meshWire_) ||
+            !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, false,
+                        VK_POLYGON_MODE_FILL, "mesh-blend"}, &meshBlend_)) {
+            return false;
+        }
+    }
+
+    // —— 点（GL_POINTS；SphereInst 实例数据，无顶点绑定）——
+    {
+        const VkPipelineShaderStageCreateInfo stages[] = {pointVert_.stage(),
+                                                          pointFrag_.stage()};
+        const VkVertexInputBindingDescription bindings[] = {
+            {1, sizeof(SphereInst), VK_VERTEX_INPUT_RATE_INSTANCE},
+        };
+        const VkVertexInputAttributeDescription attrs[] = {
+            {1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(SphereInst, posRadius)},
+            {2, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(SphereInst, color)},
+            {3, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pickId)},
+            {4, 1, VK_FORMAT_R32G32_UINT, offsetof(SphereInst, pad)},
+        };
+        const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 1);
+        const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 4);
+        if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_POINT_LIST, false, true,
+                        VK_POLYGON_MODE_FILL, "point"}, &point_)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void PipelineSet::destroy(VulkanDevice& device) {
+    sphereSolid_.destroy(device);
+    sphereWire_.destroy(device);
+    sphereBlend_.destroy(device);
+    cylinderSolid_.destroy(device);
+    cylinderWire_.destroy(device);
+    cylinderBlend_.destroy(device);
+    meshSolid_.destroy(device);
+    meshWire_.destroy(device);
+    meshBlend_.destroy(device);
+    line_.destroy(device);
+    point_.destroy(device);
+    sphereVert_.destroy();
+    sphereFrag_.destroy();
+    cylinderVert_.destroy();
+    cylinderFrag_.destroy();
+    lineVert_.destroy();
+    lineFrag_.destroy();
+    meshVert_.destroy();
+    meshFrag_.destroy();
+    pointVert_.destroy();
+    pointFrag_.destroy();
+}
+
+const Pipeline& PipelineSet::sphere(DrawMode mode) const {
+    switch (mode) {
+        case DrawMode::Wireframe:   return sphereWire_;
+        case DrawMode::Transparent: return sphereBlend_;
+        case DrawMode::Point:       return point_;
+        default:                    return sphereSolid_;
+    }
+}
+
+const Pipeline& PipelineSet::cylinder(DrawMode mode) const {
+    switch (mode) {
+        case DrawMode::Wireframe:   return cylinderWire_;
+        case DrawMode::Transparent: return cylinderBlend_;
+        default:                    return cylinderSolid_;   // 含点模式降级
+    }
+}
+
+const Pipeline& PipelineSet::mesh(DrawMode mode) const {
+    switch (mode) {
+        case DrawMode::Wireframe:   return meshWire_;
+        case DrawMode::Transparent: return meshBlend_;
+        default:                    return meshSolid_;       // 含点模式降级
+    }
 }
 
 } // namespace moleculens::engine

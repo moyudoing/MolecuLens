@@ -39,6 +39,12 @@ export/
 *.mlscene
 *.mlrepr
 
+# —— 运行时状态（应用写出，非源码）——
+# imgui.ini：Dock 布局/窗口位置的运行期快照，随用户操作变化，不应入库
+# （布局的持久化由 persist/settings 的 settings.json 负责）
+imgui.ini
+imgui.ini.bak
+
 # —— 系统 ——
 Thumbs.db
 .DS_Store

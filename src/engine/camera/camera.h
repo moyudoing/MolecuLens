@@ -35,6 +35,13 @@ public:
     [[nodiscard]] glm::mat4 projectionMatrix(float aspect) const;
     [[nodiscard]] glm::mat4 viewProjMatrix(float aspect) const;
 
+    // 屏幕 NDC → 世界空间拾取射线（主方案 §5.6 CPU 兜底）。
+    //   ndcX/ndcY ∈ [-1,1]（原点在视口中心、+y 向上），aspect = 宽/高。
+    //   outDir 已归一化；outOrigin = 相机位置。
+    // 注：正交投影下按 fov 近似（当前拾取仅用于透视视口）。
+    void rayForNdc(float ndcX, float ndcY, float aspect,
+                   glm::vec3* outOrigin, glm::vec3* outDir) const;
+
     // 交互（主方案 §7.10：左键旋转/中键缩放/右键滚转/滚轮 dolly）
     void orbit(float dx, float dy);              // 弧度增量
     void dolly(float factor);                    // 距离缩放

@@ -7,15 +7,42 @@
 
 #include <imgui_impl_vulkan.h>
 
+#include "app/controller/camera/camera_controller.h"
 #include "engine/camera/camera.h"
 #include "engine/export/png/png_encoder.h"
 #include "engine/raytrace/ray_tracer.h"
 #include "engine/render/renderer.h"
+#include "engine/vulkan/backend/decode.h"   // CommandStats（MOLECULENS_RENDER_DIAG）
 #include "engine/vulkan/offscreen/offscreen_renderer.h"
 #include "engine/vulkan/realtime/vulkan_renderer.h"
 #include "entity/scene/scene.h"
 
+// 渲染诊断开关（默认关）。置 1 时在视口打印命令流几何统计与一次性离屏像素回读——
+// 用于定位"数据 → 命令流 → GPU"链路断点（见 moleculens-fixes 的排查方法）。
+// 默认关闭：诊断会做一次 GPU 同步回读，不应出现在正常渲染路径上。
+#ifndef MOLECULENS_RENDER_DIAG
+#define MOLECULENS_RENDER_DIAG 0
+#endif
+
 namespace moleculens::app {
+
+namespace {
+
+// CPU 光追相机参数（视口预览与导出共用；此前两处各写一遍同样的 8 行）
+engine::RtCamera rtCameraFrom(const engine::OrbitCamera& cam, uint32_t w, uint32_t h) {
+    engine::RtCamera rtc;
+    rtc.position = cam.position();
+    rtc.target = cam.target;
+    // 相机 up（含滚转）：视图矩阵第二列（世界空间，与 pan 提取 right 同法）
+    const glm::mat4 V = cam.viewMatrix();
+    rtc.up = glm::normalize(glm::vec3(V[0][1], V[1][1], V[2][1]));
+    rtc.fovDeg = cam.fov;
+    rtc.width = w;
+    rtc.height = h;
+    return rtc;
+}
+
+} // namespace
 
 MolScene::MolScene() = default;
 
@@ -27,38 +54,53 @@ const entity::SceneStructure* MolScene::scene() const {
 
 void MolScene::init(engine::Renderer* renderer, engine::OrbitCamera* camera,
                     engine::VulkanRenderer* vk) {
+
     renderer_ = renderer;
     camera_ = camera;
+    // cameraCtl_ 由 ViewControl::svcCamera 在控制器装配阶段补注入（见头文件说明）
     offscreen_ = std::make_unique<engine::OffscreenRenderer>();
     std::string err;
+
     // 复用主设备：离屏 FBO 图像创建在主设备上，ImGui 描述符集（主设备 imgui 池）
-    // 才能采样到它。若用独立 headless 设备，colorView 属另一 VkDevice，主渲染
-    // 通道无法采样 → 视口空白、分子不显示。
-    if (vk && offscreen_->initShared(vk->device(), 640, 480, &err)) {
-        spdlog::info("[ui] viewport offscreen initialized on main device (640x480)");
+    // 才能采样到它。若用独立 headless 设备，colorView 属另一 VkDevice、主渲染通道
+    // 无法采样 → 视口必然空白（见 moleculens-fixes）。
+    // 因此这里**不设 headless 兜底**：那条路径已知不可能工作，只会把失败推迟到
+    // 运行期表现为"视口空白"，不如在初始化处直接失败并留下明确日志。
+    if (!vk || !offscreen_->initShared(vk->device(), 640, 480, &err)) {
+        spdlog::error("[ui] viewport offscreen init failed (shared device): {}", err);
+        offscreen_.reset();
         return;
     }
-    if (err.empty()) {
-        err = "shared-device offscreen init failed";
-    }
-    spdlog::warn("[ui] viewport offscreen shared-device init failed: {}; falling back to headless", err);
-    // 兜底：headless（CLI/无主设备）。注意：headless 设备上创建的图像无法被
-    // 主设备 ImGui 采样（跨设备纹理），GUI 视口会空白——仅作最后手段。
-    engine::RenderConfig cfg;
-    cfg.debug = false;
-    cfg.msaaSamples = 0;
-    if (!offscreen_->init(cfg, 640, 480, &err)) {
-        spdlog::error("[ui] offscreen viewport init failed: {}", err);
-        offscreen_.reset();
-    } else {
-        spdlog::warn("[ui] viewport offscreen on headless device (cross-device texture -> 视口可能空白)");
-    }
+    spdlog::info("[ui] viewport offscreen initialized on main device (640x480)");
 }
 
 void MolScene::shutdown() {
     destroyRtTexture();
+    exportTarget_.reset();   // 其 device 取自 offscreen_，须先于 offscreen_ 释放
     offscreen_.reset();
     texture_ = ImTextureID(0);
+}
+
+uint64_t MolScene::cameraFingerprint(const engine::OrbitCamera& cam) {
+    // FNV-1a：把相机可观测状态的**原始字节**依次混入（按位模式比较，浮点
+    // 相等性问题（-0.0/+0.0、NaN）在此表现为"变了就重绘"，只会多画不会漏画）
+    uint64_t h = 1469598103934665603ull;   // FNV offset basis
+    const auto mix = [&h](const void* data, size_t bytes) {
+        const auto* p = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < bytes; ++i) {
+            h ^= p[i];
+            h *= 1099511628211ull;         // FNV prime
+        }
+    };
+    mix(&cam.target, sizeof(cam.target));
+    mix(&cam.yaw, sizeof(cam.yaw));
+    mix(&cam.pitch, sizeof(cam.pitch));
+    mix(&cam.distance, sizeof(cam.distance));
+    mix(&cam.roll, sizeof(cam.roll));
+    mix(&cam.fov, sizeof(cam.fov));
+    mix(&cam.ortho, sizeof(cam.ortho));
+    mix(&cam.orthoScale, sizeof(cam.orthoScale));
+    return h;
 }
 
 void MolScene::render(const ImVec2& size) {
@@ -97,17 +139,15 @@ void MolScene::render(const ImVec2& size) {
         viewportW_ = w;
         viewportH_ = h;
         dirty_ = true;
-        texture_ = ImTextureID(0);   // FBO 重建 → 纹理重建
+        // FBO 重建 → 纹理需重建；先释放旧描述符，否则窗口 resize 期间每帧泄漏一个
+        releaseDescriptor(texture_);
     }
 
     // 相机移动 / 场景脏 → 重渲染
     // 除 yaw/pitch/distance/target 外还须检测 fov/ortho（工具栏切换视角）与
     // 场景脏位（背景/表示变更），否则改了视角/背景视图不刷新。
-    const bool cameraMoved = (camera_->yaw != lastYaw_ || camera_->pitch != lastPitch_ ||
-                              camera_->distance != lastDist_ ||
-                              camera_->target != lastTarget_ ||
-                              camera_->fov != lastFov_ || camera_->ortho != lastOrtho_ ||
-                              camera_->roll != lastRoll_);
+    const uint64_t camFp = cameraFingerprint(*camera_);
+    const bool cameraMoved = (camFp != lastCameraFp_);
     const bool sceneDirty = renderer_->scene()->dirtyBits() != 0;
 
     // 判断变化 是否需要渲染器更新
@@ -119,35 +159,27 @@ void MolScene::render(const ImVec2& size) {
         offscreen_->setBackground(props.bgColor);
         renderer_->prepare();
 
-        // 诊断（一次性/数量变化时）：数据→命令流几何是否生成，定位断点
+#if MOLECULENS_RENDER_DIAG
+        // 诊断（几何数量变化时）：数据 → 命令流是否确实生成了几何
         {
-            uint32_t nSphere = 0, nCyl = 0, nLine = 0, nMesh = 0;
-            const engine::SceneCommandList& cl = renderer_->commandList();
-            engine::CommandIterator it(cl);
-            for (bool has = cl.first(it); has; has = cl.next(it)) {
-                switch (it.code()) {
-                    case engine::Cmd::SphereInst:   nSphere += it.payloadSize() / sizeof(engine::SphereInst); break;
-                    case engine::Cmd::CylinderInst: nCyl    += it.payloadSize() / sizeof(engine::CylinderInst); break;
-                    case engine::Cmd::LineInst:     nLine   += it.payloadSize() / sizeof(engine::LineInst); break;
-                    case engine::Cmd::TriMesh:      ++nMesh; break;
-                    default: break;
-                }
-            }
+            engine::CommandStats st;
+            engine::commandStats(renderer_->commandList(), &st);
             static uint32_t sLast = UINT32_MAX;
-            if (nSphere != sLast) {
-                sLast = nSphere;
+            if (st.spheres != sLast) {
+                sLast = st.spheres;
                 spdlog::info("[ui] viewport command list: {} spheres, {} cylinders, {} lines, {} meshes, serial={}",
-                             nSphere, nCyl, nLine, nMesh, cl.serial());
+                             st.spheres, st.cylinders, st.lines, st.meshes,
+                             renderer_->commandSerial());
             }
         }
+#endif
 
-        engine::RenderView view;
-        view.camera = *camera_;
-        view.width = w;
-        view.height = h;
-        renderer_->applySceneLighting(view);   // 场景光照/雾 → UBO（光照更新机制）
+        // 一次渲染所需的完整视图参数（相机 + 物理分辨率 + 场景光照/雾）
+        engine::RenderView view = renderer_->viewFor(*camera_, w, h);
+        /// @key 渲染的关键
         offscreen_->execute(renderer_->commandList(), view);
 
+#if MOLECULENS_RENDER_DIAG
         // 一次性诊断：回读离屏图像统计非背景像素——区分"渲染空白"（draw 未写入）
         // 与"图像正常但显示失败"（ImGui 纹理未显示）。
         {
@@ -183,14 +215,9 @@ void MolScene::render(const ImVec2& size) {
                 }
             }
         }
+#endif   // MOLECULENS_RENDER_DIAG
         lastSerial_ = renderer_->commandSerial();
-        lastYaw_ = camera_->yaw;
-        lastPitch_ = camera_->pitch;
-        lastDist_ = camera_->distance;
-        lastTarget_ = camera_->target;
-        lastFov_ = camera_->fov;
-        lastOrtho_ = camera_->ortho;
-        lastRoll_ = camera_->roll;
+        lastCameraFp_ = camFp;
         dirty_ = false;
     }
     if (texture_ == ImTextureID(0) && offscreen_->colorView() != VK_NULL_HANDLE) {
@@ -199,9 +226,10 @@ void MolScene::render(const ImVec2& size) {
             offscreen_->sampler(), offscreen_->colorView(),
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         texture_ = ImTextureID(reinterpret_cast<uintptr_t>(desc));
-        spdlog::info("[ui] viewport texture descriptor created (image {}x{}, layout={})",
-                     viewportW_, viewportH_,
-                     static_cast<int>(offscreen_->colorLayout()));
+        // debug 级：resize 期间每帧都会走到这里，info 级会刷屏（每帧一次）
+        spdlog::debug("[ui] viewport texture descriptor created (image {}x{}, layout={})",
+                      viewportW_, viewportH_,
+                      static_cast<int>(offscreen_->colorLayout()));
     }
     if (texture_) {
         ImGui::Image(texture_, size);
@@ -228,11 +256,8 @@ void MolScene::renderRayTracePreview(const ImVec2& size) {
             return;
         }
     }
-    const bool cameraMoved = (camera_->yaw != lastYaw_ || camera_->pitch != lastPitch_ ||
-                              camera_->distance != lastDist_ ||
-                              camera_->target != lastTarget_ ||
-                              camera_->fov != lastFov_ || camera_->ortho != lastOrtho_ ||
-                              camera_->roll != lastRoll_);
+    const uint64_t camFp = cameraFingerprint(*camera_);
+    const bool cameraMoved = (camFp != lastCameraFp_);
     const bool sceneDirty = renderer_->scene()->dirtyBits() != 0;
     if (dirty_ || cameraMoved || sceneDirty ||
         renderer_->commandSerial() != lastSerial_) {
@@ -240,24 +265,15 @@ void MolScene::renderRayTracePreview(const ImVec2& size) {
         renderer_->prepare();
         engine::RtScene rtScene;
         engine::buildRtScene(renderer_->commandList(), rtScene);
-        engine::RtCamera rtc;
-        rtc.position = camera_->position();
-        rtc.target = camera_->target;
-        // 相机 up（含滚转）：视图矩阵第二列（世界空间，与 pan 提取 right 同法）
-        const glm::mat4 V = camera_->viewMatrix();
-        rtc.up = glm::normalize(glm::vec3(V[0][1], V[1][1], V[2][1]));
-        rtc.fovDeg = camera_->fov;
-        rtc.width = rw;
-        rtc.height = rh;
+        engine::RtCamera rtc = rtCameraFrom(*camera_, rw, rh);
 
-        engine::RenderView view;
-        view.camera = *camera_;
-        renderer_->applySceneLighting(view);   // 光照与光栅化一致
+        // 光照与光栅化一致（直接取场景光照，无需构造 RenderView）
+        const engine::LightParams light = renderer_->sceneLighting();
         engine::RtLight rtl;
-        rtl.skyColor = view.light.skyColor;
-        rtl.groundColor = view.light.groundColor;
-        rtl.ambientColor = view.light.ambientColor;
-        rtl.ambientIntensity = view.light.ambientIntensity;
+        rtl.skyColor = light.skyColor;
+        rtl.groundColor = light.groundColor;
+        rtl.ambientColor = light.ambientColor;
+        rtl.ambientIntensity = light.ambientIntensity;
         rtl.maxBounces = 0;        // 预览：无反射（保证交互帧率）
 
         const auto& props = renderer_->scene()->properties();
@@ -267,13 +283,7 @@ void MolScene::renderRayTracePreview(const ImVec2& size) {
         updateRtTexture(rgba);
 
         lastSerial_ = renderer_->commandSerial();
-        lastYaw_ = camera_->yaw;
-        lastPitch_ = camera_->pitch;
-        lastDist_ = camera_->distance;
-        lastTarget_ = camera_->target;
-        lastFov_ = camera_->fov;
-        lastOrtho_ = camera_->ortho;
-        lastRoll_ = camera_->roll;
+        lastCameraFp_ = camFp;
         dirty_ = false;
     }
     if (rtTexture_) {
@@ -284,7 +294,7 @@ void MolScene::renderRayTracePreview(const ImVec2& size) {
 }
 
 bool MolScene::handleMouse(float dx, float dy, int button) {
-    if (!camera_) {
+    if (!camera_ || !cameraCtl_) {
         return false;
     }
     // 按钮已抬起：结束本次拖拽。release 帧可能无位移，main_view 不会调用本函数，
@@ -305,39 +315,37 @@ bool MolScene::handleMouse(float dx, float dy, int button) {
         return false;   // 其它按钮的拖拽：忽略（避免多键串扰）
     }
     // 主方案 §7.10：左键轨道旋转 / 中键缩放 / 右键绕屏幕法线滚转（Shift+右键平移）
+    // 一律经 CameraController 转发 —— 它是改变相机的唯一入口（不得再直接写 camera_）
     const float sensitivity = 0.008f;
     if (button == 0) {
         // 左键轨道：视角跟随鼠标拖拽方向同步转动。
         //  水平 +dx：拖右 → yaw 增 → 相机绕到 +X（场景右侧），视角转向右侧；
         //  竖直 -dy：拖上（dy<0）→ pitch 增 → 相机升高，看到顶面。
-        camera_->orbit(dx * sensitivity, -dy * sensitivity);
+        cameraCtl_->orbit(dx * sensitivity, -dy * sensitivity);
     } else if (button == 1) {
-        camera_->dolly(1.0f + dy * sensitivity);
+        cameraCtl_->dolly(1.0f + dy * sensitivity);
     } else if (button == 2) {
         const bool shift = ImGui::GetIO().KeyShift;
         if (!shift) {
             // 右键：绕屏幕法线（指向屏幕外）滚转，顺时针/逆时针随拖拽方向
             // （正 roll = 逆时针，见 OrbitCamera::rollView 注释；拖右→顺时针）
-            camera_->rollView(-dx * 0.004f);
+            cameraCtl_->rollView(-dx * 0.004f);
         } else {
             // Shift+右键：屏幕空间平移（保留平移能力）
             const float w = static_cast<float>(std::max(1u, displayW_));
             const float h = static_cast<float>(std::max(1u, displayH_));
-            camera_->pan(glm::vec2(dx / w * 2.0f, -dy / h * 2.0f));
+            cameraCtl_->pan(dx / w * 2.0f, -dy / h * 2.0f);
         }
     }
     return true;
 }
 
 void MolScene::handleScroll(float scrollY) {
-    if (camera_) {
-        // 滚轮缩放（主方案 §7.10：1 - scroll*0.15）
-        camera_->dolly(1.0f - scrollY * 0.15f);
+    if (!cameraCtl_) {
+        return;
     }
-}
-
-void MolScene::handleClick() {
-    // M2：拾取（ID Pass / CPU 射线）
+    // 滚轮缩放（主方案 §7.10：1 - scroll*0.15）→ 同样经控制器
+    cameraCtl_->dolly(1.0f - scrollY * 0.15f);
 }
 
 bool MolScene::exportToPng(uint32_t width, uint32_t height,
@@ -357,27 +365,31 @@ bool MolScene::exportToPng(uint32_t width, uint32_t height,
     // 确保命令流最新（脏则重建）
     renderer_->update(0.0f);
     renderer_->prepare();
-    // 独立离屏渲染器（共享主设备；避免改动视口自身 FBO）
-    engine::OffscreenRenderer exp;
+    // 常驻导出渲染器（共享主设备；避免改动视口自身 FBO）。
+    // 首次创建后复用，省去每次导出重编 10 条管线 + 重建共享网格的开销；
+    // 导出可能来自后台线程，故从创建到回读全程持锁串行化。
+    std::lock_guard<std::mutex> exportLock(exportMutex_);
     std::string err;
-    if (!exp.initShared(offscreen_->device(), rw, rh, &err)) {
-        spdlog::error("[io] export: offscreen init failed: {}", err);
-        return false;
+    if (!exportTarget_) {
+        exportTarget_ = std::make_unique<engine::OffscreenRenderer>();
+        if (!exportTarget_->initShared(offscreen_->device(), rw, rh, &err)) {
+            spdlog::error("[io] export: offscreen init failed: {}", err);
+            exportTarget_.reset();
+            return false;
+        }
+    } else if (exportTarget_->width() != rw || exportTarget_->height() != rh) {
+        exportTarget_->resize(rw, rh);
     }
     const auto& props = renderer_->scene()->properties();
     if (bgOverride) {
-        exp.setBackground(bgOverride);
+        exportTarget_->setBackground(bgOverride);
     } else {
-        exp.setBackground(props.bgColor);
+        exportTarget_->setBackground(props.bgColor);
     }
-    engine::RenderView view;
-    view.camera = *camera_;
-    view.width = rw;
-    view.height = rh;
-    renderer_->applySceneLighting(view);
-    exp.execute(renderer_->commandList(), view);
+    engine::RenderView view = renderer_->viewFor(*camera_, rw, rh);
+    exportTarget_->execute(renderer_->commandList(), view);
     std::vector<uint8_t> px;
-    if (!exp.readbackPixels(px, engine::PixelFormat::Rgba8)) {
+    if (!exportTarget_->readbackPixels(px, engine::PixelFormat::Rgba8)) {
         spdlog::error("[io] export: 像素回读失败");
         return false;
     }
@@ -426,23 +438,15 @@ bool MolScene::exportRayTracedToPng(uint32_t width, uint32_t height,
     renderer_->prepare();
     engine::RtScene rtScene;
     engine::buildRtScene(renderer_->commandList(), rtScene);
-    engine::RtCamera rtc;
-    rtc.position = camera_->position();
-    rtc.target = camera_->target;
-    const glm::mat4 V = camera_->viewMatrix();
-    rtc.up = glm::normalize(glm::vec3(V[0][1], V[1][1], V[2][1]));
-    rtc.fovDeg = camera_->fov;
-    rtc.width = width;
-    rtc.height = height;
+    engine::RtCamera rtc = rtCameraFrom(*camera_, width, height);
 
-    engine::RenderView view;
-    view.camera = *camera_;
-    renderer_->applySceneLighting(view);
+    // 光照与光栅化一致（直接取场景光照，无需构造 RenderView）
+    const engine::LightParams light = renderer_->sceneLighting();
     engine::RtLight rtl;
-    rtl.skyColor = view.light.skyColor;
-    rtl.groundColor = view.light.groundColor;
-    rtl.ambientColor = view.light.ambientColor;
-    rtl.ambientIntensity = view.light.ambientIntensity;
+    rtl.skyColor = light.skyColor;
+    rtl.groundColor = light.groundColor;
+    rtl.ambientColor = light.ambientColor;
+    rtl.ambientIntensity = light.ambientIntensity;
     rtl.maxBounces = 1;       // 导出：球体 1 次反射
 
     const auto& props = renderer_->scene()->properties();
@@ -460,10 +464,24 @@ bool MolScene::exportRayTracedToPng(uint32_t width, uint32_t height,
     return true;
 }
 
+void MolScene::releaseDescriptor(ImTextureID& tex) {
+    if (tex != ImTextureID(0)) {
+        ImGui_ImplVulkan_RemoveTexture(
+            reinterpret_cast<VkDescriptorSet>(tex));
+        tex = ImTextureID(0);
+    }
+}
+
+void MolScene::releaseImGuiTextures() {
+    releaseDescriptor(texture_);
+    releaseDescriptor(rtTexture_);
+}
+
 bool MolScene::ensureRtTexture(uint32_t w, uint32_t h) {
     if (rtImage_ != VK_NULL_HANDLE && rtW_ == w && rtH_ == h) {
         return true;
     }
+    releaseDescriptor(rtTexture_);   // 同视口纹理：不释放会在每次 RT 尺寸变化时泄漏
     destroyRtTexture();
     if (!offscreen_) {
         return false;

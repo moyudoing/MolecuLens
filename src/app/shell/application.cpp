@@ -31,10 +31,10 @@
 #include "app/controller/render/render_controller.h"
 #include "app/controller/rep/representation_controller.h"
 #include "app/controller/scene/scene_controller.h"
-#include "app/controller/script/script_controller.h"
 #include "app/controller/selection/selection_controller.h"
 #include "app/controller/timeline/timeline_controller.h"
 #include "app/data/data_manager.h"
+#include "app/data/log_buffer.h"
 #include "app/view/control/view_control.h"
 #include "engine/camera/camera.h"
 #include "engine/cmd/cmd.h"
@@ -136,6 +136,10 @@ bool Application::init() {
         std::vector<spdlog::sink_ptr> sinks;
         sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             "logs/moleculens.log", 4 * 1024 * 1024, 3));
+        // 环形缓冲 sink：供界面"日志"面板读取（独立于文件 sink，故文件写失败
+        // 也不影响面板；反之亦然）
+        sinks.push_back(std::shared_ptr<spdlog::sinks::sink>(
+            &app::LogRingBuffer::instance(), [](spdlog::sinks::sink*) {}));
 #ifndef NDEBUG
         // Debug 构建：仅当确实挂接了控制台才加 stdout sink
         // （stdout 无效时 stdout_color_sink_mt 构造会抛异常）
@@ -195,16 +199,18 @@ bool Application::init() {
     timelineCtl_ = std::make_unique<TimelineController>(services_);
     cameraCtl_ = std::make_unique<CameraController>(services_);
     ioCtl_ = std::make_unique<IoController>(services_);
-    scriptCtl_ = std::make_unique<ScriptController>(services_);
 
     // 视图注入控制器（时间轴/IO/选择/渲染/表示）
     view_->timeAxis().setController(timelineCtl_.get());
     view_->svcTimeline(timelineCtl_.get());
     view_->svcIo(ioCtl_.get());
+    // 载入 .mlscene 需整体替换表示列表 —— IoController 须经表示控制器（唯一持有者）
+    ioCtl_->setRepresentationController(repCtl_.get());
     view_->svcSelection(selectionCtl_.get());
     view_->svcScene(sceneCtl_.get());
     view_->svcRender(renderCtl_.get());
     view_->svcRep(repCtl_.get());
+    view_->svcCamera(cameraCtl_.get());
     spdlog::info("[app] init: controllers wired");
 
     // 加载回调 → 加载遮罩（主方案 §7.5）
@@ -217,8 +223,9 @@ bool Application::init() {
     });
 
     // 默认表示（主方案 §7.7：加载即显示球棍）
+    // 表示数据由 RepresentationController 唯一持有，渲染器只持只读视图（零拷贝）
     renderer_->setScene(&scene_);
-    renderer_->setRepresentations(repCtl_->representations());
+    repCtl_->attachToRenderer();
     renderer_->setVulkanRenderer(vkRenderer());
     renderer_->refreshFrameData();
 
@@ -233,9 +240,13 @@ void Application::shutdown() {
         view_->shutdown();
         view_.reset();
     }
+    // 渲染器持有 RepresentationController 内部向量的只读视图，而下面会先于
+    // renderer_ 重置 repCtl_ → 必须显式解绑，否则渲染器残留悬垂指针。
+    if (renderer_) {
+        renderer_->unbindRepresentations();
+    }
     // 控制器在 view 之前保持可用；析构顺序反序
     ioCtl_.reset();
-    scriptCtl_.reset();
     cameraCtl_.reset();
     timelineCtl_.reset();
     selectionCtl_.reset();

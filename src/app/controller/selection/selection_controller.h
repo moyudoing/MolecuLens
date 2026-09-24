@@ -27,12 +27,23 @@ public:
     const engine::PickResult& current() const { return current_; }
     bool hasSelection() const { return has_; }
 
+    // —— 选择语言求值结果（主方案 §4.6）——
+    // mask 按全局原子顺序（与 CoordsSoA / 渲染器的选择掩码同一顺序）；
+    // select() 成功后由 SelectionChanged 事件的 payload 携带命中原子数。
+    [[nodiscard]] const std::vector<bool>& mask() const { return mask_; }
+    [[nodiscard]] size_t selectedCount() const { return selectedCount_; }
+    [[nodiscard]] const std::string& expression() const { return expression_; }
+
     void onEvent(const Event&) override;
 
 private:
     AppServices& svc_;
     engine::PickResult current_;
     bool has_ = false;
+
+    std::vector<bool> mask_;          // 最近一次 select() 的命中掩码
+    size_t selectedCount_ = 0;
+    std::string expression_;          // 最近一次成功的表达式（"" = 未选择）
 };
 
 } // namespace moleculens::app

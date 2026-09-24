@@ -60,11 +60,11 @@ struct Representation {
     float opacity      = 1.0f;
 };
 
-const char* representationTypeName(RepresentationType);
-const char* colorSchemeName(ColorScheme);
+const char* representationTypeName(RepresentationType) noexcept;
+const char* colorSchemeName(ColorScheme) noexcept;
 
 // 中文名（UI 用）
-const char* representationTypeZh(RepresentationType);
-const char* colorSchemeZh(ColorScheme);
+const char* representationTypeZh(RepresentationType) noexcept;
+const char* colorSchemeZh(ColorScheme) noexcept;
 
 } // namespace moleculens::engine

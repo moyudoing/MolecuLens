@@ -6,14 +6,17 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 #include <imgui_internal.h>   // DockBuilder 系列
 #include <volk.h>             // VkCommandBuffer（renderImGuiUi 静态回调签名）
 
+#include "app/data/log_buffer.h"   // LogRecord（日志面板快照成员，完整类型）
 #include "app/view/container/main_view.h"
 #include "app/view/timeline/time_axis.h"   // TimeAxis 值成员（完整类型）
 #include "app/view/tool/tool_registry.h"
@@ -44,6 +47,7 @@ class SelectionController;
 class SceneController;
 class RenderController;
 class RepresentationController;
+class CameraController;
 
 // 加载遮罩状态机（主方案 §7.5）
 enum class LoadingStage { Queued, ReadingFile, AnalyzingBonds, UploadingGPU, Done, Failed };
@@ -97,6 +101,8 @@ public:
     void svcScene(SceneController* ctl);
     void svcRender(RenderController* ctl);
     void svcRep(RepresentationController* ctl);
+    // 相机控制器：视口交互与相机面板的共同入口（须在 init 之前注入）
+    void svcCamera(CameraController* ctl);
 
     // UI 回调（VulkanRenderer renderpass 内调用）
     static void renderImGuiUi(VkCommandBuffer cmd);
@@ -105,7 +111,10 @@ public:
     // defaultName = 对话框默认文件名（可含或省略 .png）。返回用户选择的完整路径；
     // 返回空串 = 用户取消（调用方应中止导出、不生成文件）。
     // 内部记忆上次导出目录，下次默认定位到该目录。
-    static std::string saveFileDialog(const char* defaultName);
+    static std::string saveFileDialog(const char* defaultName);   // PNG 便捷包装
+    // 通用"另存为"：filter 为 Win32 过滤器串（"说明\0通配\0…\0\0"），defExt 为默认扩展名
+    static std::string saveFileDialogEx(const char* defaultName, const char* filter,
+                                        const char* defExt);
 
 private:
     bool createWindow();
@@ -143,6 +152,7 @@ private:
     SceneController* sceneCtl_ = nullptr;
     RenderController* renderCtl_ = nullptr;
     RepresentationController* repCtl_ = nullptr;
+    CameraController* cameraCtl_ = nullptr;
 
     // 工具面板观察指针（注册进 tools_ 注册表；svc* 注入控制器）
     MolListTool* molListTool_ = nullptr;
@@ -169,8 +179,17 @@ private:
     LoadingState loading_;
     bool loadingActive_ = false;
 
-    // 布局状态（M5 持久化）
-    bool layoutInitialized_ = true;
+    // 日志面板状态（环形缓冲快照 + 自动滚动）
+    std::vector<LogRecord> logSnapshot_;
+    std::uint64_t logSeen_ = 0;      // 已取快照时的 totalPushed()，用于判新
+    bool logAutoScroll_ = true;
+
+    // 布局状态（M5 持久化）。
+    // 初值必须是 false：setupDocking 仅在"未初始化"时构建默认 Dock 布局，
+    // 而首次运行既没有 settings.json 也没有 imgui.ini，没有任何路径会把它置为
+    // false —— 初值为 true 会让全新环境直接跳过默认布局，窗口全部漂浮重叠。
+    // 有保存布局时 loadLayout() 同样置 false，行为不变。
+    bool layoutInitialized_ = false;
 };
 
 } // namespace moleculens::app

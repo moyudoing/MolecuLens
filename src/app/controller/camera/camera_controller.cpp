@@ -71,6 +71,12 @@ void CameraController::pan(float ndcDx, float ndcDy) {
     }
 }
 
+void CameraController::rollView(float delta) {
+    if (svc_.camera) {
+        svc_.camera->rollView(delta);
+    }
+}
+
 void CameraController::reset() {
     if (svc_.camera) {
         svc_.camera->yaw = 0.0f;

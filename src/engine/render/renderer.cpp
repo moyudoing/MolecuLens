@@ -18,25 +18,25 @@
 
 namespace moleculens::engine {
 
-namespace {
-
-// 默认表示（首加载自动创建球棍，主方案 §5.2/§7.7）
-std::vector<Representation> defaultRepresentations() {
-    Representation rep;
-    rep.name = "ballstick";
-    rep.type = RepresentationType::BallAndStick;
-    rep.selection = "";
-    rep.colorScheme = ColorScheme::ElementCPK;
-    return {rep};
-}
-
-} // namespace
-
 Renderer::~Renderer() = default;
 
-void Renderer::setRepresentations(std::vector<Representation> reps) {
-    representations_ = std::move(reps);
-    needsRebuild_ = true;
+void Renderer::bindRepresentations(const std::vector<Representation>* reps,
+                                   uint64_t revision) {
+    if (representations_ != reps || repsRevision_ != revision) {
+        representations_ = reps;
+        repsRevision_ = revision;
+        needsRebuild_ = true;
+    }
+}
+
+void Renderer::unbindRepresentations() {
+    representations_ = nullptr;
+    repsRevision_ = 0;
+}
+
+const std::vector<Representation>& Renderer::representations() const {
+    static const std::vector<Representation> kNone;
+    return representations_ ? *representations_ : kNone;
 }
 
 void Renderer::refreshFrameData() {
@@ -75,7 +75,7 @@ void Renderer::rebuildCommandList() {
     SceneCommandList fresh;
     // 每 (表示, 实例) 生成段（P10 并行；此处串行实现，M2 接入 TaskPool）——
     // Selection 掩码对整个场景求值一次（与实例无关），本表示全部实例复用。
-    for (const auto& rep : representations_) {
+    for (const auto& rep : representations()) {
         if (!rep.visible) {
             continue;
         }
@@ -133,7 +133,11 @@ void Renderer::rebuildCommandList() {
             continue;   // 跳过逐实例生成（整体系一个表面已足够）
         }
 
-        for (const auto& inst : scene_->instances()) {
+        // 下标遍历（实例下标即所需参数；此前按引用做线性反查 → 每实例一次
+        // O(n) 扫描，整体 O(n²)，大体系下是 prepare 的主要开销之一）
+        const auto& instances = scene_->instances();
+        for (uint32_t instIdx = 0; instIdx < instances.size(); ++instIdx) {
+            const auto& inst = instances[instIdx];
             if (!inst.visible) {
                 continue;
             }
@@ -142,14 +146,6 @@ void Renderer::rebuildCommandList() {
                 const uint32_t si = scene_->systemIndexById(inst.systemId);
                 if (si != UINT32_MAX && !scene_->systems()[si].visible) {
                     continue;
-                }
-            }
-            // 实例下标查找
-            uint32_t instIdx = 0;
-            for (uint32_t i = 0; i < scene_->instances().size(); ++i) {
-                if (&scene_->instances()[i] == &inst) {
-                    instIdx = i;
-                    break;
                 }
             }
 
@@ -171,24 +167,39 @@ void Renderer::draw(const RenderView& view) {
     vulkan_->execute(commandList_, view);
 }
 
-PickResult Renderer::pick(uint32_t x, uint32_t y) {
-    (void)x; (void)y;
-    return PickResult{};
+LightParams Renderer::sceneLighting() const {
+    LightParams light;
+    if (!scene_) {
+        return light;
+    }
+    // 全局光：天顶/地面半球色 + 均匀环境光（无方向光/点光源）
+    const auto& props = scene_->properties();
+    light.skyColor = glm::vec3(props.skyColor[0], props.skyColor[1], props.skyColor[2]);
+    light.groundColor =
+        glm::vec3(props.groundColor[0], props.groundColor[1], props.groundColor[2]);
+    light.ambientColor =
+        glm::vec3(props.ambientColor[0], props.ambientColor[1], props.ambientColor[2]);
+    light.ambientIntensity = props.ambient;
+    return light;
 }
 
-void Renderer::applySceneLighting(RenderView& view) const {
+glm::vec4 Renderer::sceneFog() const {
     if (!scene_) {
-        return;
+        return glm::vec4(0.0f, 0.0f, 0.0f, 0.05f);   // 与 RenderView 默认一致（雾关）
     }
     const auto& props = scene_->properties();
-    // 全局光：天顶/地面半球色 + 均匀环境光（无方向光/点光源）
-    view.light.skyColor = glm::vec3(props.skyColor[0], props.skyColor[1], props.skyColor[2]);
-    view.light.groundColor =
-        glm::vec3(props.groundColor[0], props.groundColor[1], props.groundColor[2]);
-    view.light.ambientColor =
-        glm::vec3(props.ambientColor[0], props.ambientColor[1], props.ambientColor[2]);
-    view.light.ambientIntensity = props.ambient;
-    view.fog = glm::vec4(props.fog[0], props.fog[1], props.fogMode, props.fogDensity);
+    return glm::vec4(props.fog[0], props.fog[1], props.fogMode, props.fogDensity);
+}
+
+RenderView Renderer::viewFor(const OrbitCamera& camera, uint32_t width,
+                             uint32_t height) const {
+    RenderView view;
+    view.camera = camera;
+    view.width = std::max(1u, width);
+    view.height = std::max(1u, height);
+    view.light = sceneLighting();
+    view.fog = sceneFog();
+    return view;
 }
 
 bool Renderer::sceneBounds(glm::vec3* outCenter, float* outRadius) const {

@@ -154,10 +154,21 @@ RepresentationController::representations() const {
     return reps_;
 }
 
-void RepresentationController::touch() {
+void RepresentationController::attachToRenderer() {
     if (svc_.renderer) {
-        svc_.renderer->setRepresentations(reps_);
+        svc_.renderer->bindRepresentations(&reps_, revision_);
     }
+}
+
+void RepresentationController::replaceAll(std::vector<engine::Representation> reps) {
+    reps_ = std::move(reps);
+    touch();   // 递增 revision、重新绑定、置脏并广播
+}
+
+void RepresentationController::touch() {
+    // 只递增修订号并把只读视图重新绑定，不再整表拷贝（拖滑杆时此前每帧一次深拷贝）
+    ++revision_;
+    attachToRenderer();
     if (svc_.scene) {
         svc_.scene->setDirty(entity::DIRTY_REPRESENTATION);
     }

@@ -319,6 +319,36 @@ uint32_t SceneStructure::globalAtomBase(uint32_t instanceIndex) const {
     return base;
 }
 
+bool SceneStructure::setInstanceTrajectory(uint32_t instanceIndex,
+                                          std::shared_ptr<Trajectory> traj) {
+    if (instanceIndex >= instances_.size()) {
+        return false;
+    }
+    // 注意：只登记轨迹，**不在此处写坐标段** —— 帧坐标是结构局部坐标，需要
+    // 乘实例位姿才是世界坐标；该变换由时间轴 publishFrame 统一负责（避免同一
+    // 语义在两处各自实现）。调用方随后广播 SceneOpened，由时间轴激活并发布首帧。
+    instances_[instanceIndex].trajectory = std::move(traj);
+    setDirty(DIRTY_COORDS | DIRTY_INSTANCE);
+    ++serial_;
+    return true;
+}
+
+void SceneStructure::clear() {
+    structuresPool_.clear();
+    structureIndex_.clear();
+    instances_.clear();
+    systems_.clear();
+    chainNames_.clear();
+    residueNames_.clear();
+    coordsSoA_ = CoordsSoA{};
+    props_ = SceneProperties{};
+    strings_ = StringPool{};
+    nextSystemId_ = 1;
+    currentSystemId_ = UINT32_MAX;
+    dirty_ = DIRTY_ALL;   // 清空本身即变更
+    ++serial_;
+}
+
 int32_t SceneStructure::addChain(std::string_view name) {
     chainNames_.push_back(strings_.intern(name));
     return static_cast<int32_t>(chainNames_.size()) - 1;

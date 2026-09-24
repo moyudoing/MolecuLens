@@ -8,10 +8,12 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include <volk.h>
 
+#include "engine/vulkan/backend/draw_list.h"   // DrawMode（体系渲染模式）
 #include "engine/vulkan/device/device.h"
 
 namespace moleculens::engine {
@@ -111,6 +113,66 @@ private:
     VkFrontFace frontFace_ = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     float lineWidth_ = 1.0f;
     VkPolygonMode polygonMode_ = VK_POLYGON_MODE_FILL;
+};
+
+// =============================================================================
+// PipelineSet —— 标准管线集（10 条管线 + 其 10 个着色器模块的统一生命周期）
+// =============================================================================
+// 职责：把"引擎需要哪些管线、各自的顶点布局与状态"收敛到一处。
+//
+// 动机：重构前 VulkanRenderer::createPipelines 与 OffscreenRenderer::initCommon
+//       各有一份 ~170 行的管线创建代码（逐行同构），且两个后端头文件各自声明
+//       10 个 ShaderModule* 裸指针成员、shutdown 里各写一遍 new/delete。
+//       任何着色器或顶点布局变更都要同步改两处。
+//
+// 采样数：renderPass 与 samples 由调用方给出并**必须与后端实际使用的渲染通道一致**。
+//       离屏 FBO 附件恒为 1x，故离屏路径传 VK_SAMPLE_COUNT_1_BIT；实时用设备 MSAA。
+//       采样数不匹配的管线与渲染通道不兼容 → 全屏片元不绘制（历史坑，见 moleculens-fixes）。
+class PipelineSet {
+public:
+    PipelineSet() = default;
+    ~PipelineSet() = default;
+    PipelineSet(const PipelineSet&) = delete;
+    PipelineSet& operator=(const PipelineSet&) = delete;
+
+    // 创建全部管线与着色器模块；任一步失败返回 false（outError 给出失败管线名）。
+    bool create(VulkanDevice& device, VkRenderPass renderPass,
+                VkSampleCountFlagBits samples, VkDescriptorSetLayout globalLayout,
+                std::string* outError = nullptr);
+
+    // 销毁全部管线与着色器模块（须在 renderPass 销毁之前调用）。
+    void destroy(VulkanDevice& device);
+
+    // —— 按体系渲染模式取管线（DrawMode：0 实心 / 1 线框 / 2 透明 / 3 点）——
+    // 点模式（Point）的映射按几何类型而定：
+    //   球     → point（GL_POINTS，1 顶点/实例）
+    //   键     → 实心降级（调用方已把点模式的键拆成线段走 line()）
+    //   网格   → 实心降级（TriMesh 无点绘制语义）
+    // 越界模式一律回退实心（等价于原先的 mode % 4 取模）。
+    [[nodiscard]] const Pipeline& sphere(DrawMode mode) const;
+    [[nodiscard]] const Pipeline& cylinder(DrawMode mode) const;
+    [[nodiscard]] const Pipeline& mesh(DrawMode mode) const;
+    // 线段管线（点模式的键也走此管线）
+    [[nodiscard]] const Pipeline& line() const { return line_; }
+    // GL_POINTS 管线
+    [[nodiscard]] const Pipeline& point() const { return point_; }
+
+private:
+    // 着色器模块（值成员；生命周期与管线集一致）
+    ShaderModule sphereVert_, sphereFrag_;
+    ShaderModule cylinderVert_, cylinderFrag_;
+    ShaderModule lineVert_, lineFrag_;
+    ShaderModule meshVert_, meshFrag_;
+    ShaderModule pointVert_, pointFrag_;
+
+    // 球：实心 / 线框 / 透明
+    Pipeline sphereSolid_, sphereWire_, sphereBlend_;
+    // 键圆柱：实心 / 线框 / 透明
+    Pipeline cylinderSolid_, cylinderWire_, cylinderBlend_;
+    // 三角网格：实心 / 线框 / 透明
+    Pipeline meshSolid_, meshWire_, meshBlend_;
+    Pipeline line_;
+    Pipeline point_;
 };
 
 } // namespace moleculens::engine

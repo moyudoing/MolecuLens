@@ -42,6 +42,20 @@ glm::mat4 OrbitCamera::viewProjMatrix(float aspect) const {
     return projectionMatrix(aspect) * viewMatrix();
 }
 
+void OrbitCamera::rayForNdc(float ndcX, float ndcY, float aspect,
+                            glm::vec3* outOrigin, glm::vec3* outDir) const {
+    const glm::mat4 v = viewMatrix();
+    // 视图矩阵为列主序（m[col][row]）：其旋转部分取转置即为世界空间的右/上/前向量
+    // （含 roll 滚转，故拾取随视图滚转保持一致）
+    const glm::vec3 right = glm::normalize(glm::vec3(v[0][0], v[1][0], v[2][0]));
+    const glm::vec3 up = glm::normalize(glm::vec3(v[0][1], v[1][1], v[2][1]));
+    const glm::vec3 fwd = glm::normalize(glm::vec3(-v[0][2], -v[1][2], -v[2][2]));
+    const float tanHalf = std::tan(glm::radians(fov) * 0.5f);
+    *outOrigin = position();
+    *outDir = glm::normalize(fwd + right * (ndcX * tanHalf * aspect) +
+                             up * (ndcY * tanHalf));
+}
+
 void OrbitCamera::orbit(float dx, float dy) {
     yaw += dx;
     pitch = std::clamp(pitch + dy, -1.55f, 1.55f);

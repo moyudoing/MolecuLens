@@ -181,9 +181,14 @@ bool UITheme::loadFont(const char* fontPath) {
         builder.AddChar(0x00D7);   // × 乘号（关闭按钮）
         builder.AddChar(0x00B7);   // · 间隔号
         builder.AddChar(0x2022);   // • 项目符号
-        builder.AddChar(0x25A1);   // □ 白方块（最大化）
-        builder.AddChar(0x25B6);   // ▶ 播放
-        builder.AddChar(0x23F8);   // ⏸ 暂停
+        // 这里不再 AddChar(0x25A1/0x25B6/0x23F8)：OPPO_B.ttf 在 U+2000..U+2BFF
+        // 区间只有 22 个码点（引号/破折号/• ℃ ™ 之类），**没有**任何几何符号。
+        // 加进范围也拿不到字形，只会让 imgui 记一个空槽仍渲染成方块；窗口按钮
+        // 与体系展开符因此都改为用绘制列表画（见 renderMainMenuBar / mol_list_tool）。
+        // 界面文案里落在"常用简体 2500 字"之外的汉字——该表是 imgui 内置的
+        // 固定子集，下列字不在其中，不补就会渲染成方块（"渲染设置"的"渲"）。
+        // 新增界面文案后如有方块字，按同样办法补在这里。
+        builder.AddText("屏帧徽栅渲溶糙轴辑逻钮阈");
         builder.BuildRanges(&ranges);
     }
 

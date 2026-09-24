@@ -25,16 +25,6 @@ public:
         }
     }
 
-    BaseToolView* find(const char* title) const {
-        for (const auto& tool : modules_) {
-            if (tool->getTitle() != nullptr &&
-                std::string(tool->getTitle()) == title) {
-                return tool.get();
-            }
-        }
-        return nullptr;
-    }
-
     [[nodiscard]] const std::vector<std::unique_ptr<BaseToolView>>& modules() const { return modules_; }
 
 private:

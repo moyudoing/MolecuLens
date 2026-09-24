@@ -4,8 +4,12 @@
 
 #include "app/controller/selection/selection_controller.h"
 
+#include <algorithm>
+
 #include "engine/camera/camera.h"
 #include "entity/scene/scene.h"
+#include "entity/selection/parse_table.h"
+#include "entity/selection/selection.h"
 #include "spdlog/spdlog.h"
 
 namespace moleculens::app {
@@ -33,19 +37,13 @@ bool SelectionController::pickRay(float ndcX, float ndcY, int viewportW, int vie
     if (!svc_.scene || !svc_.camera) {
         return false;
     }
-    // 屏幕 NDC → 世界射线（主方案 §5.6 CPU 兜底）
+    // 屏幕 NDC → 世界射线（射线数学归相机，见 OrbitCamera::rayForNdc）
     const float aspect = viewportW > 0 && viewportH > 0
                              ? static_cast<float>(viewportW) / viewportH
                              : 1.0f;
-    const float tanHalf = std::tan(glm::radians(svc_.camera->fov) * 0.5f);
-    const glm::vec3 camPos = svc_.camera->position();
-    const glm::mat4 view = svc_.camera->viewMatrix();
-    const glm::vec3 right = glm::normalize(glm::vec3(view[0][0], view[1][0], view[2][0]));
-    const glm::vec3 up = glm::normalize(glm::vec3(view[0][1], view[1][1], view[2][1]));
-    const glm::vec3 fwd = glm::normalize(glm::vec3(-view[0][2], -view[1][2], -view[2][2]));
-    const glm::vec3 dir = glm::normalize(fwd + right * (ndcX * tanHalf * aspect) +
-                                         up * (ndcY * tanHalf));
-    current_ = engine::PickRay::pickScene(*svc_.scene, camPos, dir);
+    glm::vec3 origin{0.0f}, dir{0.0f, 0.0f, -1.0f};
+    svc_.camera->rayForNdc(ndcX, ndcY, aspect, &origin, &dir);
+    current_ = engine::PickRay::pickScene(*svc_.scene, origin, dir);
     has_ = current_.hit;
     if (svc_.bus) {
         svc_.bus->publish({EventType::SelectionChanged,
@@ -55,9 +53,34 @@ bool SelectionController::pickRay(float ndcX, float ndcY, int viewportW, int vie
 }
 
 bool SelectionController::select(const std::string& expression) {
-    // M2 完整：选择语言求值 → 高亮节点（当前记录表达式）
-    spdlog::debug("[controller] selection expression: {}", expression);
-    return true;
+    if (!svc_.scene) {
+        return false;
+    }
+    // 选择语言：解析 → 对全场景求值 → 全局原子掩码（主方案 §4.6）
+    entity::Selection sel;
+    const entity::ParseTable& table = entity::ParseTable::defaultTable();
+    if (!sel.parse(expression, table)) {
+        spdlog::warn("[controller] 选择表达式语法错误: {}", expression);
+        return false;
+    }
+    // 坐标来源与渲染器构建选择掩码时一致：场景 CoordsSoA 的当前位置
+    entity::FrameData frame;
+    frame.positions = &svc_.scene->coordsSoA().positions;
+    frame.timestep = nullptr;
+    sel.evaluate(*svc_.scene, frame, 0);
+
+    mask_ = sel.mask();
+    selectedCount_ = static_cast<size_t>(
+        std::count(mask_.begin(), mask_.end(), true));
+    expression_ = expression;
+
+    if (svc_.bus) {
+        // payload = 命中原子数（订阅方据此刷新状态栏/高亮）
+        svc_.bus->publish({EventType::SelectionChanged,
+                           static_cast<int64_t>(selectedCount_)});
+    }
+    spdlog::info("[controller] 选择 \"{}\" 命中 {} 个原子", expression, selectedCount_);
+    return selectedCount_ > 0;
 }
 
 void SelectionController::onEvent(const Event& ev) {

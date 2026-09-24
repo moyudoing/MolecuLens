@@ -9,10 +9,11 @@ file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS *.cpp)
 # 下列子目录的源文件**不进本 target**（由专用 block 编译，或为未接入的死代码——
 # 纳入会在 add_executable 与 target_sources 中重复加入（重定义），或直接编译报错）：
 #   · imgui/backends       —— ImGui 官方后端，下方专用 block 编译（需集成 VK_NO_PROTOTYPES）
-#   · view/tools/theme     —— 未注册的遗留死代码（BaseToolView 无 2 参构造，编译不过）
-#   · view/tools/atom_rep  —— 未注册的遗留死代码（同上）
+#   · view/tools/atom_rep  —— 未注册的遗留死代码（BaseToolView 无 2 参构造，编译不过）
 # 按目录名匹配（兼容相对/绝对路径与 / 或 \ 分隔符），与重构前手写列表的取舍完全一致。
-list(FILTER SRCS EXCLUDE REGEX "imgui[\\/]backends[\\/]|view[\\/]tools[\\/]theme[\\/]|view[\\/]tools[\\/]atom_rep[\\/]")
+# 注：view/tools/theme 已注册（view_control 内 addModule<ThemeTool>），构造函数
+#     已修正，纳入普通 GLOB 收集，不再排除。
+list(FILTER SRCS EXCLUDE REGEX "imgui[\\/]backends[\\/]|view[\\/]tools[\\/]atom_rep[\\/]")
 add_executable(moleculens_app WIN32
     ${SRCS}
 )
@@ -32,14 +33,20 @@ else()
     message(FATAL_ERROR "imgui backends source missing at ${_imgui_backends}")
 endif()
 
+# Python 绑定与 ZMQ RPC：规格已定（主方案 §10/§13）但源码尚未落地——
+# 此前这两个分支直接引用 python/module/pybind_module.cpp 与 rpc/server/rpc_server.cpp，
+# 而这两个文件在磁盘上并不存在 → 一旦开启 option 必然配置失败且原因难以定位。
+# 故改为显式报错，把"未实现"讲清楚；实现落地后再接回源文件。
 if(MOLECULENS_BUILD_PYTHON)
-    target_sources(moleculens_app PRIVATE python/module/pybind_module.cpp)
-    target_link_libraries(moleculens_app PRIVATE Python3::Python pybind11::module)
+    message(FATAL_ERROR
+        "MOLECULENS_BUILD_PYTHON=ON 暂不可用：Python 绑定源码（python/module/）尚未落地。"
+        " 需先实现绑定模块后再开启该选项。")
 endif()
 
 if(MOLECULENS_ENABLE_ZMQ)
-    target_sources(moleculens_app PRIVATE rpc/server/rpc_server.cpp rpc/methods/rpc_methods.cpp)
-    target_link_libraries(moleculens_app PRIVATE cppzmq)
+    message(FATAL_ERROR
+        "MOLECULENS_ENABLE_ZMQ=ON 暂不可用：RPC 服务源码（rpc/server/、rpc/methods/）尚未落地。"
+        " 需先实现 RPC 模块后再开启该选项。")
 endif()
 
 # MSVC 下链接 winmm（glfw 音频需求）

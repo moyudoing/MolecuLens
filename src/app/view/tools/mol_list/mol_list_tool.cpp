@@ -36,6 +36,23 @@ std::string displayName(const std::string& name, const char* kind, size_t index)
     return buf;
 }
 
+// 展开/收起指示三角（绘制列表绘制）。
+// 不写成 "▶"/"▼" 文本：字体 OPPO_B.ttf 只含 22 个 U+2000..U+2BFF 码点、
+// 其中没有任何几何符号，写字符只会得到方块（加字形范围也没用——范围只管
+// "向字体要哪些码点"，字体没有该字形照样是空的）。
+void drawExpandArrow(ImDrawList* dl, ImVec2 center, float size, bool expanded) {
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+    if (expanded) {   // ▼
+        dl->AddTriangleFilled(ImVec2(center.x - size, center.y - size * 0.55f),
+                              ImVec2(center.x + size, center.y - size * 0.55f),
+                              ImVec2(center.x, center.y + size * 0.75f), col);
+    } else {          // ▶
+        dl->AddTriangleFilled(ImVec2(center.x - size * 0.55f, center.y - size),
+                              ImVec2(center.x - size * 0.55f, center.y + size),
+                              ImVec2(center.x + size * 0.75f, center.y), col);
+    }
+}
+
 } // namespace
 
 void MolListTool::render(DataManager* dm, MolScene* scene) {
@@ -85,11 +102,20 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
         std::string name = displayName(dm->systemName(si), "system", si);
         const bool isCur = (selectedSystem_ == si);
         const bool expanded = (expandedSystem_ == si);
-        std::string header = (expanded ? "▼ " : "▶ ") + name;
+        // 展开指示三角用绘制列表画，不写字符：字体（OPPO_B.ttf）不含
+        // ▶/▼ 等几何符号字形，直接写成文本会渲染成方块——与标题栏的
+        // 最大化/还原按钮同一处理办法。行首用空格预留出箭头的位置。
+        std::string header = "     " + name;
         if (ImGui::Selectable(header.c_str(), isCur)) {
             selectedSystem_ = si;
             selectedInstance_ = -1;
             expandedSystem_ = (expanded ? SIZE_MAX : si);   // 再次点击收起
+        }
+        {
+            const ImVec2 rowMin = ImGui::GetItemRectMin();
+            const float rowCy = (rowMin.y + ImGui::GetItemRectMax().y) * 0.5f;
+            drawExpandArrow(ImGui::GetWindowDrawList(),
+                            ImVec2(rowMin.x + 11.0f, rowCy), 4.0f, expanded);
         }
         // 体系右键：重命名 / 定位 / 删除
         if (ImGui::BeginPopupContextItem("sys_ctx")) {
@@ -195,23 +221,20 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
                     }
                     if (groups[gi].count > 1) {
                         if (ImGui::MenuItem("删除全部")) {
-                            const auto* scp2_ = scene ? scene->scene() : nullptr;
-                            for (int pass = 0; pass < 2; ++pass) {
-                                const size_t cc = dm->systemMemberCount(si);
-                                std::vector<uint32_t> victims;
-                                for (size_t m = 0; m < cc; ++m) {
-                                    const uint32_t ii = dm->systemMemberInstance(si, m);
-                                    if (ii >= dm->moleculeCount()) continue;
-                                    if (!scp2_ || ii >= scp2_->instances().size()) continue;
-                                    if (scp2_->instances()[ii].structureIndex == groups[gi].structureIndex) {
-                                        victims.push_back(ii);
-                                    }
+                            // 删除该结构在本体系内的全部实例；自后向前删，避免下标失效
+                            const auto* sc = scene ? scene->scene() : nullptr;
+                            const size_t cc = dm->systemMemberCount(si);
+                            std::vector<uint32_t> victims;
+                            for (size_t m = 0; m < cc; ++m) {
+                                const uint32_t ii = dm->systemMemberInstance(si, m);
+                                if (ii >= dm->moleculeCount()) continue;
+                                if (!sc || ii >= sc->instances().size()) continue;
+                                if (sc->instances()[ii].structureIndex == groups[gi].structureIndex) {
+                                    victims.push_back(ii);
                                 }
-                                if (victims.empty()) break;
-                                std::sort(victims.begin(), victims.end(), std::greater<uint32_t>());
-                                for (uint32_t v : victims) sceneCtl_->removeInstance(v);
-                                break;
                             }
+                            std::sort(victims.begin(), victims.end(), std::greater<uint32_t>());
+                            for (uint32_t v : victims) sceneCtl_->removeInstance(v);
                             selectedInstance_ = -1;
                         }
                     } else if (ImGui::MenuItem("删除")) {

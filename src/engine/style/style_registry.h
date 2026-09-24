@@ -3,11 +3,11 @@
 // 职责：提供两种注册时机的 API——①编译期/静态注册（样式随二进制一次性声明，
 //       静态分派表）；②运行时/动态注册（编译完成后由外部模块——动态库/插件——
 //       注入或替换样式）。
-// 分发与代表层收敛：本头构建以 RepresentationType 为键的分派表，与
-// representer.h 中 Representer::kDrawTable 同形；引擎内部热路径直接索引
-// 编译期静态表（无锁），仅在插件注册后才走运行时段。
+// 分发与代表层收敛：本头构建以 RepresentationType 为键的分派表，是样式分派的
+// 唯一事实来源（Representer::generate 经 styleFor() 取入口，不再自建分派表）；
+// 引擎内部热路径直接索引编译期静态表（无锁），仅在插件注册后才走运行时段。
 // 规格来源：主方案 §5.7 各类渲染样式 / §5.2（表示·样式分派）
-// 关联：base_style.h（统一函数原型 StyleDrawFn 与 StyleStyle 接口）
+// 关联：base_style.h（统一函数原型 StyleDrawFn）
 // =============================================================================
 
 #ifndef STYLE_REGISTRY_H
@@ -45,12 +45,6 @@ inline constexpr StyleDrawFn kStyleStaticTable[static_cast<int>(RepresentationTy
     drawNewCartoon,        // 11 NewCartoon   —— 改进卡通（更平滑样条）
     drawRibbon,            // 12 Ribbon       —— 丝带（薄带状，仅 backbone）
 };
-
-// 编译期查询：直接返回静态表的首元素指针（无锁；引擎热路径使用）。
-// index 越界返回 nullptr。
-constexpr inline const StyleDrawFn* styleStaticTable() noexcept {
-    return kStyleStaticTable;
-}
 
 // 编译期按类型查询：直接取静态表对应槽位；未注册/越界返回 nullptr（不改动表）。
 // 注：scoped enum 的 < 比较为 C++20 特性，本工程是 C++17，故用整数下标越界判断。

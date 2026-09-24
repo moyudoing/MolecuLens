@@ -1,0 +1,8 @@
+src        files=184   lines=26518
+shaders    files=17    lines=612
+plugins    files=1     lines=41
+tools      files=1     lines=54
+cmake      files=2     lines=102
+tests      files=21    lines=1974
+核心源程序量（不含测试）= 27327
+含测试合计 = 29301
