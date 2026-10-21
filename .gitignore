@@ -1,7 +1,9 @@
 # —— 构建产物 ——
-build/
+# ⚠ 目录规则一律用根锚定（/build/ 而不是 build/）：裸 build/、export/、gen/
+#   会匹配到任意层级的同名目录，曾把 src/engine/export/** 整块排除在仓库外。
+/build/
 cmake-build-*/
-out/
+/out/
 *.o
 *.obj
 *.lib
@@ -13,8 +15,8 @@ out/
 *.exp
 
 # —— 缓存与日志 ——
-cache/
-logs/
+/cache/
+/logs/
 *.log
 *.crash
 
@@ -24,10 +26,10 @@ logs/
 *.user
 
 # —— 生成的头文件 ——
-gen/
+/gen/
 
 # —— 导出产物 ——
-export/
+/export/
 *.png
 *.bmp
 *.tga
@@ -53,6 +55,9 @@ Thumbs.db
 # —— 文档插图（docs 下必须入库，其余 png 仍视为导出产物）——
 !docs/figs_v2/*.png
 !docs/figs_v2/**/*.png
+
+# —— 例外：data/ 下的结构夹具（PDB 结构文件不是调试符号 .pdb）——
+!data/*.pdb
 
 # —— 本地环境 / 临时缓存（不入库）——
 .venv/

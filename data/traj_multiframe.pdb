@@ -1,0 +1,26 @@
+HEADER    MULTI-MODEL TRAJECTORY FIXTURE
+TITLE     MOLECULENS TRAJECTORY TEST FIXTURE - 3 MODELS X 4 ATOMS
+REMARK    Hand-written fixture: 3 MODEL/ENDMDL blocks, identical topology,
+REMARK    coordinates translated by +1 A along X in each successive model.
+REMARK    Used by tests/entity/trajectory to verify frame count, first/last
+REMARK    frame coordinates and random-access consistency without needing a
+REMARK    binary trajectory file.
+MODEL        1
+ATOM      1  C   MOL A   1       0.000   0.000   0.000  1.00  0.00           C
+ATOM      2  O   MOL A   1       1.200   0.000   0.000  1.00  0.00           O
+ATOM      3  N   MOL A   1       0.000   1.200   0.000  1.00  0.00           N
+ATOM      4  H   MOL A   1       0.000   0.000   1.200  1.00  0.00           H
+ENDMDL
+MODEL        2
+ATOM      1  C   MOL A   1       1.000   0.000   0.000  1.00  0.00           C
+ATOM      2  O   MOL A   1       2.200   0.000   0.000  1.00  0.00           O
+ATOM      3  N   MOL A   1       1.000   1.200   0.000  1.00  0.00           N
+ATOM      4  H   MOL A   1       1.000   0.000   1.200  1.00  0.00           H
+ENDMDL
+MODEL        3
+ATOM      1  C   MOL A   1       2.000   0.000   0.000  1.00  0.00           C
+ATOM      2  O   MOL A   1       3.200   0.000   0.000  1.00  0.00           O
+ATOM      3  N   MOL A   1       2.000   1.200   0.000  1.00  0.00           N
+ATOM      4  H   MOL A   1       2.000   0.000   1.200  1.00  0.00           H
+ENDMDL
+END
