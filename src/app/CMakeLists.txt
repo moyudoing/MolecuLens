@@ -6,17 +6,27 @@
 # 自动重新配置，避免手写列表与磁盘文件脱节（当前项目已出现列表滞后）。GLOB_RECURSE
 # 在生成器表达式层面将目录限定在 CMAKE_CURRENT_SOURCE_DIR，配合 glob 相对路径等效。
 file(GLOB_RECURSE SRCS CONFIGURE_DEPENDS *.cpp)
-# 下列子目录的源文件**不进本 target**（由专用 block 编译，或为未接入的死代码——
-# 纳入会在 add_executable 与 target_sources 中重复加入（重定义），或直接编译报错）：
-#   · imgui/backends       —— ImGui 官方后端，下方专用 block 编译（需集成 VK_NO_PROTOTYPES）
-#   · view/tools/atom_rep  —— 未注册的遗留死代码（BaseToolView 无 2 参构造，编译不过）
-# 按目录名匹配（兼容相对/绝对路径与 / 或 \ 分隔符），与重构前手写列表的取舍完全一致。
-# 注：view/tools/theme 已注册（view_control 内 addModule<ThemeTool>），构造函数
-#     已修正，纳入普通 GLOB 收集，不再排除。
-list(FILTER SRCS EXCLUDE REGEX "imgui[\\/]backends[\\/]|view[\\/]tools[\\/]atom_rep[\\/]")
+# 唯一仍需排除的子目录：
+#   · imgui/backends —— ImGui 官方后端，下方专用 block 编译（需集成 VK_NO_PROTOTYPES）；
+#     纳入 GLOB 会在 add_executable 与 target_sources 中重复加入（重定义）。
+# 按目录名匹配（兼容相对/绝对路径与 / 或 \ 分隔符）。
+# 注 1：view/tools/theme 已注册（view_control 内 addModule<ThemeTool>），构造函数已修正，
+#      纳入普通 GLOB 收集，不再排除。
+# 注 2：view/tools/atom_rep 曾在此排除（未注册的遗留死代码、编译不过）。该目录与
+#      engine/rep/atom/ 已整体删除 —— 原子级控制由 Representation::selection
+#      （逐表示原子子集）+ 多表示管理承担，不再保留第二套未接线的实现。
+list(FILTER SRCS EXCLUDE REGEX "imgui[\\/]backends[\\/]")
 add_executable(moleculens_app WIN32
     ${SRCS}
 )
+
+# Windows 图标资源（app.ico：16–256 px 六档；任务栏/资源管理器/文件属性都用它）。
+# 仅 MSVC 需要 .rc，MinGW 会自行忽略。
+if(MSVC)
+    target_sources(moleculens_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app.rc)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/app.rc PROPERTIES
+        OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/app.ico)
+endif()
 target_link_libraries(moleculens_app PRIVATE moleculens_engine spdlog::spdlog imgui::imgui)
 
 # ImGui 官方后端：本项目使用 volk（VK_NO_PROTOTYPES 全局定义）——

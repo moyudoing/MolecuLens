@@ -36,6 +36,14 @@ struct SelectionNode {
 
 } // namespace detail
 
+// "关键字 比较符 值" 形式支持的关键字清单（如 name / resid / chain / element /
+// occupancy / bfactor）。返回静态数组，*count 写入项数。
+//
+// **UI 的关键字列表必须用它**：手写一份会列出解析器不认识的关键字，用户点选后
+// 表达式无法解析（而渲染器对解析失败是**静默回退全选**，看起来像"没生效"）。
+// 本函数与解析器的 isBuiltinAttr 共用同一张表，二者不可能漂移。
+const char* const* selectionKeywords(size_t* count);
+
 class Selection {
 public:
     ~Selection() = default;   // SelectionNode 完整类型已在本头定义（unique_ptr 析构安全）

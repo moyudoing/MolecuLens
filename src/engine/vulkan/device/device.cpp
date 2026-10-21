@@ -26,9 +26,15 @@ namespace {
 const std::vector<const char*> kValidationLayers = {
     "VK_LAYER_KHRONOS_validation",
 };
-// 调试消息级别
+// 设备扩展：swapchain 必需；memory_budget 可选（提供每堆"已用/预算"，是唯一能
+// 真实报告显存占用的 Vulkan 途径 —— 性能测试与"是否接近 OOM"的判断都依赖它）。
+// 可选扩展必须**先查支持再启用**：直接塞进 enabledExtensionNames 而设备不支持，
+// vkCreateDevice 会直接失败 → 整个应用起不来。
 const std::vector<const char*> kDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+};
+const std::vector<const char*> kOptionalDeviceExtensions = {
+    VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
 };
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
@@ -339,6 +345,35 @@ bool VulkanDevice::pickPhysicalDevice() {
     return true;
 }
 
+bool VulkanDevice::queryVramUsage(VramUsage* out) const {
+    if (out == nullptr) {
+        return false;
+    }
+    *out = VramUsage{};
+    if (!memoryBudgetEnabled_ || physicalDevice_ == VK_NULL_HANDLE) {
+        return false;   // 扩展不可用 —— 明确失败，别让调用方把 0 当成"没占用"
+    }
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+    budget.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+    VkPhysicalDeviceMemoryProperties2 props{};
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+    props.pNext = &budget;
+    vkGetPhysicalDeviceMemoryProperties2(physicalDevice_, &props);
+
+    // 只汇总 DEVICE_LOCAL 堆：显存占用关心的就是这部分，把系统内存堆算进来
+    // 会让数字失去意义（后者随进程 RSS 一起涨落）
+    for (uint32_t i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
+        if ((props.memoryProperties.memoryHeaps[i].flags &
+             VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) {
+            continue;
+        }
+        ++out->heapCount;
+        out->usedBytes += budget.heapUsage[i];
+        out->budgetBytes += budget.heapBudget[i];
+    }
+    return out->heapCount > 0;
+}
+
 bool VulkanDevice::createLogicalDevice() {
     std::set<uint32_t> uniqueFamilies = {graphicsFamily_, presentFamily_};
     std::vector<VkDeviceQueueCreateInfo> queueInfos;
@@ -357,18 +392,44 @@ bool VulkanDevice::createLogicalDevice() {
     features.samplerAnisotropy = VK_TRUE;
     features.largePoints = VK_TRUE;        // 点模式：gl_PointSize > 1（体系点模式）
 
+    // 启用列表 = 必需项 + 设备支持的可选项（见 kOptionalDeviceExtensions 注释）
+    std::vector<const char*> enabledExts = kDeviceExtensions;
+    {
+        uint32_t extCount = 0;
+        vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> avail(extCount);
+        vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount,
+                                             avail.data());
+        for (const char* want : kOptionalDeviceExtensions) {
+            for (const auto& a : avail) {
+                if (std::strcmp(a.extensionName, want) == 0) {
+                    enabledExts.push_back(want);
+                    break;
+                }
+            }
+        }
+    }
+
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
     createInfo.pQueueCreateInfos = queueInfos.data();
     createInfo.pEnabledFeatures = &features;
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(kDeviceExtensions.size());
-    createInfo.ppEnabledExtensionNames = kDeviceExtensions.data();
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExts.size());
+    createInfo.ppEnabledExtensionNames = enabledExts.data();
 
     if (vkCreateDevice(physicalDevice_, &createInfo, nullptr, &device_) != VK_SUCCESS) {
         return false;
     }
     volkLoadDevice(device_);
+    // 记录可选项是否真的启用了（供 queryVramUsage 判断能否读 budget 结构）
+    memoryBudgetEnabled_ = false;
+    for (const char* e : enabledExts) {
+        if (std::strcmp(e, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0) {
+            memoryBudgetEnabled_ = true;
+            break;
+        }
+    }
     vkGetDeviceQueue(device_, graphicsFamily_, 0, &graphicsQueue_);
     vkGetDeviceQueue(device_, presentFamily_, 0, &presentQueue_);
     // compute 队列：优先独立 family，否则复用 graphics
@@ -437,7 +498,10 @@ VkPresentModeKHR VulkanDevice::choosePresentMode() const {
     // vsync=true → FIFO（真垂直同步，等待 vblank，帧率被显示器刷新率锁定）。
     // 之前优先 MAILBOX：MAILBOX 不等待 vblank、按提交速率尽力呈现 → 帧率不受限、
     // GPU 满负荷空转（FPS 过高）。分子查看器静态画面用 FIFO 最合适。
-    if (config_.vsync) {
+    // 排查用：设置 MOLECULENS_NO_VSYNC=1 可强制 IMMEDIATE（不受 vblank 限制）。
+    // 用于验证「载入大场景后帧率被钉在 64 FPS」是否由垂直同步造成。
+    const bool vsyncDisabledByEnv = std::getenv("MOLECULENS_NO_VSYNC") != nullptr;
+    if (config_.vsync && !vsyncDisabledByEnv) {
         for (auto m : modes) {
             if (m == VK_PRESENT_MODE_FIFO_KHR) {
                 return m;

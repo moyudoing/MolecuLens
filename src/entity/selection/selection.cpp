@@ -30,14 +30,32 @@ const ParseTable& ParseTable::defaultTable() {
         ParseTable t;
         t.addSingleWord("all", [](Selection& s) { s.all(true); });
         t.addSingleWord("none", [](Selection& s) { s.all(false); });
-        // protein/backbone/sidechain/waters：残基表完整判定由解析器扩展
-        t.addSingleWord("protein", [](Selection&) {});
-        t.addSingleWord("backbone", [](Selection&) {});
-        t.addSingleWord("sidechain", [](Selection&) {});
-        t.addSingleWord("waters", [](Selection&) {});
+        // protein/backbone/sidechain/waters：残基表完整判定由解析器扩展 ——
+        // 目前是**占位**（回调不产生任何掩码）。以 implemented=false 注册，使 UI
+        // 能把它置灰：选中一个占位宏会让掩码保持为空 → 表示直接消失且无报错。
+        t.addSingleWord("protein", [](Selection&) {}, /*implemented=*/false);
+        t.addSingleWord("backbone", [](Selection&) {}, /*implemented=*/false);
+        t.addSingleWord("sidechain", [](Selection&) {}, /*implemented=*/false);
+        t.addSingleWord("waters", [](Selection&) {}, /*implemented=*/false);
         return t;
     }();
     return table;
+}
+
+// "关键字 比较符 值" 形式支持的关键字。
+// **单一事实来源**：isBuiltinAttr（解析器分派）与 selectionKeywords（UI 列表）
+// 都查这张表 —— 两处各写一份时，UI 会列出解析器不认识的关键字。
+namespace {
+const char* const kBuiltinAttrs[] = {"name",   "resname", "resid",  "chain",
+                                     "element", "occupancy", "bfactor"};
+constexpr size_t kBuiltinAttrCount = sizeof(kBuiltinAttrs) / sizeof(kBuiltinAttrs[0]);
+} // namespace
+
+const char* const* selectionKeywords(size_t* count) {
+    if (count != nullptr) {
+        *count = kBuiltinAttrCount;
+    }
+    return kBuiltinAttrs;
 }
 
 namespace {
@@ -141,8 +159,12 @@ bool cmpFloat(float a, CmpOp op, float b) {
 }
 
 bool isBuiltinAttr(const std::string& a) {
-    return a == "name" || a == "resid" || a == "chain" || a == "element" ||
-           a == "occupancy" || a == "bfactor";
+    for (const char* k : kBuiltinAttrs) {
+        if (a == k) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // —— 递归下降解析 ——
@@ -475,6 +497,11 @@ private:
                     hit = eqStr(std::string(scene_.atomName(inst.structureIndex,
                                                             static_cast<uint32_t>(i))),
                                 c.valS);
+                } else if (c.attr == "resname") {
+                    // 残基名（VMD 的 resname）：水 = SOL/WAT/HOH/TIP3 等，可写
+                    // "not resname SOL" 只留溶质（对齐 VMD 的 "not water" 用法）。
+                    const int32_t rid = st.atoms[i].residueId;
+                    hit = rid >= 0 && eqStr(std::string(scene_.residueName(rid)), c.valS);
                 } else if (c.attr == "resid") {
                     const float r = static_cast<float>(st.atoms[i].residueId);
                     hit = c.op == CmpOp::Range ? (r >= c.rangeLo && r <= c.rangeHi)

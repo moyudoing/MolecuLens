@@ -21,6 +21,7 @@
 #include "engine/vulkan/memory/buffer.h"
 #include "engine/vulkan/pipeline/pipeline.h"
 #include "engine/vulkan/renderpass/render_pass.h"
+#include "engine/vulkan/shadow/shadow_map.h"
 
 namespace moleculens::engine {
 
@@ -94,10 +95,17 @@ private:
     Image depthImage_;
     std::vector<Framebuffer> swapchainFramebuffers_;
 
+    // 方向光阴影（深度 pass + PCF；深度图经 set 0 binding 1 供 frag 采样）
+    ShadowMap       shadow_;
+
     // 共享网格与每帧绘制状态（定义见 vulkan/draw/draw_geometry.h）
     SharedMeshes    meshes_;     // 球/柱单位网格（启动创建一次常驻）
     FrameGpuBuffers gpu_;        // 每帧 GPU 缓冲（HOST_VISIBLE，帧内复用）
     DrawList        drawList_;   // 每帧 CPU 绘制列表（解码结果）
+    // 解码缓存键：命令流对象 + serial。serial 未变即内容未变 → 跳过整条重解码
+    //（serial 在命令流重建/坐标重放时递增，见 SceneCommandList）。
+    const SceneCommandList* decodedList_ = nullptr;
+    uint64_t          decodedRevision_ = UINT64_MAX;
 
     // 帧状态
     uint32_t frameIndex_ = 0;

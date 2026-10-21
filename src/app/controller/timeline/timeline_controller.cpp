@@ -6,6 +6,8 @@
 
 #include "app/controller/timeline/timeline_controller.h"
 
+#include <algorithm>
+
 #include "engine/scheduler/frame_scheduler.h"
 #include "entity/scene/scene.h"
 #include "spdlog/spdlog.h"
@@ -26,8 +28,55 @@ void TimelineController::setActive(uint32_t instanceIndex) {
         if (instanceIndex < inst.size() && inst[instanceIndex].trajectory) {
             svc_.scheduler->setFrameCount(inst[instanceIndex].trajectory->frames.size());
             svc_.scheduler->setDtFrame(inst[instanceIndex].trajectory->dt);
+            // setFrameCount 会把 outFrame_ 重置为末帧 → 重新应用用户的选区
+            applyInOut();
+        } else {
+            // 该实例没有轨迹（例如刚把轨迹卸载掉）：帧数回到 1，时间轴退回单帧，
+            // 否则调度器会一直保留上一次的帧数，时间轴看着像"卸了还在"。
+            svc_.scheduler->setFrameCount(1);
+            svc_.scheduler->setDtFrame(0.0f);
+            applyInOut();
+            if (svc_.bus) {
+                svc_.bus->publish({EventType::FrameChanged, 0});
+            }
         }
     }
+}
+
+void TimelineController::applyInOut() {
+    if (!svc_.scheduler) {
+        return;
+    }
+    const uint64_t count = svc_.scheduler->frameCount();
+    const uint64_t last = count > 0 ? count - 1 : 0;
+    if (!inOutEnabled_) {
+        svc_.scheduler->setInOut(0, last);   // 关：整段
+        return;
+    }
+    const uint64_t in = std::min(inFrame_, last);
+    // outFrame_ == 0 表示"到末帧"；否则夹到 [in, last]
+    const uint64_t out = outFrame_ == 0 ? last : std::clamp(outFrame_, in, last);
+    svc_.scheduler->setInOut(in, out);
+}
+
+void TimelineController::setInOut(uint64_t inFrame, uint64_t outFrame) {
+    inFrame_ = inFrame;
+    outFrame_ = outFrame;
+    applyInOut();
+}
+
+void TimelineController::setInOutEnabled(bool on) {
+    inOutEnabled_ = on;
+    applyInOut();
+}
+
+uint64_t TimelineController::outFrame() const {
+    const uint64_t count = frameCount();
+    const uint64_t last = count > 0 ? count - 1 : 0;
+    if (!inOutEnabled_) {
+        return last;
+    }
+    return outFrame_ == 0 ? last : std::min(outFrame_, last);
 }
 
 void TimelineController::play() {
@@ -95,6 +144,16 @@ void TimelineController::setDt(float dt) {
     }
 }
 
+void TimelineController::setPlaybackFps(float fps) {
+    if (svc_.scheduler) {
+        svc_.scheduler->setPlaybackFps(fps);
+    }
+}
+
+float TimelineController::playbackFps() const {
+    return svc_.scheduler ? svc_.scheduler->playbackFps() : 30.0f;
+}
+
 float TimelineController::speed() const {
     return svc_.scheduler ? svc_.scheduler->speed() : 1.0f;
 }
@@ -123,12 +182,15 @@ bool TimelineController::loop() const {
     return svc_.scheduler ? svc_.scheduler->loop() : true;
 }
 
-void TimelineController::poll() {
+void TimelineController::poll(float dtReal) {
     if (!svc_.scheduler) {
         return;
     }
-    // 时间驱动（主方案 §8.2：与渲染帧率解耦）
-    if (svc_.scheduler->advance(1.0f / 60.0f)) {
+    // 时间驱动（主方案 §8.2：与渲染帧率解耦）——用**帧循环实测的真实 dt**推进。
+    // 此前硬编码 1/60：帧率 30fps 时每秒只被调 30 次，播放速度随之减半；
+    // 反之高帧率下会加速。dt 上界防"卡顿一把跳几十帧"（切窗口/断点调试）。
+    const float dt = std::clamp(dtReal, 0.0f, 0.1f);
+    if (svc_.scheduler->advance(dt)) {
         publishFrame();
     }
 }
@@ -141,19 +203,10 @@ void TimelineController::publishFrame() {
     if (activeInstance_ >= inst.size() || !inst[activeInstance_].trajectory) {
         return;
     }
-    const auto& traj = inst[activeInstance_].trajectory;
     const uint64_t f = svc_.scheduler->frame();
-    if (f < traj->frames.size()) {
-        // 写当前帧坐标 → CoordsSoA（变换 + 帧坐标；帧切只重传坐标段 P4）
-        const auto& frame = traj->frames[f];
-        std::vector<glm::vec3> world;
-        world.reserve(frame.positions.size());
-        const glm::mat4 m = inst[activeInstance_].transform.matrix();
-        for (const auto& p : frame.positions) {
-            world.push_back(glm::vec3(m * glm::vec4(p, 1.0f)));
-        }
-        svc_.scene->writeFramePositions(activeInstance_, world);
-    }
+    // 帧坐标 → 世界坐标（乘实例位姿）的唯一实现在 SceneStructure::applyTrajectoryFrame
+    // —— 动画导出走同一入口，避免该变换两处各写一份而漂移。
+    svc_.scene->applyTrajectoryFrame(activeInstance_, f);
     if (svc_.bus) {
         svc_.bus->publish({EventType::FrameChanged, static_cast<int64_t>(f)});
     }

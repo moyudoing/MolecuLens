@@ -13,6 +13,9 @@ namespace moleculens::app {
 class PaintingTool : public BaseToolView {
 public:
     [[nodiscard]] const char* getTitle() const override { return "绘图工具"; }
+    // 窗口稳定 ID（与 dock_layout.h 的 panel::kPaint 必须一致；
+    // 它参与 Dock 布局持久化，**不可随语言变化**）
+    [[nodiscard]] const char* getStableId() const override { return dock::panel::kPaint; }
     void render(DataManager* dm, MolScene* scene) override;
 };
 

@@ -34,9 +34,9 @@ void EventBus::unsubscribe(Subscriber* sub) {
                        subscribers_.end());
 }
 
-void EventBus::poll() {
+void EventBus::poll(float dtReal) {
     for (Subscriber* sub : subscribers_) {
-        sub->poll();
+        sub->poll(dtReal);
     }
 }
 

@@ -39,8 +39,25 @@ public:
     static void advanceTime(float dt);
 
     // 主题管理
-    static void setTheme(UIThemePreset preset);
+    // 设置主题并立即应用到 ImGui。返回 true = 确实发生了切换（配色已更新），
+    // false = 与当前主题相同（未做重复的样式重写与日志）。
+    static bool setTheme(UIThemePreset preset);
     static UIThemePreset currentTheme();
+
+    // 持久化键（settings.json 中的 "theme" 字段值）。用稳定字符串而非枚举序号：
+    // 日后调整预设顺序不会让旧配置指向另一个主题。
+    static const char* themeKey();
+
+    // —— 白天 / 暗黑 ——
+    // 当前主题是否暗色（由预设自带的 dark 标志决定）
+    [[nodiscard]] static bool isDarkTheme();
+    // 在"最近用过的暗色预设"与"最近用过的亮色预设"之间切换（各自记忆）。
+    // 不硬编码某一对：用户若把暗色换成 Nord、亮色换成日光浅色，切换应在**他选的**
+    // 两套之间来回，而不是跳回默认的那对。
+    static void toggleDarkLight();
+    // 按键恢复主题；键未知（旧配置/手改）返回 false 且**不改动**当前主题，
+    // 由调用方决定是否回退到默认。
+    static bool setThemeByKey(const std::string& key);
 
     // 应用主题（全部 ImGui 控件色映射，主方案 §7.6）
     static void applyTheme();
@@ -67,6 +84,9 @@ public:
 private:
     static bool fontsLoaded_;
     static UIThemePreset currentTheme_;
+    // 最近一次选中的暗色/亮色预设（切换时回到它们，而不是固定的一对）
+    static UIThemePreset lastDarkTheme_;
+    static UIThemePreset lastLightTheme_;
     static ImFont* fontDefault_;
     static ImFont* fontTitle_;
     static ImFont* fontSmall_;

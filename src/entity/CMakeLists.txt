@@ -12,12 +12,15 @@ add_library(moleculens_entity STATIC
     scene/scene.h scene/scene.cpp scene/transform.h
     trajectory/trajectory_reader.h
     trajectory/dcd_reader.h trajectory/dcd_reader.cpp
+    trajectory/xtc/xtc_reader.h trajectory/xtc/xtc_reader.cpp
+    trajectory/trr/trr_reader.h trajectory/trr/trr_reader.cpp
     selection/selection.h selection/selection.cpp selection/parse_table.h
     search/bond_search.h search/bond_search.cpp
     ../io/registry/ifile_reader.h ../io/registry/parser_registry.h ../io/registry/parser_registry.cpp
     ../io/pdb/pdb_parser.h ../io/pdb/pdb_parser.cpp
     ../io/gro/gro_parser.h ../io/gro/gro_parser.cpp
     ../io/sdf/sdf_parser.h ../io/sdf/sdf_parser.cpp
+    ../io/cube/cube_volume.h ../io/cube/cube_parser.h ../io/cube/cube_parser.cpp
     ../persist/mlscene/mlscene.h ../persist/mlscene/scene_serializer.h ../persist/mlscene/scene_serializer.cpp
     ../persist/settings/settings.h ../persist/settings/settings.cpp
 )

@@ -2,9 +2,14 @@
 // MolecuLens · app · controller/rep/representation_controller.cpp
 // =============================================================================
 
+#include "app/i18n/language.h"
 #include "app/controller/rep/representation_controller.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "engine/render/renderer.h"
+#include "engine/style/espsurface/esp_surface.h"   // EspColormap::Count（色标方案合法区间）
 #include "entity/scene/scene.h"
 #include "spdlog/spdlog.h"
 
@@ -31,7 +36,14 @@ int32_t RepresentationController::addRepresentation(const std::string& name,
     rep.type = type;
     rep.selection = selection;
     rep.colorScheme = scheme;
+    // v2.8：新建分子表面 / 快速表面时默认「整体系合并」——与 VMD 默认只出一张
+    // 连续表面的观感一致，也避免多实例体系里 2000+ 个水分子各生成一张小球壳。
+    if (type == engine::RepresentationType::Surface ||
+        type == engine::RepresentationType::QuickSurf) {
+        rep.systemSurface = true;
+    }
     reps_.push_back(rep);
+    clampActiveIndex();
     touch();
     return static_cast<int32_t>(reps_.size()) - 1;
 }
@@ -41,8 +53,41 @@ bool RepresentationController::removeRepresentation(int32_t repId) {
         return false;
     }
     reps_.erase(reps_.begin() + repId);
+    // 删掉的正好是编辑目标或其之前的项 → 下标要跟着左移，否则编辑对象会
+    // 静默跳到相邻表示上（用户看到的是"删了一个，另一个参数变了"）
+    if (activeIndex_ > repId) {
+        --activeIndex_;
+    }
+    clampActiveIndex();
     touch();
     return true;
+}
+
+bool RepresentationController::setName(int32_t repId, const std::string& name) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].name = name;
+    // 不调 touch()：名称不参与命令流生成（渲染结果与名字无关），而 .mlscene
+    // 保存读的是渲染器已绑定的同一份列表，故赋值即可被持久化看见。
+    return true;
+}
+
+int32_t RepresentationController::activeIndex() const {
+    if (reps_.empty()) {
+        return 0;
+    }
+    const int32_t last = static_cast<int32_t>(reps_.size()) - 1;
+    return activeIndex_ < 0 ? 0 : (activeIndex_ > last ? last : activeIndex_);
+}
+
+void RepresentationController::setActiveIndex(int32_t idx) {
+    activeIndex_ = idx;
+    clampActiveIndex();
+}
+
+void RepresentationController::clampActiveIndex() {
+    activeIndex_ = activeIndex();   // 复用同一套钳制逻辑（单一事实来源）
 }
 
 bool RepresentationController::setType(int32_t repId, engine::RepresentationType type) {
@@ -50,7 +95,31 @@ bool RepresentationController::setType(int32_t repId, engine::RepresentationType
     if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
         return false;
     }
-    reps_[static_cast<size_t>(repId)].type = type;
+    auto& rep = reps_[static_cast<size_t>(repId)];
+    const bool wasSurface = rep.type == engine::RepresentationType::Surface ||
+                            rep.type == engine::RepresentationType::QuickSurf;
+    rep.type = type;
+
+    // 体系级表面的**合理默认**：溶剂化/多实例体系下"每分子一个表面"是病态的
+    // —— 实测 md.gro（2042 个实例）：QuickSurf 846 ms / 命令流 316 MB，
+    // 而整体系合并只需 170 ms / 19.8 MB（5× 与 16×）。
+    // 仅在**从非表面样式切到表面样式**时给默认值：这样
+        //  · 用户随后手动切换"整体系合并表面"不会被覆盖（同类型内不再改）；
+    //  · 每次切到表面样式都从合理默认开始（该标志本就是随样式而定的）。
+    if (!wasSurface &&
+        (type == engine::RepresentationType::Surface ||
+         type == engine::RepresentationType::QuickSurf)) {
+        uint32_t instances = 0;
+        if (svc_.scene != nullptr) {
+            instances = static_cast<uint32_t>(svc_.scene->instances().size());
+        }
+        rep.systemSurface = instances > kSystemSurfaceInstanceThreshold;
+        if (rep.systemSurface) {
+            spdlog::info("[rep] {} 实例的体系 -> 默认启用整体系合并表面"
+                         "（可在面板关闭）",
+                         instances);
+        }
+    }
     touch();
     return true;
 
@@ -128,10 +197,88 @@ bool RepresentationController::setSystemSurface(int32_t repId, bool on) {
     return true;
 }
 
-bool RepresentationController::setMaterial(int32_t repId, const float* ambient,
-                                           const float* diffuse, const float* specular,
-                                           float shininess, float metallic,
-                                           float roughness, float opacity) {
+// —— ESP 映射表面参数 ——
+// 与 surfIsovalue/surfGridSpacing 同一约定：写字段 + touch()；不在此处校验文件
+// 是否存在（路径可能来自 .mlscene，且渲染层 buildEspSurface 自己会报错并不绘制）。
+bool RepresentationController::setEspDensityCubePath(int32_t repId,
+                                                     const std::string& path) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].espDensityCubePath = path;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setEspPotentialCubePath(int32_t repId,
+                                                       const std::string& path) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].espPotentialCubePath = path;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setEspIsovalue(int32_t repId, float iso) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size() || !std::isfinite(iso)) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].espIsovalue = iso;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setEspRange(int32_t repId, float vminKcal,
+                                           float vmaxKcal) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size() ||
+        !std::isfinite(vminKcal) || !std::isfinite(vmaxKcal)) {
+        return false;
+    }
+    // 上限必须大于下限：否则 valueToT 的 span 退化，色标/着色退化为单色。
+    // 这里做一次最小修正（+1e-3）而不是拒绝写入——UI 拖动上下限时不该卡住。
+    auto& rep = reps_[static_cast<size_t>(repId)];
+    rep.espVminKcal = vminKcal;
+    rep.espVmaxKcal = vmaxKcal <= vminKcal ? vminKcal + 1e-3f : vmaxKcal;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setEspAutoRange(int32_t repId, bool on) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].espAutoRange = on;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setEspInvert(int32_t repId, bool on) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].espInvert = on;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setEspColormap(int32_t repId, int32_t colormap) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    // 合法区间来自引擎枚举（0..Count-1）；越界值会让 drawEspSurface 的
+    // sanitizeColormap 静默回退 rwb，UI 下拉却回显一个不存在的项。
+    const int32_t last = static_cast<int32_t>(engine::EspColormap::Count) - 1;
+    reps_[static_cast<size_t>(repId)].espColormap = std::clamp(colormap, 0, last);
+    touch();
+    return true;
+}
+
+bool RepresentationController::setMaterial(int32_t repId, int32_t presetIndex,
+                                           const float* ambient, const float* diffuse,
+                                           const float* specular, float shininess,
+                                           float metallic, float roughness,
+                                           float opacity) {
     if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
         return false;
     }
@@ -145,8 +292,21 @@ bool RepresentationController::setMaterial(int32_t repId, const float* ambient,
     rep.metallic = metallic;
     rep.roughness = roughness;
     rep.opacity = opacity;
+    rep.materialPreset = presetIndex;   // 记录选中项，使下拉精确回显
     touch();
     return true;
+}
+
+// 与 setMaterial 同实现：区分两个入口只是为了让调用点自述意图
+// （"套用预设" vs "手改参数并置自定义"），避免在调用点散落魔法值 -1。
+bool RepresentationController::setMaterialPreset(int32_t repId, int32_t presetIndex,
+                                                 const float* ambient,
+                                                 const float* diffuse,
+                                                 const float* specular, float shininess,
+                                                 float metallic, float roughness,
+                                                 float opacity) {
+    return setMaterial(repId, presetIndex, ambient, diffuse, specular, shininess, metallic,
+                       roughness, opacity);
 }
 
 const std::vector<engine::Representation>&
@@ -162,6 +322,8 @@ void RepresentationController::attachToRenderer() {
 
 void RepresentationController::replaceAll(std::vector<engine::Representation> reps) {
     reps_ = std::move(reps);
+    activeIndex_ = 0;   // 整表换入（载入 .mlscene）→ 旧的编辑下标不再指代同一表示
+    clampActiveIndex();
     touch();   // 递增 revision、重新绑定、置脏并广播
 }
 

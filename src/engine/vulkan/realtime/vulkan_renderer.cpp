@@ -7,6 +7,7 @@
 #include "engine/vulkan/realtime/vulkan_renderer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include <GLFW/glfw3.h>
@@ -17,6 +18,13 @@
 #include "engine/render/renderer.h"
 #include "engine/vulkan/backend/decode.h"      // 命令流 → DrawList（唯一解码实现）
 #include "engine/vulkan/geometry/geometry.h"   // 共享几何/投影（唯一实现）
+
+namespace {
+// 阴影贴图边长由 engine::kDefaultShadowMapSize 统一提供（render_parameter.h），
+// 与 LightParams::shadowMapSize 保持一致；此处不再单独硬编码。
+constexpr uint32_t kShadowMapSize =
+    static_cast<uint32_t>(moleculens::engine::kDefaultShadowMapSize);
+} // namespace
 
 namespace moleculens::engine {
 
@@ -38,16 +46,27 @@ bool VulkanRenderer::init(WindowHandle window, const RenderConfig& cfg,
                                     device_.depthFormat(), device_.msaaSamples())) {
         return false;
     }
-    // 全局描述符（UBO）
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    if (!globalLayout_.create(device_, {binding})) {
+    // 全局描述符：binding 0 = UBO（相机/光照/雾/光矩阵），binding 1 = 阴影深度图。
+    // 顺序：布局 → 阴影贴图（管线要用布局）→ UBO 描述符集（要写阴影 view/sampler）。
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (!globalLayout_.create(device_, {bindings[0], bindings[1]})) {
         return false;
     }
-    if (!globalUbo_.create(device_, globalLayout_.layout(), sizeof(GlobalUBO))) {
+    // 阴影贴图（深度-only pass + set 0 binding 1 的采样源）
+    std::string shadowErr;
+    if (!shadow_.create(device_, kShadowMapSize, globalLayout_.layout(), &shadowErr)) {
+        spdlog::warn("[backend] shadow map unavailable: {}", shadowErr);
+    }
+    if (!globalUbo_.create(device_, globalLayout_.layout(), sizeof(GlobalUBO),
+                           shadow_.view(), shadow_.sampler())) {
         return false;
     }
     if (!createPipelines()) {
@@ -71,6 +90,7 @@ void VulkanRenderer::shutdown() {
     }
     vkDeviceWaitIdle(device_.device());
     destroyPickResources();
+    shadow_.destroy();
     gpu_.destroy();
     meshes_.destroy();
     pipelines_.destroy(device_);
@@ -83,6 +103,9 @@ void VulkanRenderer::shutdown() {
     imguiPool_ = VK_NULL_HANDLE;
     device_.destroySwapchain();
     initialized_ = false;
+    // 解码缓存失效（gpu_ 已销毁 → 上传修订号亦由 FrameGpuBuffers::destroy 复位）
+    decodedList_ = nullptr;
+    decodedRevision_ = UINT64_MAX;
 }
 
 // —— 主渲染附件与帧缓冲 ——
@@ -249,8 +272,14 @@ void VulkanRenderer::resize(uint32_t w, uint32_t h) {
 // —— 命令流执行（主方案 §6.4）——
 
 void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView& view) {
-    // 命令流 → CPU 绘制列表（唯一解码实现：vulkan/backend/decode.cpp）
-    decodeCommandList(list, drawList_);
+    // 命令流 → CPU 绘制列表（唯一解码实现：vulkan/backend/decode.cpp）。
+    // 缓存键 = (同一命令流对象, serial)：serial 未变即内容未变，跳过整条重解码。
+    const uint64_t revision = list.serial();
+    if (decodedList_ != &list || decodedRevision_ != revision) {
+        decodeCommandList(list, drawList_);
+        decodedList_ = &list;
+        decodedRevision_ = revision;
+    }
 
     // UBO 更新（相机 + 光照 + 场景属性，主方案 §6.6.4）
     GlobalUBO ubo{};
@@ -261,13 +290,33 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
             std::max(1u, device_.swapchainExtent().height)))) *
                    view.camera.viewMatrix();
     ubo.cameraPos = glm::vec4(view.camera.position(), 1.0f);
-    // 全局光照从 RenderView 读取（天顶/地面半球色 + 环境光；无方向光/点光源）
-    ubo.lightDir = glm::vec4(view.light.skyColor, 0.0f);
-    ubo.lightColor = glm::vec4(view.light.groundColor, 0.0f);
-    ubo.ambient = glm::vec4(view.light.ambientColor, view.light.ambientIntensity);
+    // 光照（半球环境光 + 方向光）：与离屏后端共用同一填装实现，避免布局漂移
+    fillGlobalLighting(ubo, view.light);
+    // 风格 + 背景：雾/距离淡出必须淡到与清屏相同的颜色
+    fillRenderStyle(ubo, view.style, view.backgroundColor);
+    // 剖切面（仅进 UBO；不重建命令流/管线）
+    fillClipPlane(ubo, view.clipPlane, view.clipEnabled);
     ubo.fog = view.fog;
-    ubo.sceneProps = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+    // 全局缩放（sceneProps.x）此前恒 1.0、SceneProperties::scale 无人消费 →
+    // 由 RenderView 携带（渲染设置面板"全局缩放"从此真实生效）
+    // x = 全局缩放, y = 视口高度(px), z = 2·tan(fov/2)：点渲染模式按透视距离
+    // 计算 gl_PointSize（此前固定 24×半径，远近一样大，点模式观感完全错误）
+    ubo.sceneProps = glm::vec4(
+        std::max(view.scale, 1e-3f),
+        static_cast<float>(device_.swapchainExtent().height),
+        2.0f * std::tan(glm::radians(view.camera.fov) * 0.5f), 0.0f);
     globalUbo_.update(frameIndex_, ubo);
+
+    // —— 方向光阴影：先跑光源视角的深度 pass（必须在主渲染通道**之外**）——
+    // 光源 UBO 与主 UBO 只差 viewProj（换成光矩阵）；其余字段必须一致，
+    // 尤其 sceneProps.x：顶点着色器用它缩放世界坐标，不一致会让深度几何与
+    // 主几何错位 → 阴影整体偏移。
+    if (shadow_.valid()) {
+        GlobalUBO lightUbo = ubo;
+        lightUbo.viewProj = view.light.lightViewProj;
+        shadow_.record(frameCommand_, device_, drawList_, meshes_, lightUbo, frameIndex_,
+                       revision);
+    }
 
     // —— 记录渲染 ——
     VkCommandBuffer cmd = frameCommand_;
@@ -295,7 +344,7 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
 
     const VkDescriptorSet globalSet = globalUbo_.set(frameIndex_);
     // 几何绘制（唯一实现：vulkan/draw/draw_geometry.cpp）
-    drawGeometry(cmd, device_, pipelines_, drawList_, gpu_, meshes_, globalSet);
+    drawGeometry(cmd, device_, pipelines_, drawList_, gpu_, meshes_, globalSet, revision, &view);
 
     // ImGui（UI 回调；renderPass 内）
     if (uiRenderFn_) {

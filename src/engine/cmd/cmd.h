@@ -33,7 +33,7 @@ enum class Cmd : uint8_t {
     CylinderInst  = 1,   // 键 / 棍圆柱
     LineInst      = 2,   // 线框 / 坐标轴 / 高亮
     TriMesh       = 3,   // 三角网格（卡通 / 表面 / 导出降级）
-    Label         = 4,   // billboard 文字
+    Label         = 4,   // 保留：v1 协议槽位（Label 表示已移除，不再发射/消费）
     MaterialBlock = 5,   // 材质状态
     Transform     = 6,   // 矩阵变换
     PushMatrix    = 7,   // 变换栈压栈（无载荷）
@@ -99,28 +99,31 @@ struct TriMeshVertex {
 static_assert(sizeof(TriMeshVertex) == 48);
 // 索引流：uint32_t[indexCount]
 
-// 标签：固定 48B + 字符串池文本（strLen 字节）
-struct LabelInst {
-    glm::vec4  pos;         // xyz=锚点(Å)，w=保留
-    glm::vec4  color;       // RGBA
-    float      size;        // 字号（屏幕空间像素）
-    uint32_t   strOffset;   // 相对字符串池起始的字节偏移
-    uint32_t   strLen;      // 文本字节数（不含终止符）
-    uint32_t   pad;         // 0
-};
-static_assert(sizeof(LabelInst) == 48);
-
-// 材质块：64B
+// 材质块：80B（v2.1 起由 64B 扩为 80B，新增 shadowMask + 3 个对齐填充）
+//
+// ⚠ 每个字段都带**默认值**（与材质库的 Opaque 一致，见 render_parameter.h）。
+//   原因：`MaterialBlock mat;` 这种声明（测试与手写命令流里很常见）在无默认值时会
+//   留下**未初始化**的 opacity/metallic/roughness。而 opacity 现在决定**选哪条管线**
+//   （<1 → 混合管线，见 draw_geometry.cpp 的 drawRun），未初始化的垃圾值会让同一个
+//   场景在不同次运行里走不同管线 —— 症状是冒烟测试随机失败、且看起来与改动无关。
+//   给默认值后，忘写字段得到的是可用材质，而不是未定义行为。
 struct MaterialBlock {
-    glm::vec4  ambient;     // 环境色
-    glm::vec4  diffuse;     // 漫反射色
-    glm::vec4  specular;    // 高光色
-    float      shininess;   // 光泽度
-    float      metallic;    // 金属度（PBR 扩展）
-    float      roughness;   // 粗糙度（PBR 扩展）
-    float      opacity;     // 不透明度（<1 进入透明通道）
+    glm::vec4  ambient{0.60f, 0.60f, 0.60f, 1.0f};   // 环境色
+    glm::vec4  diffuse{0.90f, 0.90f, 0.90f, 1.0f};   // 漫反射色
+    glm::vec4  specular{0.30f, 0.30f, 0.30f, 1.0f};  // 高光色
+    float      shininess = 32.0f;   // 光泽度
+    float      metallic = 0.0f;     // 金属度（PBR 扩展）
+    float      roughness = 0.40f;   // 粗糙度（PBR 扩展）
+    float      opacity = 1.0f;      // 不透明度（<1 进入透明通道）
+    // 阴影接收开关（0 = 不接收动态阴影，1 = 接收）。
+    // 半透明表面（ESP/等值面/快速表面）用 0：否则壳内的球棍会把影子投到壳上，
+    // 形成与分子同形的黑色"幽灵"——用户反馈的"表面光线透视问题"就是它。
+    // 放在这里而不是靠 opacity 判断：透明网格的 opacity 已被烘焙进顶点 alpha，
+    // 推送的 MaterialBlock.opacity 恒为 1，片元里无法再区分透明与不透明。
+    float      shadowMask = 1.0f;
+    float      pad[3] = {0.0f, 0.0f, 0.0f};
 };
-static_assert(sizeof(MaterialBlock) == 64);
+static_assert(sizeof(MaterialBlock) == 80);
 
 // 变换：64B，列主序
 using TransformMat = glm::mat4;
@@ -231,18 +234,82 @@ private:
     bool done_ = true;
 };
 
+// 位置相关命令判定（坐标重放用）：载荷里烘焙了坐标的命令。
+// 变换栈/材质/渲染模式等状态命令不在此列——它们不含坐标，重放时无须重写。
+inline bool isCoordCommand(Cmd code) {
+    switch (code) {
+        case Cmd::SphereInst:
+        case Cmd::CylinderInst:
+        case Cmd::LineInst:
+        case Cmd::TriMesh:
+            return true;
+        default:
+            return false;
+    }
+}
+
 class SceneCommandList {
 public:
     void   append(Cmd code, const void* payload, uint32_t bytes);
     uint32_t appendString(std::string_view text);   // 追加到字符串池，返回偏移
 
+    // 追加三角网格（卡通 / 表面 / QuickSurf）。
+    //
+    // **自动按 kCmdMaxPayload 切块** —— 必须的原因：单命令载荷超上限时
+    // CommandIterator::readHeader 会置 done_ 直接结束遍历，于是整条命令流在
+    // 该命令处**被静默截断**：解码得到 0 个网格、commandStats 报 0、几何完全
+    // 不可见，而命令池里明明有几十 MB 数据。实测 md.gro 的整体系 vdW/QuickSurf
+    // 表面单块就 19–36 MB（> 16 MiB 上限），正是撞在这条上。
+    // 多块对绘制无害：网格绘制按渲染模式把所有块合并成一次绘制（见 draw_geometry.cpp）。
+    void appendTriMesh(const std::vector<TriMeshVertex>& verts,
+                       const std::vector<uint32_t>& indices);
+
     bool     empty() const;
     uint32_t size() const;                          // 命令池字节数
+    // 修订号：**每次重建必须单调递增**。它是后端解码缓存与视图层重绘门控的键：
+    //   后端 decodeCommandList 以 (命令流对象, serial) 为键跳过重复解码；
+    //   MolScene 用它与 lastSerial_ 比较决定是否重绘。
+    // ⚠ 因此绝不能让 serial **回退或复位** —— 一旦两次不同的内容拿到同一个
+    //   serial，后端会误判"缓存命中"而继续用旧的绘制列表（表现为：打开文件后
+    //   界面正常、视口却一直是空白/旧内容）。见 Renderer::rebuildCommandList。
     uint64_t serial() const;                        // 重建即递增（缓存键，P5）
     void     bumpSerial() { ++serial_; }            // 重建完成时调用（Renderer）
+    // 显式设值：整表换入（move 自一个新建的空列表）时必须先把旧 serial 搬过来，
+    // 否则新建列表的 serial_(0) 会随 move 覆盖掉，bump 后恒等于 1。
+    void     setSerial(uint64_t s) { serial_ = s; }
 
     bool first(CommandIterator&) const;
     bool next(CommandIterator&) const;
+
+    // —— 坐标重放（帧增量上传，主方案 §5.8.2 / P4）——
+    //
+    // 帧切（仅 DIRTY_COORDS）时坐标变了、命令序列不变。重建整条命令流要重新
+    // 枚举所有 (表示 × 实例)、重算颜色/半径、并重新分配整块命令池；重放只把
+    // 坐标类命令的载荷**写回原偏移**，池大小与命令序列逐字节保持。
+    //
+    // 用法：全量重建时 recordReplay(true) 边生成边记下每条坐标命令的
+    //       池偏移/长度/类型；之后帧切调 beginReplay() → 再次生成（样式代码
+    //       无须改动，append 按游标改道）→ endReplay() 校验。
+    //
+    // 安全网：重放期间任何一条 append 与记录不一致（类型/长度不符、条数超界）
+    //         即置失败；endReplay() 返回 false，调用方回退到全量重建。
+    struct ReplayEntry {
+        uint32_t offset;   // 载荷起始在 pool_ 内的绝对偏移
+        uint32_t size;     // 载荷字节数
+        Cmd      code;
+    };
+
+    // 全量重建期间：开始/结束记录坐标命令偏移
+    void recordReplay(bool on);
+    [[nodiscard]] const std::vector<ReplayEntry>& replayPlan() const { return replay_; }
+    // 命令流中含 TriMesh（表面/卡通/QuickSurf）——其顶点数随坐标变化，无法重放
+    [[nodiscard]] bool hasMeshCommands() const { return hasMesh_; }
+
+    // allowMesh = true 时允许重放含 TriMesh 的命令流（仅限"顶点/索引数不随坐标
+    // 变化"的样式，如 Diamond/Plate/卡通；Surface/QuickSurf 的 MC 拓扑会变，
+    // 尺寸不符时 append 会置 replayFailed_，调用方回退全量重建）。
+    bool beginReplay(bool allowMesh = false);   // 进入重放模式（计划非空且不含 TriMesh）
+    bool endReplay();     // 校验重放完整；成功则 bumpSerial 并返回 true
 
     // 序列化 / 反序列化（配合 .mlscene 命令流段与 RPC 传帧）
     static void writeTo(ByteSink& out, const SceneCommandList&);
@@ -252,6 +319,12 @@ private:
     friend class CommandIterator;
     std::vector<uint8_t> pool_;     // 16B 对齐内存池
     std::vector<uint8_t> strings_;  // 字符串池（UTF-8）
+    std::vector<ReplayEntry> replay_;   // 坐标命令偏移记录（见上方说明）
+    size_t replayCursor_ = 0;           // 重放游标（replay_ 下标）
+    bool   recording_ = false;          // 记录模式
+    bool   replaying_ = false;          // 重放模式
+    bool   replayFailed_ = false;       // 重放期间发现不一致
+    bool   hasMesh_ = false;            // 曾发射 TriMesh（禁用重放）
     uint64_t serial_ = 0;
 };
 
@@ -260,7 +333,7 @@ private:
 // [8]    u64 poolSize             命令池字节数
 // [16]   u8  pool[poolSize]       命令池（每条 = CmdHeader 8B + 载荷，整体 16B 对齐）
 //        u64 stringPoolSize       字符串池字节数
-//        u8  stringPool[...]      UTF-8（Label.strOffset 相对其起始）
+//        u8  stringPool[...]      UTF-8（字符串偏移相对其起始，见 appendString）
 //        尾部按 16B 对齐填充
 
 } // namespace moleculens::engine

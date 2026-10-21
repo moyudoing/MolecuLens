@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 
 namespace moleculens::engine {
@@ -26,12 +27,23 @@ public:
     void setLoop(bool on) { loop_ = on; }
     bool loop() const { return loop_; }
     void setInOut(uint64_t inFrame, uint64_t outFrame);
-    void setSpeed(float speed) { speed_ = speed; }
+    void setSpeed(float speed) { speed_ = std::clamp(speed, 0.0f, 64.0f); }
     float speed() const { return speed_; }
     void setDtFrame(float dt) { dtFrame_ = dt; }
     float dtFrame() const { return dtFrame_; }
-    void play() { playing_ = true; }
-    void pause() { playing_ = false; }
+    // 播放帧率（实时动画每秒推进多少轨迹帧）。**与物理 dt 无关**：
+    // dtFrame 是轨迹文件的时间步长（10 ps 之类），只用于显示时间/导出时间轴；
+    // 若拿它当实时步进间隔，10 ps 会变成"每 10 秒一帧"——这就是用户反馈的
+    // "不能自动播放"。速度倍率作用在这个帧率上。
+    void setPlaybackFps(float fps) { playbackFps_ = std::clamp(fps, 1.0f, 240.0f); }
+    float playbackFps() const { return playbackFps_; }
+    void play() {
+        if (!playing_) {
+            accumulator_ = 0.0f;   // 暂停后重新播放不补帧（避免一次性跳很多帧）
+        }
+        playing_ = true;
+    }
+    void pause() { playing_ = false; accumulator_ = 0.0f; }
     void stop() { playing_ = false; seek(0); }
     bool playing() const { return playing_; }
     uint64_t frame() const { return frame_; }
@@ -44,6 +56,7 @@ private:
     bool loop_ = true;
     float speed_ = 1.0f;
     float dtFrame_ = 2.0f;
+    float playbackFps_ = 30.0f;   // 实时播放帧率（与物理 dt 解耦）
     uint64_t inFrame_ = 0;
     uint64_t outFrame_ = 0;
     float accumulator_ = 0.0f;

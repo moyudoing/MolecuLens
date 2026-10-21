@@ -31,6 +31,12 @@ public:
                          VkImageLayout finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     // 拾取 ID Pass（R32_UINT，无深度，主方案 §5.6）
     bool createPickPass(VulkanDevice& device, VkFormat idFormat);
+    // 阴影深度 pass（主方案 §6.6.4）：**只有深度附件、无颜色附件**，
+    // 结束后深度图进入 shader 只读布局供主 pass 采样。
+    // initialLayout 用 UNDEFINED：每帧都会 clear 深度，无需保留上一帧内容，
+    // 且对首帧（图像尚未写过）也是合法转换。
+    bool createShadowDepth(VulkanDevice& device, VkFormat depthFormat,
+                           VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT);
 
     VkRenderPass renderPass() const { return renderPass_; }
     bool valid() const { return renderPass_ != VK_NULL_HANDLE; }

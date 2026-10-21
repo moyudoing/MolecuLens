@@ -219,6 +219,64 @@ bool RenderPass::createPickPass(VulkanDevice& device, VkFormat idFormat) {
     return true;
 }
 
+bool RenderPass::createShadowDepth(VulkanDevice& device, VkFormat depthFormat,
+                                   VkSampleCountFlagBits samples) {
+    destroy();
+    device_ = &device;
+
+    VkAttachmentDescription depth{};
+    depth.format = depthFormat;
+    depth.samples = samples;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;   // 每帧重画
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE; // 必须保留：主 pass 要采样
+    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+    VkAttachmentReference depthRef{0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 0;   // 无颜色附件（深度-only）
+    subpass.pDepthStencilAttachment = &depthRef;
+
+    // 两条依赖：
+    //  ① 外部 → 子pass：附件布局转换与深度写必须在写之前完成
+    //  ② 子pass → 外部：深度写完成后方可被主 pass 作为纹理读取
+    // ② 是阴影正确性的关键 —— 缺了它可能采到本帧尚未写完的深度图（撕裂/闪烁）。
+    VkSubpassDependency deps[2]{};
+    deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+    deps[0].dstSubpass = 0;
+    deps[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    deps[1].srcSubpass = 0;
+    deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+    deps[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    deps[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    VkRenderPassCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    info.attachmentCount = 1;
+    info.pAttachments = &depth;
+    info.subpassCount = 1;
+    info.pSubpasses = &subpass;
+    info.dependencyCount = 2;
+    info.pDependencies = deps;
+
+    if (vkCreateRenderPass(device.device(), &info, nullptr, &renderPass_) != VK_SUCCESS) {
+        spdlog::error("[backend] vkCreateRenderPass (shadow depth) failed");
+        return false;
+    }
+    return true;
+}
+
 void RenderPass::destroy() {
     if (renderPass_ != VK_NULL_HANDLE && device_) {
         vkDestroyRenderPass(device_->device(), renderPass_, nullptr);

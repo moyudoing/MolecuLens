@@ -1,22 +1,29 @@
 // =============================================================================
-// MolecuLens · app · view/tools/styles/styles_tool.cpp —— 渲染设置实现
+// Moleculens · app · view/tools/styles/styles_tool.cpp —— 渲染设置实现（场景级）
 // 规格来源：主方案 §7.9（sliderWithReset：标签左/滑块中/重置右）
-// 变更：样式/着色/缩放/背景/雾效参数直通 RepresentationController /
-//       RenderController（此前为静态局部变量不生效——见 moleculens-fixes）
+//
+// 职责边界（2026-09-26 收敛）：本面板只负责**场景级**设置 —— 视角 / 背景 / 雾 /
+// 光照 / 方向光 / 视口渲染方式。**表示级**的一切（样式、配色、原子子集、缩放、
+// 材质、QuickSurf 参数、整体系合并表面、表示的增删）全部归「图形表示」面板
+// （view/tools/reps/reps_tool.cpp）。
+// 此前两处都能改表示 —— 虽共用同一个 RepresentationController（不是两份状态），
+// 但同一个参数有两个入口会让人以为改的是两个东西，且旧面板的表示"列表"与
+// 新面板的表格在视觉上互相矛盾。故旧入口整体移除。
 // =============================================================================
 
+#include "app/i18n/language.h"
 #include "app/view/tools/styles/styles_tool.h"
 
+#include <algorithm>
 #include <cmath>
+#include <string>
 
 #include "app/controller/camera/camera_controller.h"
-#include "app/controller/rep/representation_controller.h"
 #include "app/controller/render/render_controller.h"
 #include "app/data/data_manager.h"
 #include "app/view/theme/ui_theme.h"
 #include "app/view/viewport/mol_scene.h"
 #include "engine/camera/camera.h"
-#include "engine/rep/representation.h"
 #include "entity/scene/scene.h"
 
 namespace moleculens::app {
@@ -46,166 +53,66 @@ bool sliderWithReset(const char* label, float* value, float min, float max,
 void StylesTool::render(DataManager* dm, MolScene* scene) {
 
     (void)dm;
-    if (!repCtl_ || !scene || !scene->getCamera()) {
-        ImGui::TextDisabled("视口/控制器未就绪");
+    if (!scene || !scene->getCamera()) {
+        ImGui::TextDisabled(tr("视口/控制器未就绪"));
         return;
     }
-
-    // 当前表示（UI 作用目标：第一个表示；读取其真实状态而非静态默认值）
-    const auto& reps = repCtl_->representations();
-    if (reps.empty()) {
-        ImGui::TextDisabled("无表示");
-        return;
-    }
-
-    constexpr int activeRep = 0;
-    const engine::Representation& rep = reps[activeRep];
     const auto* sc = scene->scene();
+
+    ImGui::TextDisabled(tr("本面板：场景级设置（视角/背景/雾/光照）。"));
+    ImGui::TextDisabled(tr("表示的增删与样式/配色/材质请用「图形表示」面板。"));
 
     // 视口渲染方式（一.7）：光栅化 / 自研 CPU 光线追踪预览
     {
+        UITheme::sectionHeader(tr("视口"));
         bool rtPreview = scene->rayTracePreview();
-        if (ImGui::Checkbox("视口光线追踪预览", &rtPreview)) {
+        if (ImGui::Checkbox(tr("视口光线追踪预览"), &rtPreview)) {
             scene->setRayTracePreview(rtPreview);
         }
-        UITheme::helpMarker("开启后 3D 视口用自研 CPU 光线追踪渲染（低分辨率预览，"
-                            "相机/场景变化时重渲；导出面板另有高分辨率 RT 导出）");
-        ImGui::Separator();
-    }
-
-    // 样式（表示类型，主方案 §7.9：线状/棍状/球棍/CPK/VDW/甘草棍/表面）
-    // 名称 → 类型显式映射（此前用下标直接 cast 枚举，名称与类型错位：
-    //  "球棍" 实为 Stick、"CPK" 实为 BallAndStick、VDW 不可用）
-    // 序号与 styleTypes 必须逐项对应——两者是并排的两个数组，错位不会编译报错，
-    // 只会让下拉框选到的名字与画出来的东西对不上（"甘草棍" 曾指向 Cartoon）。
-    static const char* styleNames[] = {"线状", "棍状", "球棍", "CPK", "VDW",
-                                       "甘草棍", "卡通", "新卡通", "丝带",
-                                       "管状", "表面", "QuickSurf"};
-    static constexpr engine::RepresentationType styleTypes[] = {
-        engine::RepresentationType::Wireframe,
-        engine::RepresentationType::Stick,
-        engine::RepresentationType::BallAndStick,
-        engine::RepresentationType::Spacefill,   // CPK：范德华半径空间填充（受球体缩放）
-        engine::RepresentationType::Vdw,         // VDW：全范德华半径空间填充（不受缩放）
-        engine::RepresentationType::Licorice,    // 甘草棍：粗圆棍，无端帽球
-        engine::RepresentationType::Cartoon,     // 卡通：蛋白质骨架 6 步风格
-        engine::RepresentationType::NewCartoon,  // 新卡通：改进的二级结构渲染
-        engine::RepresentationType::Ribbon,      // 丝带：平滑 CA 骨架带状
-        engine::RepresentationType::Tube,        // 管状：圆管骨架
-        engine::RepresentationType::Surface,     // 表面：vdW 等值面
-        engine::RepresentationType::QuickSurf,   // 高斯密度等值面
-    };
-    // 两个数组项数必须一致，且与下拉框显示顺序一一对应
-    static_assert(IM_ARRAYSIZE(styleNames) == IM_ARRAYSIZE(styleTypes),
-                  "styleNames 与 styleTypes 项数不一致（名称与类型会错位）");
-
-    int styleIdx = 2;   // 2 默认球棍
-    for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(styleTypes)); ++i) {
-        if (styleTypes[i] == rep.type) {
-            styleIdx = i;
-            break;
-        }
-    }
-
-    // 样式选项
-    ImGui::Text("样式");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30.0f);
-    if (ImGui::Combo("##style", &styleIdx, styleNames, IM_ARRAYSIZE(styleNames))) {
-        repCtl_->setType(activeRep, styleTypes[styleIdx]);
-    }
-    // 此处的 SameLine() 是给已被注释掉的 helpMarker 留的（它要与下拉框同一行）。
-    // 保留会让下面的"着色"标签落到同一行，配色下拉框被挤出面板宽度之外
-    // （除 Surface/QuickSurf 外都点不到）——故不保留。
-
-    // QuickSurf 参数（等值面阈值 / 网格间距；radscale 复用上方"球体缩放"）
-    if (rep.type == engine::RepresentationType::QuickSurf) {
-        float iso = rep.surfIsovalue;
-        if (sliderWithReset("等值面阈值", &iso, 0.05f, 2.0f, 0.5f)) {
-            repCtl_->setSurfIsovalue(activeRep, iso);
-        }
-        float gs = rep.surfGridSpacing;
-        if (sliderWithReset("网格间距", &gs, 0.2f, 2.0f, 0.5f)) {
-            repCtl_->setSurfGridSpacing(activeRep, gs);
-        }
-        UITheme::helpMarker("网格间距越小表面越精细（计算越慢）；等值面阈值控制表面贴合度");
-    }
-    // 体系级表面：Surface/QuickSurf 整体系（含溶剂分子）一个整体表面——
-    // 溶剂化大体系（md.gro 大量 SOL）每分子一个独立小表面既慢又碎，
-    // 开启后按整个体系聚合为一个连续表面（渲染器 drawSystemSurface/drawSystemQuickSurf）
-    if (rep.type == engine::RepresentationType::Surface ||
-        rep.type == engine::RepresentationType::QuickSurf) {
-        bool ss = rep.systemSurface;
-        if (ImGui::Checkbox("整体系合并表面", &ss)) {
-            repCtl_->setSystemSurface(activeRep, ss);
-        }
-        UITheme::helpMarker("开启后按整个体系生成一个整体表面（含溶剂分子），"
-                            "而非每个分子各自一个独立小表面；溶剂化大体系（如 md.gro）用");
-        ImGui::Separator();
-    }
-
-    // 着色方案
-    static const char* colorNames[] = {"元素 CPK", "按链", "按残基", "按 BFactor",
-                                       "统一色"};
-    int colorIdx = static_cast<int>(rep.colorScheme);
-    ImGui::Text("着色");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    if (ImGui::Combo("##color", &colorIdx, colorNames, IM_ARRAYSIZE(colorNames))) {
-        repCtl_->setColorScheme(activeRep, static_cast<engine::ColorScheme>(colorIdx));
-    }
-
-    // 球体缩放 / 键半径（表示控制器）
-    float sphereScale = rep.radiusScale;
-    if (sliderWithReset("球体缩放", &sphereScale, 0.1f, 3.0f, 1.0f)) {
-        repCtl_->setRadiusScale(activeRep, sphereScale);
-    }
-    float bondRadius = rep.bondScale;
-    if (sliderWithReset("键半径", &bondRadius, 0.2f, 3.0f, 1.0f)) {
-        repCtl_->setBondScale(activeRep, bondRadius);
+        UITheme::helpMarker(tr("开启后 3D 视口用自研 CPU 光线追踪渲染（低分辨率预览，" "相机/场景变化时重渲；导出面板另有高分辨率 RT 导出）"));
     }
 
     // 视角：正交/透视 + FOV（规格 §7.9 —— 此前是被注释掉的死代码，且背后的
     // CameraController::setPerspective/setFov 也一直无人调用；现经相机控制器接通，
     // 与视口鼠标交互走同一入口）
-    UITheme::sectionHeader("视角");
+    UITheme::sectionHeader(tr("视角"));
     if (cameraCtl_ && scene && scene->getCamera()) {
         engine::OrbitCamera* cam = scene->getCamera();
         bool ortho = cam->ortho;
-        if (ImGui::Checkbox("正交投影", &ortho)) {
+        if (ImGui::Checkbox(tr("正交投影"), &ortho)) {
             cameraCtl_->setPerspective(ortho);
         }
-        UITheme::helpMarker("正交投影无近大远小，适合比对结构差异；透视更接近肉眼观感");
+        UITheme::helpMarker(tr("正交投影无近大远小，适合比对结构差异；透视更接近肉眼观感"));
 
         float fov = cam->fov;
         if (sliderWithReset("FOV (°)", &fov, 10.0f, 120.0f, 45.0f)) {
             cameraCtl_->setFov(fov);
         }
-        UITheme::helpMarker("垂直视场角；正交投影下不参与投影，仅影响切回透视后的取景");
+        UITheme::helpMarker(tr("垂直视场角；正交投影下不参与投影，仅影响切回透视后的取景"));
 
-        if (ImGui::Button("复位视角")) {
+        if (ImGui::Button(tr("复位视角"))) {
             cameraCtl_->reset();   // 清 yaw/pitch/roll + 重新自动取景
         }
-        UITheme::helpMarker("恢复默认朝向并按当前场景包围球重新取景");
+        UITheme::helpMarker(tr("恢复默认朝向并按当前场景包围球重新取景"));
     } else {
-        ImGui::TextDisabled("相机未就绪（先打开文件）");
+        ImGui::TextDisabled(tr("相机未就绪（先打开文件）"));
     }
 
     // 背景（RenderController 写入场景属性 → DIRTY_PROPERTIES → 视口重渲染）
-    UITheme::sectionHeader("背景");
+    UITheme::sectionHeader(tr("背景"));
     if (sc) {
         float bg[3] = {sc->properties().bgColor[0], sc->properties().bgColor[1],
                        sc->properties().bgColor[2]};
-        if (ImGui::ColorEdit3("背景色", bg) && renderCtl_) {
+        if (ImGui::ColorEdit3(tr("背景色"), bg) && renderCtl_) {
             renderCtl_->setBackgroundColor(bg[0], bg[1], bg[2]);
         }
     } else {
-        ImGui::TextDisabled("场景未就绪");
+        ImGui::TextDisabled(tr("场景未就绪"));
     }
 
     // 雾效
-    UITheme::sectionHeader("雾效");
-    static const char* fogNames[] = {"关", "线性", "指数", "指数²"};
+    UITheme::sectionHeader(tr("雾效"));
+    static const char* fogNames[] = {tr("关"), tr("线性"), tr("指数"), tr("指数²")};
     bool fogChanged = false;
     float fogNear = 0.0f, fogFar = 100.0f, fogDensity = 0.05f;
     int fogMode = 0;
@@ -215,39 +122,89 @@ void StylesTool::render(DataManager* dm, MolScene* scene) {
         fogDensity = sc->properties().fogDensity;
         fogMode = static_cast<int>(sc->properties().fogMode);
     }
-    fogChanged |= ImGui::Combo("雾效模式", &fogMode, fogNames, IM_ARRAYSIZE(fogNames));
-    fogChanged |= sliderWithReset("雾近", &fogNear, 0.0f, 200.0f, 0.0f);
-    fogChanged |= sliderWithReset("雾远", &fogFar, 1.0f, 1000.0f, 100.0f);
-    fogChanged |= sliderWithReset("雾密度", &fogDensity, 0.001f, 0.5f, 0.05f);
+    fogChanged |= ImGui::Combo(tr("雾效模式"), &fogMode, fogNames, IM_ARRAYSIZE(fogNames));
+    fogChanged |= sliderWithReset(tr("雾近"), &fogNear, 0.0f, 200.0f, 0.0f);
+    fogChanged |= sliderWithReset(tr("雾远"), &fogFar, 1.0f, 1000.0f, 100.0f);
+    fogChanged |= sliderWithReset(tr("雾密度"), &fogDensity, 0.001f, 0.5f, 0.05f);
     if (fogChanged && renderCtl_) {
         renderCtl_->setFog(fogNear, fogFar, fogMode, fogDensity);
     }
 
     // 光照（全局光方案，无方向光/点光源）：天顶/地面半球色 + 均匀环境光 → 场景属性
     // → DIRTY_PROPERTIES → 视口重渲染（更新机制：UBO 每帧从 RenderView 重建）
-    UITheme::sectionHeader("光照");
+    UITheme::sectionHeader(tr("光照"));
     if (sc && renderCtl_) {
         float sky[3] = {sc->properties().skyColor[0], sc->properties().skyColor[1],
                         sc->properties().skyColor[2]};
-        if (ImGui::ColorEdit3("天顶色", sky)) {
+        if (ImGui::ColorEdit3(tr("天顶色"), sky)) {
             renderCtl_->setSkyColor(sky[0], sky[1], sky[2]);
         }
         float ground[3] = {sc->properties().groundColor[0], sc->properties().groundColor[1],
                            sc->properties().groundColor[2]};
-        if (ImGui::ColorEdit3("地面色", ground)) {
+        if (ImGui::ColorEdit3(tr("地面色"), ground)) {
             renderCtl_->setGroundColor(ground[0], ground[1], ground[2]);
         }
         float acol[3] = {sc->properties().ambientColor[0], sc->properties().ambientColor[1],
                          sc->properties().ambientColor[2]};
-        if (ImGui::ColorEdit3("环境光色", acol)) {
+        if (ImGui::ColorEdit3(tr("环境光色"), acol)) {
             renderCtl_->setAmbientColor(acol[0], acol[1], acol[2]);
         }
         float ambient = sc->properties().ambient;
-        if (sliderWithReset("半球光强度", &ambient, 0.0f, 1.5f, 0.45f)) {
+        if (sliderWithReset(tr("半球光强度"), &ambient, 0.0f, 1.5f, 0.45f)) {
             renderCtl_->setAmbient(ambient);
         }
-        UITheme::helpMarker("全局光照（无方向光/点光源）：天顶亮/地面暗的半球环境光 + "
-                            "均匀环境光补光；强度越大天顶地面差异越明显");
+        UITheme::helpMarker(tr("半球环境光：天顶亮/地面暗的渐变 + 均匀环境光补光；" "强度越大天顶地面差异越明显"));
+    }
+
+    // 方向光（P6 新增，主方案 §6.6.4）：Lambert 漫反射 + Blinn-Phong 高光。
+    // 使材质面板的 specular / shininess / metallic / roughness 真实可见
+    // （此前这几个材质参数在光栅化路径上完全不参与着色 → 8 套预设零视觉效果）。
+    UITheme::sectionHeader(tr("方向光"));
+    if (sc && renderCtl_) {
+        bool on = sc->properties().dirLightEnabled;
+        if (ImGui::Checkbox(tr("启用方向光"), &on)) {
+            renderCtl_->setDirLightEnabled(on);
+        }
+        UITheme::helpMarker(tr("关闭后仅剩半球环境光（无高光/无明暗造型，等同改动前的观感）"));
+
+        ImGui::BeginDisabled(!on);
+        // 方位角/仰角（度）：比手填三分量直观；回读真值而非镜像本地变量
+        float azDeg = 0.0f, elDeg = 0.0f;
+        float az = 0.0f, el = 0.0f;
+        renderCtl_->dirLightAngles(&az, &el);
+        azDeg = az * 57.29578f;
+        elDeg = el * 57.29578f;
+        bool anglesChanged = false;
+        anglesChanged |= ImGui::SliderFloat(tr("方位角"), &azDeg, -180.0f, 180.0f, "%.0f°");
+        anglesChanged |= ImGui::SliderFloat(tr("仰角"), &elDeg, -90.0f, 90.0f, "%.0f°");
+        if (anglesChanged) {
+            renderCtl_->setDirLightAngles(azDeg / 57.29578f, elDeg / 57.29578f);
+        }
+        float dl[3] = {sc->properties().dirLightColor[0], sc->properties().dirLightColor[1],
+                       sc->properties().dirLightColor[2]};
+        if (ImGui::ColorEdit3(tr("光源色"), dl)) {
+            renderCtl_->setDirLightColor(dl[0], dl[1], dl[2]);
+        }
+        float di = sc->properties().dirLightIntensity;
+        if (sliderWithReset(tr("强度"), &di, 0.0f, 2.0f, 0.35f)) {
+            renderCtl_->setDirLightIntensity(di);
+        }
+
+        // 阴影（深度 pass + PCF）。仅球/柱投影 —— TriMesh（表面/卡通/QuickSurf）
+        // 不投影，见 ShadowMap 头注释。
+        ImGui::Separator();
+        bool shOn = sc->properties().shadowsEnabled;
+        if (ImGui::Checkbox(tr("投射阴影"), &shOn)) {
+            renderCtl_->setShadowsEnabled(shOn);
+        }
+        UITheme::helpMarker(tr("方向光阴影：光源视角深度图 + 3×3 PCF 软阴影。" "仅球/柱类表示投影（表面/卡通/QuickSurf 不投影）"));
+        ImGui::BeginDisabled(!shOn);
+        float shStr = sc->properties().shadowStrength;
+        if (sliderWithReset(tr("阴影强度"), &shStr, 0.0f, 1.0f, 0.65f)) {
+            renderCtl_->setShadowStrength(shStr);
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
     }
 }
 

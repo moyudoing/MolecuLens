@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" width="720" height="180">
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#ink)">
+    <circle cx="90" cy="86" r="52" stroke-width="10"/>
+    <circle cx="90" cy="86" r="41" stroke-opacity="0.22" stroke-width="2.5"/>
+    <line x1="90" y1="86" x2="65" y2="111" stroke-width="7" stroke-linecap="round"/>
+    <line x1="90" y1="86" x2="115" y2="111" stroke-width="7" stroke-linecap="round"/>
+  </g>
+  <circle cx="90" cy="83" r="13" fill="#2563EB"/>
+  <circle cx="64" cy="112" r="9" fill="#0EA5E9"/>
+  <circle cx="116" cy="112" r="9" fill="#0EA5E9"/>
+
+  <text x="176" y="103" font-family="Segoe UI Semibold, Segoe UI, Microsoft YaHei, Arial, sans-serif"
+        font-size="58" font-weight="600" letter-spacing="0.5" fill="#1F2937">MolecuLens</text>
+  <text x="180" y="140" font-family="Segoe UI, Microsoft YaHei, Arial, sans-serif"
+        font-size="21" fill="#64748B" letter-spacing="1.2">分子可视化工作台 · AURORA</text>
+</svg>

@@ -19,7 +19,9 @@
 //   Representation       ← RepresentationController 持有的表示列表
 //   场景属性 / 相机       ← SceneProperties / OrbitCamera
 //   commandStream        ← SceneCommandList::writeTo 的字节（persist 视作不透明数据）
-//   trajectory           ← 源文件引用（不内嵌帧坐标）
+//   trajectory           ← 链接式：源文件引用（不内嵌帧坐标）；
+//                          嵌入式：帧坐标收进 SceneSnapshot::embeddedTrajectories
+//                          （同一 shared_ptr<Trajectory> 只收一次）
 // =============================================================================
 
 #pragma once
@@ -49,6 +51,12 @@ struct SnapshotSource {
     std::string trajectorySourcePath;
     uint64_t    trajectorySourceSize = 0;
     int64_t     trajectorySourceMtime = 0;
+    // true = 把轨迹帧坐标一起写进快照（嵌入式保存）；false = 只存源文件引用。
+    // 嵌入式时同一个 shared_ptr<Trajectory> 只收集一次（多实例体系共享一条轨迹）。
+    bool embedTrajectories = false;
+    // 场景标注（视图叠加层，v2.3）：由 app 层（Workbench → IoController）提供。
+    // nullptr = 不写标注（旧行为）；persist 侧是纯数据，engine 只做拷贝。
+    const persist::mlscene::Annotations* annotations = nullptr;
 };
 
 persist::mlscene::SceneSnapshot makeSnapshot(const SnapshotSource& in);

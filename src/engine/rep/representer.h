@@ -35,6 +35,10 @@ struct RepContext {
     float dt = 0.0f;
     uint64_t frameIndex = 0;
     uint8_t renderMode = 0;                       // 体系渲染模式（0实心/1线框/2透明/3点）
+    // true = 坐标重放路径：命令序列（含 RenderMode/MaterialBlock 等状态命令）已
+    // 存在于旧命令流，样式此时**只能发射坐标类命令**，否则重放游标失配。样式若
+    // 平时会临时改 RenderMode（如点云），重放时必须跳过该状态命令。
+    bool replay = false;
 };
 
 class Representer {
@@ -57,6 +61,15 @@ public:
     static size_t globalAtomCount(const RepContext&);
     // 配色（主方案 §5.2：元素 CPK / 链 / 残基 / BFactor / 统一）
     static glm::vec4 colorForAtom(const RepContext&, uint32_t globalAtomIndex);
+
+    // 浅色背景（如 --bg white 导出 PNG）时，把"按原子名"里近似白色的氢压暗，
+    // 否则白底白线等于看不见。不影响深色背景的常规显示。
+    static void setLightBackground(bool on);
+
+private:
+    static bool lightBackground_;   // 浅色背景导出时压暗氢，避免白底白线
+    // 原始取色（按 sRGB 语义书写的调色板值）；公开的 colorForAtom 会转成线性。
+    static glm::vec4 colorForAtomSrgb(const RepContext&, uint32_t globalAtomIndex);
 };
 
 } // namespace moleculens::engine

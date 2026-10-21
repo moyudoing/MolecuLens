@@ -24,6 +24,7 @@
 namespace moleculens::engine {
 
 class VulkanDevice;
+struct RenderView;   // 视锥剔除用（定义见 engine/render/renderer.h）
 
 // 共享网格：单位球与单位圆柱的顶点/索引缓冲（引擎启动创建一次常驻）。
 // 两个后端原先各自持有一份同构成员并各自实现一遍创建代码。
@@ -37,18 +38,47 @@ struct SharedMeshes {
     uint32_t cylinderVertices = 0;
     uint32_t cylinderIndices = 0;
 
-    bool create(VulkanDevice& device);
+    // detail：球体细分档（1=80 面 … 4=5120 面）；segments：圆柱截面段数。
+    bool create(VulkanDevice& device, int detail = 3, int segments = 24);
     void destroy();
 };
 
 // 每帧复用的 GPU 缓冲（HOST_VISIBLE；容量按需增长，帧内覆盖写）。
 // 各后端各持一份（实时帧槽位与离屏导出互不干扰）。
+//
+// uploadRevision：缓冲当前内容的来源修订号（命令流 serial）。相机移动、UI 重绘等
+// 不改变几何的帧上，绘制列表与缓冲内容完全一致 → 跳过上传（此前每帧无条件重传
+// 全部实例数据，静止场景也照传）。
 struct FrameGpuBuffers {
     Buffer sphereInst;
     Buffer cylinderInst;
     Buffer lineVerts;
     Buffer meshVerts;
     Buffer meshIdx;
+    uint64_t uploadRevision = UINT64_MAX;   // UINT64_MAX = 尚未上传过任何内容
+
+    // 网格（TriMesh）合并后的绘制段：按渲染模式 0..3 各一段，记录该段在
+    // meshIdx 缓冲里的起始下标与条数、实际使用的管线模式。
+    // 为什么单独缓存：网格是表面/卡通/QuickSurf 的主要载荷（可达数十万顶点），
+    // 此前**每帧**都会把全部网格顶点重新拷贝合并一遍（即使 uploadRevision 未变），
+    // 静止场景在纯 CPU 上白白复制十几 MB。现在合并与烘焙只在内容变化时做一次，
+    // 未变帧直接按缓存的段提交 draw。
+    struct MeshDrawRange {
+        uint32_t firstIndex = 0;
+        uint32_t indexCount = 0;
+        uint8_t  pipeMode = 0;
+        // 该段第一个网格的材质下标（仅透明段使用：透明网格改用**该表示自己的**
+        // 材质参数，而不是固定默认材质 —— 否则 ESP 表面等透明网格的
+        // ambient/specular/shininess 设置无效，观感被默认材质刷亮、发灰）。
+        uint32_t materialIndex = 0;
+    };
+    MeshDrawRange meshRanges[4];
+
+    // 上一次 drawGeometry 实际提交的绘制调用数（ground truth，每帧开头清零）。
+    // 存在的意义：批处理是否生效**必须可观测**。调用数由 computeDrawRuns 的
+    // 分段规则决定（见 draw_list.h），段在每个 (材质, 模式) 变化处断开 ——
+    // md.gro 曾因"每实例一条材质"而达到 ~4084 次/帧。
+    uint32_t drawCalls = 0;
 
     void destroy();
 };
@@ -57,9 +87,12 @@ struct FrameGpuBuffers {
 //
 // 前置：pipelines 的采样数/renderPass 必须与当前渲染通道一致（见 PipelineSet）。
 // 说明：globalSet 为全局 UBO 描述符集（相机/光照/雾）。
+//       listRevision 为 draw 的来源命令流 serial：与 gpu.uploadRevision 相同时
+//       跳过实例/顶点缓冲重传（内容未变）。
 void drawGeometry(VkCommandBuffer cmd, VulkanDevice& device,
                   const PipelineSet& pipelines, const DrawList& draw,
                   FrameGpuBuffers& gpu, const SharedMeshes& meshes,
-                  VkDescriptorSet globalSet);
+                  VkDescriptorSet globalSet, uint64_t listRevision,
+                  const RenderView* view = nullptr);
 
 } // namespace moleculens::engine

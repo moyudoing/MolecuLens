@@ -32,8 +32,11 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 #endif
-    // 静默 spdlog（CLI 默认仅 stderr 错误）
+    // 静默 spdlog（CLI 默认仅 stderr 错误）；MOLECULENS_LOG_LEVEL=debug/info 放宽
     spdlog::set_level(spdlog::level::warn);
+    if (const char* lvl = std::getenv("MOLECULENS_LOG_LEVEL")) {
+        spdlog::set_level(spdlog::level::from_str(lvl));
+    }
 
     CLI::App app{"MolecuLens CLI - 分子结构与轨迹无头工具"};
     app.set_version_flag("--version", std::string("MolecuLens CLI ") + kVersion);
@@ -46,13 +49,18 @@ int main(int argc, char** argv) {
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
-        // 帮助/版本：正常退出（CLI11 自行输出；Version 异常名为 CallForVersion）
-        if (e.get_name() == "Help" || e.get_name() == "HelpAll" ||
-            e.get_name() == "Version" || e.get_name() == "CallForVersion") {
+        // 帮助/版本：正常退出（CLI11 自行输出；Version 异常名为 CallForVersion）。
+        // ⚠ CLI11 的异常名是 CallForHelp / CallForAllHelp / CallForVersion，
+        //   不是 Help/HelpAll —— 此前写成短名，`--help` 落进下面的用法错误分支，
+        //   于是只返回退出码 3、帮助文本一个字都不打印。
+        const std::string& name = e.get_name();
+        if (name == "CallForHelp" || name == "CallForAllHelp" ||
+            name == "CallForVersion" || name == "Help" || name == "HelpAll" ||
+            name == "Version") {
             return app.exit(e);
         }
         // 用法错误（缺子命令/缺必需参数/未知选项）→ 退出码 3（主方案 §11.3）
-        if (e.get_name() == "RequiredError" && argc <= 1) {
+        if (name == "RequiredError" && argc <= 1) {
             // 无参数运行：打印简短用法指引
             std::cout << app.help();
         }

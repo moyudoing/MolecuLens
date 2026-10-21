@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -16,6 +17,8 @@
 #include <volk.h>
 
 #include "spdlog/spdlog.h"
+
+#include "engine/raytrace/ray_tracer.h"   // RtScene / RtAccel（RT 级 LOD 缓存）
 
 namespace moleculens::engine {
 class Renderer;
@@ -81,9 +84,31 @@ public:
                               const float bgOverride[3] = nullptr,
                               int samplesPerPixel = 2);
 
+    // 导出：按轨迹帧逐帧写出 PNG 序列（动画导出，主方案 §12.6）。
+    //   dirPath  = 输出目录（自动创建），文件名 frame_0000.png / frame_0001.png …
+    //   instanceIndex / inFrame / outFrame / step 决定帧范围
+    //   frameCountOut 返回实际写出的帧数
+    // 注意：**必须在主线程调用**——逐帧改写场景坐标段（applyTrajectoryFrame）并
+    // 重建命令流，与主线程的渲染循环共用同一场景/渲染器，跨线程会数据竞争。
+    bool exportAnimationToPng(uint32_t width, uint32_t height,
+                              const std::string& dirPath, uint32_t instanceIndex,
+                              uint64_t inFrame, uint64_t outFrame, uint32_t step,
+                              const float bgOverride[3], int ssaa, int colorDepth,
+                              uint32_t* frameCountOut);
+
     // 视口 RT 预览开关（一.7）：开启后视口用 CPU 光线追踪低分辨率渲染
     void setRayTracePreview(bool on) { rayTracePreview_ = on; markDirty(); }
     [[nodiscard]] bool rayTracePreview() const { return rayTracePreview_; }
+
+    // 分子显示视图叠加层：坐标轴方向 / 比例尺与场景尺寸。可由「显示」面板或
+    // 视口「叠加」按钮分别关闭（用户要求"可选择关闭"）。
+    void setViewOverlay(bool axes, bool scale) {
+        if (showAxes_ != axes || showScaleBar_ != scale) {
+            showAxes_ = axes;
+            showScaleBar_ = scale;
+            markDirty();
+        }
+    }
 
     // 视口 FBO 纹理（ImGui Image 用）
     [[nodiscard]] ImTextureID textureId() const;
@@ -113,6 +138,8 @@ private:
     [[nodiscard]] static uint64_t cameraFingerprint(const engine::OrbitCamera& cam);
 
     void renderRayTracePreview(const ImVec2& size);
+    // 视口叠加：左下坐标轴方向 + 右下比例尺 + 右上场景尺寸（Å）
+    void drawViewOverlay(const ImVec2& imgMin, const ImVec2& imgSize);
     // CPU → GPU 纹理上传（线性 tiling + host-visible + GENERAL 布局，免命令缓冲逐帧拷贝）
     bool ensureRtTexture(uint32_t w, uint32_t h);
     void updateRtTexture(const std::vector<uint8_t>& rgba);
@@ -136,6 +163,18 @@ private:
     bool isDragging_ = false;
     int dragButton_ = -1;
     ImTextureID texture_ = ImTextureID(0);
+    bool showAxes_ = true;
+    bool showScaleBar_ = true;
+
+    // 播放/拖时间轴时的动态细节：坐标版本变化后 350 ms 内用低细分球/柱并跳过
+    // 阴影 pass —— 轨迹播放每帧要重画 6000+ 个原子，高细分网格下会明显掉帧。
+    uint64_t lastCoordsVersion_ = UINT64_MAX;
+    std::chrono::steady_clock::time_point dynamicDetailUntil_{};
+    bool lastDynamicDetail_ = false;
+    // 场景尺寸缓存（按坐标版本失效；避免大体系每帧遍历全部坐标）
+    uint64_t dimsVersion_ = UINT64_MAX;
+    glm::vec3 dimsMin_{0.0f};
+    glm::vec3 dimsMax_{0.0f};
 
     // —— CPU 光线追踪预览 ——
     bool rayTracePreview_ = false;
@@ -147,6 +186,17 @@ private:
     bool rtCoherent_ = true;
     uint32_t rtW_ = 0, rtH_ = 0;
     ImTextureID rtTexture_ = ImTextureID(0);
+
+    // —— RT 级 LOD 状态 ——
+    // 场景侧（RtScene + BVH）按命令流序号缓存：相机移动时只重投射，不重建。
+    // 分辨率按「是否静止」两档：交互中用低分辨率跟手，停手 250 ms 后升级一份
+    // 高清图（spp 也提到 2），下次交互再退回低档。
+    engine::RtScene rtSceneCache_;
+    std::shared_ptr<engine::RtAccel> rtAccelCache_;
+    uint64_t rtCacheSerial_ = UINT64_MAX;
+    bool rtCacheValid_ = false;
+    double rtLastChangeTime_ = 0.0;   // 上次相机/场景变化时刻（ImGui::GetTime）
+    bool rtRefined_ = false;          // 当前纹理是否已是「静止高清」档
 };
 
 } // namespace moleculens::app

@@ -89,13 +89,16 @@ constexpr const char* kStyleNames[static_cast<int>(RepresentationType::Count)] =
     "空间填充",  // 3  Spacefill    —— 范德华半径空间填充
     "卡通",      // 4  Cartoon      —— 蛋白质骨架 6 步风格
     "表面",      // 5  Surface      —— vdW/MC 等值面
-    "标签",      // 6  Label        —— billboard 文字（M2 落地占位）
-    "VDW",       // 7  Vdw          —— 范德华全半径空间填充（不受缩放）
-    "QuickSurf", // 8  QuickSurf    —— 高斯密度等值面
-    "甘草棍",    // 9  Licorice     —— 粗圆柱，无端帽球
-    "管状",      // 10 Tube         —— backbone 平滑管
-    "新卡通",    // 11 NewCartoon   —— 改进卡通（更平滑样条）
-    "丝带",      // 12 Ribbon       —— 薄带状，仅 backbone
+    "VDW",       // 6  Vdw          —— 范德华全半径空间填充（不受缩放）
+    "QuickSurf", // 7  QuickSurf    —— 高斯密度等值面
+    "甘草棍",    // 8  Licorice     —— 粗圆柱，无端帽球
+    "管状",      // 9  Tube         —— backbone 平滑管
+    "新卡通",    // 10 NewCartoon   —— 改进卡通（更平滑样条）
+    "丝带",      // 11 Ribbon       —— 薄带状，仅 backbone
+    "ESP 表面",  // 12 EspSurface   —— 密度等值面 + 静电势逐顶点着色
+    "平板",      // 13 Plate        —— 每个残基/分子一块扁平方板（辅基示意）
+    "菱形",      // 14 Diamond      —— 每个残基/分子一颗八面体宝石
+    "点云",      // 15 DotCloud     —— 每个原子一个点精灵（超大体系）
 };
 
 // 结构类型 × 样式的适用性表（General 全可用；Protein 仅骨架专属样式）
@@ -103,9 +106,11 @@ constexpr const char* kStyleNames[static_cast<int>(RepresentationType::Count)] =
 constexpr bool kStyleSupportsKindTable[static_cast<int>(StyleKind::Count)]
                                        [static_cast<int>(RepresentationType::Count)] = {
     // General（小分子/溶剂/通用）：全部可用
-    {true, true, true, true, true, true, true, true, true, true, true, true, true},
-    // Protein：仅骨架专属（Cartoon=4 / NewCartoon=11 / Tube=10 / Ribbon=12）
-    {false, false, false, false, true, false, false, false, false, false, true, true, true},
+    {true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+     true, true},
+    // Protein：仅骨架专属（Cartoon=4 / Tube=9 / NewCartoon=10 / Ribbon=11）+ 平板/菱形
+    {false, false, false, false, true, false, false, false, false, true, true, true, false,
+     true, true, false},
 };
 
 bool typeIndexValid(RepresentationType t) noexcept {

@@ -49,3 +49,21 @@ imgui.ini.bak
 Thumbs.db
 .DS_Store
 /other/
+
+# —— 文档插图（docs 下必须入库，其余 png 仍视为导出产物）——
+!docs/figs_v2/*.png
+!docs/figs_v2/**/*.png
+
+# —— 本地环境 / 临时缓存（不入库）——
+.venv/
+__pycache__/
+build_agent/
+build_style/
+vcpkg_installed/
+_test/
+.monitor/
+_esp/
+_aclrepair/
+.dsh-progress/
+test_export*
+/软件注册/

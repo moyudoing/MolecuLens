@@ -113,6 +113,32 @@ bool SceneController::removeSystem(uint32_t systemId) {
     return true;
 }
 
+bool SceneController::clearSystemTrajectory(uint32_t systemId) {
+    if (!svc_.scene) {
+        return false;
+    }
+    bool any = false;
+    for (const auto& sys : svc_.scene->systems()) {
+        if (sys.id != systemId) {
+            continue;
+        }
+        for (uint32_t inst : sys.instanceIndices) {
+            if (inst < svc_.scene->instances().size() &&
+                svc_.scene->instances()[inst].trajectory) {
+                svc_.scene->setInstanceTrajectory(inst, nullptr);
+                any = true;
+            }
+        }
+    }
+    if (any) {
+        svc_.scene->setDirty(entity::DIRTY_COORDS);
+        if (svc_.bus) {
+            svc_.bus->publish({EventType::SceneOpened, 0});
+        }
+    }
+    return any;
+}
+
 bool SceneController::setSystemVisible(uint32_t systemId, bool visible) {
     if (!svc_.scene) {
         return false;

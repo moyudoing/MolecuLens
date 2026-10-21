@@ -13,8 +13,14 @@ function(moleculens_add_shader target src out_header)
     get_filename_component(_out_dir "${out_header}" DIRECTORY)
     file(MAKE_DIRECTORY "${_out_dir}")
 
+    # 共享 GLSL 头（global_ubo.glsl / material_shading.glsl）所在目录 = 源文件目录。
+    # 经 GL_GOOGLE_include_directive 支持 #include —— 全局 UBO 布局与光照/雾公式
+    # 收敛为单一定义，10 个着色器不再各自手抄一份 block
+    #（主方案 §12 风险"UBO 字段与 GLSL 布局错位"由此从根上消除）。
+    get_filename_component(_src_dir "${src}" DIRECTORY)
+
     execute_process(
-        COMMAND ${GLSLANG_VALIDATOR} -V ${src} -o ${out_header}.spv
+        COMMAND ${GLSLANG_VALIDATOR} -V -I${_src_dir} ${src} -o ${out_header}.spv
         RESULT_VARIABLE _glsl_result
         OUTPUT_VARIABLE _glsl_out ERROR_VARIABLE _glsl_out)
     if(NOT _glsl_result EQUAL 0)

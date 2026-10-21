@@ -16,6 +16,7 @@
 
 #include "engine/camera/camera.h"
 #include "engine/cmd/cmd.h"
+#include "engine/render/render_parameter.h"   // 材质库（materialPresetIndexByName）
 #include "engine/rep/representation.h"
 #include "engine/serialize/scene_bridge.h"
 #include "entity/element/element.h"
@@ -27,6 +28,9 @@ using namespace moleculens;
 using namespace moleculens::engine;
 
 namespace {
+
+// Steel 在材质表中的下标（按名字查，不用魔法数字 —— 表重排时本用例自动跟随）
+const int kSteelPresetIndex = engine::materialPresetIndexByName("Steel");
 
 // 造一个含"2 原子 + 1 键 + 1 体系 + 1 实例"的场景，原子带残基/链/BFactor
 void buildScene(entity::SceneStructure& sc) {
@@ -97,10 +101,23 @@ RoundTrip saveRound(const entity::SceneStructure& sc, const std::filesystem::pat
     rep.systemSurface = true;
     rep.surfIsovalue = 0.37f;
     rep.surfGridSpacing = 0.28f;
+    // ESP 映射表面参数（v3 新增字段；type 仍取 QuickSurf 以兼容既有断言，
+    // 这里只验证字段本身的持久化往返）
+    rep.espDensityCubePath = "/data/density.cube";
+    rep.espPotentialCubePath = "/data/ESP.cube";
+    rep.espIsovalue = 0.0021f;
+    rep.espVminKcal = -33.5f;
+    rep.espVmaxKcal = 41.25f;
+    rep.espAutoRange = false;
+    rep.espInvert = true;
+    rep.espColormap = 4;
     rep.shininess = 71.0f;
     rep.metallic = 0.65f;
     rep.roughness = 0.21f;
     rep.opacity = 0.44f;
+    // 材质预设：取一个非默认项，验证"名字"持久化后能恢复出同一下标
+    // （存名字而非下标：材质表增删/重排后旧文件不会静默指向别的材质）
+    rep.materialPreset = kSteelPresetIndex;
     rt.repsIn.push_back(rep);
 
     rt.camIn.target = glm::vec3(1.0f, 2.0f, 3.0f);
@@ -222,9 +239,56 @@ TEST_CASE("scene bridge round-trips the domain model", "[serialize][bridge]") {
     REQUIRE(repsOut[0].systemSurface == rt.repsIn[0].systemSurface);
     REQUIRE(repsOut[0].surfIsovalue == Catch::Approx(rt.repsIn[0].surfIsovalue));
     REQUIRE(repsOut[0].surfGridSpacing == Catch::Approx(rt.repsIn[0].surfGridSpacing));
+    // ESP 映射表面参数（v3 字段，.mlscene 可选键，旧文件缺键时取默认值）
+    REQUIRE(repsOut[0].espDensityCubePath == rt.repsIn[0].espDensityCubePath);
+    REQUIRE(repsOut[0].espPotentialCubePath == rt.repsIn[0].espPotentialCubePath);
+    REQUIRE(repsOut[0].espIsovalue == Catch::Approx(rt.repsIn[0].espIsovalue));
+    REQUIRE(repsOut[0].espVminKcal == Catch::Approx(rt.repsIn[0].espVminKcal));
+    REQUIRE(repsOut[0].espVmaxKcal == Catch::Approx(rt.repsIn[0].espVmaxKcal));
+    REQUIRE(repsOut[0].espAutoRange == rt.repsIn[0].espAutoRange);
+    REQUIRE(repsOut[0].espInvert == rt.repsIn[0].espInvert);
+    REQUIRE(repsOut[0].espColormap == rt.repsIn[0].espColormap);
     REQUIRE(repsOut[0].metallic == Catch::Approx(rt.repsIn[0].metallic));
     REQUIRE(repsOut[0].roughness == Catch::Approx(rt.repsIn[0].roughness));
     REQUIRE(repsOut[0].opacity == Catch::Approx(rt.repsIn[0].opacity));
+    // 材质预设：存的是**名字**，载入后应恢复出同一下标（不是"碰巧数值相同"）
+    REQUIRE(kSteelPresetIndex >= 0);
+    REQUIRE(rt.repsIn[0].materialPreset == kSteelPresetIndex);
+    REQUIRE(repsOut[0].materialPreset == kSteelPresetIndex);
+
+    // 回归护栏：材质表本身必须自洽 —— Opaque 与 Representation 的字段默认值逐项
+    // 相同（否则"新表示 = Opaque"这一自洽性被破坏，且默认观感会随表变动而漂移）
+    {
+        const Representation def;
+        const engine::MaterialPreset& op = engine::materialPresetAt(0);
+        REQUIRE(std::string(op.name) == "Opaque");
+        REQUIRE(def.materialPreset == 0);
+        for (int c = 0; c < 3; ++c) {
+            REQUIRE(def.ambient[c] == Catch::Approx(op.ambient[c]));
+            REQUIRE(def.diffuse[c] == Catch::Approx(op.diffuse[c]));
+            REQUIRE(def.specular[c] == Catch::Approx(op.specular[c]));
+        }
+        REQUIRE(def.shininess == Catch::Approx(op.shininess));
+        REQUIRE(def.metallic == Catch::Approx(op.metallic));
+        REQUIRE(def.roughness == Catch::Approx(op.roughness));
+        REQUIRE(def.opacity == Catch::Approx(op.opacity));
+    }
+
+    // 材质库：名字唯一且可按名反查（名字是 .mlscene 的稳定键）；未知名字返回 -1
+    REQUIRE(engine::kMaterialPresetCount >= 23);   // 参考图列出 23 个材质名
+    for (int i = 0; i < engine::kMaterialPresetCount; ++i) {
+        const char* ni = engine::materialPresetAt(i).name;
+        REQUIRE(ni != nullptr);
+        REQUIRE(engine::materialPresetIndexByName(ni) == i);
+        for (int j = i + 1; j < engine::kMaterialPresetCount; ++j) {
+            REQUIRE(std::string(ni) != engine::materialPresetAt(j).name);
+        }
+    }
+    REQUIRE(engine::materialPresetIndexByName("NoSuchMaterial") == -1);
+    REQUIRE(engine::materialPresetIndexByName(nullptr) == -1);
+    // 越界下标回退到 Opaque（调用方无需自行判界）
+    REQUIRE(std::string(engine::materialPresetAt(-5).name) == "Opaque");
+    REQUIRE(std::string(engine::materialPresetAt(9999).name) == "Opaque");
 
     // —— 命令流：字节级往返（v1 曾完全忽略该字段）——
     const auto srcList = rt.cmdIn;
@@ -246,5 +310,118 @@ TEST_CASE("scene bridge records the trajectory source reference", "[serialize][b
     REQUIRE(rt.snap.instances[0].trajectory.sourceMtime == 1700000123);
     REQUIRE(rt.snap.instances[0].trajectory.dt == Catch::Approx(1.5f));
     REQUIRE(rt.snap.instances[0].trajectory.periodic);
+    std::filesystem::remove(path);
+}
+
+// =============================================================================
+// 嵌入式保存：多实例体系共享一条轨迹 → 只内嵌一份，读回后整体系同步播放
+// =============================================================================
+
+TEST_CASE("scene bridge embeds a shared system trajectory once", "[serialize][bridge]") {
+    const auto path =
+        std::filesystem::temp_directory_path() / "moleculens_bridge_embed.mlscene";
+
+    // —— 造一个"2 实例 × 2 原子 = 4 原子"的体系，共享一条 2 帧整体系轨迹 ——
+    entity::SceneStructure src;
+    src.addChain("A");
+    src.addResidue("GLY");
+    auto addStructure = [&](entity::ElementType el, const char* n0, const char* n1) {
+        entity::MoleculeStructure ms;
+        for (const char* nm : {n0, n1}) {
+            ms.elements.push_back(el);
+            entity::Atom at{};
+            at.element = el;
+            at.occupancy = 100;
+            at.residueId = 0;
+            at.chainId = 0;
+            ms.atoms.push_back(at);
+            ms.atomNameIds.push_back(src.strings().intern(nm));
+        }
+        ms.bonds.push_back(entity::Bond{0, 1, 1});
+        return src.registerStructure(ms);
+    };
+    // 两条结构必须可区分（registerStructure 会去重）→ 元素不同
+    const uint32_t s0 = addStructure(entity::ElementType::Carbon, "C1", "C2");
+    const uint32_t s1 = addStructure(entity::ElementType::Oxygen, "O1", "O2");
+    const uint32_t sysId = src.addSystem("共享体系");
+
+    auto traj = std::make_shared<entity::Trajectory>();
+    traj->dt = 3.0f;
+    traj->periodic = true;
+    traj->frames.resize(2);
+    for (int f = 0; f < 2; ++f) {
+        auto& fr = traj->frames[f];
+        for (int a = 0; a < 4; ++a) {
+            fr.positions.push_back(
+                glm::vec3(static_cast<float>(a) + 0.5f * static_cast<float>(f),
+                          2.0f * static_cast<float>(a), 1.0f + static_cast<float>(f)));
+        }
+        fr.box = {40.0f, 0, 0, 0, 40.0f, 0, 0, 0, 40.0f};
+    }
+
+    // 先按导入后的状态建场景：两实例同体系，再统一挂整体系轨迹
+    auto dummy = std::make_shared<entity::Trajectory>();
+    dummy->frames.resize(1);
+    src.addTrajectoryInstance(s0, entity::Transform{}, dummy, sysId, "A", false);
+    src.addTrajectoryInstance(s1, entity::Transform{}, dummy, sysId, "B", false);
+    REQUIRE(src.setSystemTrajectory(sysId, traj));
+    REQUIRE(src.instances()[0].trajAtomOffset == 0u);
+    REQUIRE(src.instances()[1].trajAtomOffset == 2u);
+    src.rebuildCoordsSoA();
+
+    // —— 嵌入式快照：同一 shared_ptr 只内嵌一次 ——
+    SnapshotSource in;
+    in.scene = &src;
+    in.embedTrajectories = true;
+    const auto snap = makeSnapshot(in);
+    REQUIRE(snap.instances.size() == 2u);
+    REQUIRE(snap.embeddedTrajectories.size() == 1u);   // 不是 2 份！
+    REQUIRE(snap.embeddedTrajectories[0].frameCount == 2ull);
+    REQUIRE(snap.embeddedTrajectories[0].atomCount == 4u);
+    REQUIRE(snap.embeddedTrajectories[0].positions.size() == 2u * 4u * 3u);
+    REQUIRE(snap.instances[0].trajectory.mode == "embedded");
+    REQUIRE(snap.instances[0].trajectory.embeddedIndex == 0);
+    REQUIRE(snap.instances[1].trajectory.embeddedIndex == 0);
+    REQUIRE(snap.instances[0].trajectory.trajAtomOffset == 0u);
+    REQUIRE(snap.instances[1].trajectory.trajAtomOffset == 2u);
+
+    // —— 存盘 → 读回 ——
+    persist::mlscene::SaveOptions opts;
+    opts.embedTrajectories = true;
+    REQUIRE(persist::mlscene::MlSceneSerializer::save(snap, path, opts).has_value());
+    auto loaded = persist::mlscene::MlSceneSerializer::load(path);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->embeddedTrajectories.size() == 1u);
+
+    // —— 还原到全新场景：共享对象 + 偏移 + 帧数/坐标 ——
+    entity::SceneStructure dst;
+    RestoreTarget target;
+    target.scene = &dst;
+    applySnapshot(loaded.value(), target);
+
+    REQUIRE(dst.instances().size() == 2u);
+    // 多实例共享：两个实例必须指向**同一条** Trajectory（整体系同步播放的结构保证）
+    REQUIRE(dst.instances()[0].trajectory.get() == dst.instances()[1].trajectory.get());
+    REQUIRE(dst.instances()[0].trajectory != nullptr);
+    REQUIRE(dst.instances()[0].trajectory->frames.size() == 2u);
+    REQUIRE(dst.instances()[0].trajAtomOffset == 0u);
+    REQUIRE(dst.instances()[1].trajAtomOffset == 2u);
+    // 首帧坐标逐值一致：共享对象里保存的是**整体系**帧坐标（4 原子），
+    // 两个实例各自靠 trajAtomOffset 取自己的切片
+    for (size_t k = 0; k < 4; ++k) {
+        REQUIRE(dst.instances()[0].trajectory->frames[0].positions[k] ==
+                traj->frames[0].positions[k]);
+    }
+
+    // 切到第 1 帧：坐标段按各自 trajAtomOffset 取切片（体系同步）
+    REQUIRE(dst.applyTrajectoryFrame(0, 1));
+    const auto& coords = dst.coordsSoA().positions;
+    REQUIRE(coords.size() == 4u);
+    for (size_t k = 0; k < 2; ++k) {
+        REQUIRE(coords[k].x == Catch::Approx(traj->frames[1].positions[k].x));
+        REQUIRE(coords[k].y == Catch::Approx(traj->frames[1].positions[k].y));
+        REQUIRE(coords[k].z == Catch::Approx(traj->frames[1].positions[k].z));
+        REQUIRE(coords[2 + k].x == Catch::Approx(traj->frames[1].positions[2 + k].x));
+    }
     std::filesystem::remove(path);
 }

@@ -5,6 +5,7 @@
 
 add_library(moleculens_engine STATIC
     scheduler/frame_scheduler.h scheduler/frame_scheduler.cpp
+    async/surface_jobs.h async/surface_jobs.cpp
     rep/representation.h rep/representer.h rep/representer.cpp
     style/base_style.h
     style/style_registry.h style/style_registry.cpp
@@ -13,19 +14,26 @@ add_library(moleculens_engine STATIC
     style/stick/stick.h style/stick/stick.cpp
     style/wireframe/wireframe.h style/wireframe/wireframe.cpp
     style/cartoon/cartoon.h style/cartoon/cartoon.cpp
+    style/backbone/backbone_trace.h
     style/licorice/licorice.h style/licorice/licorice.cpp
     style/tube/tube.h style/tube/tube.cpp
     style/ribbon/ribbon.h style/ribbon/ribbon.cpp
     style/newcartoon/newcartoon.h style/newcartoon/newcartoon.cpp
+    style/plate/plate.h style/plate/plate.cpp
+    style/diamond/diamond.h style/diamond/diamond.cpp
+    style/dotcloud/dotcloud.h style/dotcloud/dotcloud.cpp
     style/surface/surface.h style/surface/surface.cpp style/surface/mc_tables.h
     style/quicksurf/quicksurf.h style/quicksurf/quicksurf.cpp
     style/quicksurf/quicksurf_avx2.cpp
+    style/espsurface/esp_surface.h style/espsurface/esp_surface.cpp
     cmd/cmd.h cmd/command_list.cpp
     camera/camera.h camera/camera.cpp
     picking/picking.h picking/picking.cpp
     render/renderer.h render/renderer.cpp render/render_parameter.h
     serialize/scene_bridge.h serialize/scene_bridge.cpp
     export/tessellate/tessellate.h
+    export/overlay/esp_overlay_raster.h
+    export/overlay/text_raster_ttf.h export/overlay/text_raster_ttf.cpp
     export/obj/obj_exporter.h export/obj/obj_exporter.cpp
     export/pov/pov_exporter.h export/pov/pov_exporter.cpp
     export/stl/stl_exporter.h export/stl/stl_exporter.cpp
@@ -38,6 +46,7 @@ add_library(moleculens_engine STATIC
     vulkan/memory/buffer.h vulkan/memory/buffer.cpp vulkan/memory/vma_impl.cpp
     vulkan/pipeline/pipeline.h vulkan/pipeline/pipeline.cpp
     vulkan/renderpass/render_pass.h vulkan/renderpass/render_pass.cpp
+    vulkan/shadow/shadow_map.h vulkan/shadow/shadow_map.cpp
     vulkan/desc/descriptors.h vulkan/desc/descriptors.cpp
     vulkan/realtime/vulkan_renderer.h vulkan/realtime/vulkan_renderer.cpp
     vulkan/offscreen/offscreen_renderer.h vulkan/offscreen/offscreen_renderer.cpp
@@ -46,6 +55,13 @@ target_include_directories(moleculens_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
     ${CMAKE_BINARY_DIR})   # 生成头以 gen/shaders/xxx.h 形式包含
+
+# 导出叠加层的 TTF 文字光栅化复用 imgui 包自带的 imstb_truetype.h（公共领域单头，
+# 纯 CPU、不链接 imgui 运行时）：只需把 imgui 的 include 目录加进来。
+if(TARGET imgui::imgui)
+    target_include_directories(moleculens_engine PRIVATE
+        $<TARGET_PROPERTY:imgui::imgui,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
 
 # Vulkan 函数经 volk 动态加载（主方案 §6.3）；VK_NO_PROTOTYPES 由 volk 要求
 target_compile_definitions(moleculens_engine PUBLIC VK_NO_PROTOTYPES)

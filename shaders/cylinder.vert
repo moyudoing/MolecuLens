@@ -6,18 +6,10 @@
 // =============================================================================
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "global_ubo.glsl"
 
 layout(location = 0) in vec3 aLocalPos;      // 共享单位圆柱顶点
-
-layout(set = 0, binding = 0) uniform GlobalUBO {
-    mat4 viewProj;
-    vec4 cameraPos;
-    vec4 lightDir;
-    vec4 lightColor;
-    vec4 ambient;
-    vec4 fog;
-    vec4 sceneProps;
-} ubo;
 
 // 实例数据（binding 1）：CylinderInst 64B
 layout(location = 1) in vec4  instA;         // 端点 A (xyz, 保留)
@@ -33,9 +25,10 @@ layout(location = 3) out vec4 vPickId;
 layout(location = 4) out float vDist;
 
 void main() {
-    vec3 a = instA.xyz;
-    vec3 b = instB.xyz;
-    float r = instRadius.x;
+    // 全局缩放（sceneProps.x）：端点与半径同乘 → 键随球一起缩放
+    vec3 a = instA.xyz * ubo.sceneProps.x;
+    vec3 b = instB.xyz * ubo.sceneProps.x;
+    float r = instRadius.x * ubo.sceneProps.x;
 
     vec3 axis = b - a;
     float halfLen = length(axis) * 0.5;

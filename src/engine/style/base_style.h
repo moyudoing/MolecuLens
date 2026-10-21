@@ -34,11 +34,14 @@ void drawSurface     (const RepContext&, SceneCommandList&);   // Surface（vdW/
 void drawSystemSurface(const RepContext&, SceneCommandList&);  // Surface·体系级（G5）
 void drawQuickSurf   (const RepContext&, SceneCommandList&);   // QuickSurf（高斯密度面）
 void drawSystemQuickSurf(const RepContext&, SceneCommandList&); // QuickSurf·体系级（G5）
-void drawLabelPlaceholder(const RepContext&, SceneCommandList&); // Label（M2 落地）
 void drawLicorice    (const RepContext&, SceneCommandList&);   // Licorice
 void drawTube        (const RepContext&, SceneCommandList&);   // Tube
 void drawNewCartoon  (const RepContext&, SceneCommandList&);   // NewCartoon
 void drawRibbon      (const RepContext&, SceneCommandList&);   // Ribbon
+void drawEspSurface  (const RepContext&, SceneCommandList&);   // EspSurface（cube 等值面 + ESP 着色）
+void drawPlate       (const RepContext&, SceneCommandList&);   // Plate（每残基/分子一块扁平方板）
+void drawDiamond     (const RepContext&, SceneCommandList&);   // Diamond（每残基/分子一颗八面体宝石）
+void drawDotCloud    (const RepContext&, SceneCommandList&);   // DotCloud（每原子一个点精灵）
 
 } // namespace moleculens::engine
 

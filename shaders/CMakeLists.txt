@@ -7,6 +7,15 @@
 
 include(${CMAKE_SOURCE_DIR}/cmake/shaders.cmake)
 
+# 共享 GLSL 头（经 #include 引入）必须纳入 configure 依赖：
+# 着色器在 **configure 期**编译成 .spv + 内嵌头，而 ${src} 只是各 .vert/.frag ——
+# 改了被 include 的 .glsl 不会触发重新 configure → 内嵌 SPIR-V 陈旧 →
+# 着色器里的 UBO 布局与 C++ 悄悄不一致（"看着没错但渲染结果不对"）。
+# 这与"陈旧 .obj 导致类布局错位"是同一类坑，故显式登记依赖。
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/global_ubo.glsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/material_shading.glsl)
+
 # 清屏测试着色器（M0）
 moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/triangle.vert
                       ${CMAKE_BINARY_DIR}/gen/shaders/triangle_vert.h)
@@ -42,3 +51,6 @@ moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/point.vert
                       ${CMAKE_BINARY_DIR}/gen/shaders/point_vert.h)
 moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/point.frag
                       ${CMAKE_BINARY_DIR}/gen/shaders/point_frag.h)
+# 方向光阴影的深度 pass（片元阶段无输出；顶点阶段复用 sphere/cylinder/mesh.vert）
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/shadow.frag
+                      ${CMAKE_BINARY_DIR}/gen/shaders/shadow_frag.h)

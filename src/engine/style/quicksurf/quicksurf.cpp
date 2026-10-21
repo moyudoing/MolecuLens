@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 // MolecuLens · engine · style/quicksurf/quicksurf.cpp —— QuickSurf 高斯表面实现
 // 规格来源：参考 other/QuickSurf（高斯密度和；radscale/gridspacing/isovalue）
 // 算法：对原子集合计算高斯密度场（含密度梯度），Marching Cubes 抽取 isovalue
@@ -9,12 +9,25 @@
 #include "engine/style/quicksurf/quicksurf.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <thread>
 #include <vector>
 
 #include <glm/glm.hpp>
 
+#include "spdlog/spdlog.h"
+
+#include "engine/async/surface_jobs.h"
 #include "engine/rep/representer.h"
 #include "engine/style/quicksurf/quicksurf.h"
 #include "engine/style/surface/mc_tables.h"
@@ -33,6 +46,31 @@ constexpr int kMaxGridDim = 128;
 // 后端选择状态（Auto = 运行时自动；强制值便于测试/调优）
 QuickSurfBackend g_backend = QuickSurfBackend::Auto;
 int g_actualBackend = static_cast<int>(QuickSurfBackend::Scalar);
+
+// 异步生成开关（进程级；默认关 = 同步生成，见 quicksurf.h 说明）。
+std::atomic<bool> g_asyncEnabled{false};
+
+// —— 整体系表面网格缓存 ——
+// 动机：命令流在**任何**表示变更（含只改材质/透明度/配色）时整条重建，而表面
+// 生成是其中最贵的一步（实测 md.gro 整体系 QuickSurf ~197 ms / 19.8 MB）。拖动
+// 不透明度滑杆本不该重算等值面 —— 缓存键只含几何输入，材质改动直接命中。
+// 带互斥：后台导出线程会与主线程并发进入本函数（见 MolScene::exportToPng）。
+struct SurfaceMeshCache {
+    std::mutex mtx;
+    bool valid = false;
+    uint64_t key = 0;
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    std::vector<TriMeshVertex> verts;
+    std::vector<uint32_t> indices;
+};
+SurfaceMeshCache g_systemMeshCache;
+
+// 发射网格（缓存命中与未命中共用同一出口，避免两条路径的切块/序列化行为漂移）
+void emitQuickSurfMesh(const std::vector<TriMeshVertex>& verts,
+                       const std::vector<uint32_t>& indices, SceneCommandList& out) {
+    out.appendTriMesh(verts, indices);
+}
 
 // 计算网格原点/维度/实际间距（含边距，等值面不被裁剪）
 bool computeGrid(const std::vector<glm::vec3>& centers,
@@ -138,7 +176,12 @@ void computeDensityScalarMT(const float* xyzr, int natoms, const float* colors,
                             float gausslim, const float origin[3], const int dims[3],
                             float* density, float* grad, float* colormap) {
     (void)natoms;
-    const unsigned nthreads = std::max(1u, std::thread::hardware_concurrency());
+    const size_t nvoxTmp = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+    const unsigned hwTmp = std::max(1u, std::thread::hardware_concurrency());
+    // 小网格不值得开线程：每个线程至少 64K 体素（2042 个小分子各 18³ 的场景，
+    // 每次调用新建 16 个线程比计算本身还贵）
+    const unsigned nthreads =
+        std::min(hwTmp, static_cast<unsigned>(std::max<size_t>(1, nvoxTmp / 65536)));
     const size_t nvox = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
     const int span = a1 - a0;
     std::vector<std::vector<float>> dens(nthreads, std::vector<float>(nvox, 0.0f));
@@ -174,11 +217,37 @@ void computeDensityScalarMT(const float* xyzr, int natoms, const float* colors,
     }
 }
 
+// 后端强制（调试/基准）：MOLECULENS_QUICKSURF_BACKEND=auto|scalar|avx2|cuda
+// 只在首次分派时读取一次，之后沿用 g_backend（不覆盖程序里显式调用的
+// quickSurfSetBackend）。
+void applyBackendEnvOnce() {
+    static const bool kApplied = [] {
+        const char* v = std::getenv("MOLECULENS_QUICKSURF_BACKEND");
+        if (!v || !*v) {
+            return true;
+        }
+        std::string s(v);
+        for (auto& ch : s) {
+            ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+        }
+        if (s == "scalar" || s == "1") {
+            quickSurfSetBackend(static_cast<int>(QuickSurfBackend::Scalar));
+        } else if (s == "avx2" || s == "2") {
+            quickSurfSetBackend(static_cast<int>(QuickSurfBackend::Avx2));
+        } else if (s == "cuda" || s == "3") {
+            quickSurfSetBackend(static_cast<int>(QuickSurfBackend::Cuda));
+        }
+        return true;
+    }();
+    (void)kApplied;
+}
+
 // 后端分派（运行时自动选择：CUDA → AVX2 → 标量；或 quickSurfSetBackend 强制）
 void computeDensityDispatch(const float* xyzr, int natoms, const float* colors,
                             float radscale, float gridspacing, float gausslim,
                             const float origin[3], const int dims[3],
                             float* density, float* grad, float* colormap) {
+    applyBackendEnvOnce();
     QuickSurfBackend sel = g_backend;
     if (sel == QuickSurfBackend::Auto) {
 #if defined(MOLECULENS_QUICKSURF_CUDA)
@@ -193,6 +262,8 @@ void computeDensityDispatch(const float* xyzr, int natoms, const float* colors,
         }
     }
     g_actualBackend = static_cast<int>(sel);
+    spdlog::debug("[quicksurf] density backend={} atoms={} grid={}x{}x{}", g_actualBackend,
+                  natoms, dims[0], dims[1], dims[2]);
     switch (sel) {
         case QuickSurfBackend::Cuda:
 #if defined(MOLECULENS_QUICKSURF_CUDA)
@@ -241,7 +312,32 @@ bool extractSurface(const std::vector<float>& density,
     colors.clear();
     indices.clear();
 
-    for (int z = 0; z + 1 < nz; ++z) {
+    // Marching Cubes 按 z 层并行：每个 z 层写自己的局部缓冲，最后按 z 顺序拼接。
+    // 三角形发射顺序与串行版完全一致（同一层内 y、x 递增），因此结果逐位相同。
+    const int nzs = nz - 1;
+    if (nzs <= 0) {
+        return false;
+    }
+    unsigned nt = 1;
+    const size_t nvoxTmp = static_cast<size_t>(nx) * ny * nz;
+    if (nvoxTmp >= 65536) {
+        nt = std::max(1u, std::thread::hardware_concurrency());
+        if (const char* tv = std::getenv("MOLECULENS_QUICKSURF_THREADS")) {
+            const int n = std::atoi(tv);
+            if (n > 0) {
+                nt = std::min(nt, static_cast<unsigned>(n));
+            }
+        }
+        nt = std::min(nt, static_cast<unsigned>(nzs));
+    }
+
+    struct SliceOut {
+        std::vector<glm::vec3> v, n, c;
+        std::vector<uint32_t> idx;   // 层内局部索引（0 起）
+    };
+    std::vector<SliceOut> slices(static_cast<size_t>(nzs));
+
+    auto emitSlice = [&](int z, SliceOut& o) {
         for (int y = 0; y + 1 < ny; ++y) {
             for (int x = 0; x + 1 < nx; ++x) {
                 float val[8];
@@ -285,30 +381,61 @@ bool extractSurface(const std::vector<float>& density,
                     }
                 }
                 for (int t = 0; mc::kTriTable[cubeIndex][t] != -1; t += 3) {
-                    const int v0 = mc::kTriTable[cubeIndex][t];
-                    const int v1 = mc::kTriTable[cubeIndex][t + 1];
-                    const int v2 = mc::kTriTable[cubeIndex][t + 2];
-                    indices.push_back(static_cast<uint32_t>(verts.size()));
-                    verts.push_back(edgePos[v0]);
-                    nrm.push_back(edgeNrm[v0]);
-                    if (hasColor) {
-                        colors.push_back(edgeCol[v0]);
-                    }
-                    indices.push_back(static_cast<uint32_t>(verts.size()));
-                    verts.push_back(edgePos[v1]);
-                    nrm.push_back(edgeNrm[v1]);
-                    if (hasColor) {
-                        colors.push_back(edgeCol[v1]);
-                    }
-                    indices.push_back(static_cast<uint32_t>(verts.size()));
-                    verts.push_back(edgePos[v2]);
-                    nrm.push_back(edgeNrm[v2]);
-                    if (hasColor) {
-                        colors.push_back(edgeCol[v2]);
+                    for (int k = 0; k < 3; ++k) {
+                        const int vi = mc::kTriTable[cubeIndex][t + k];
+                        o.idx.push_back(static_cast<uint32_t>(o.v.size()));
+                        o.v.push_back(edgePos[vi]);
+                        o.n.push_back(edgeNrm[vi]);
+                        if (hasColor) {
+                            o.c.push_back(edgeCol[vi]);
+                        }
                     }
                 }
             }
         }
+    };
+
+    if (nt <= 1) {
+        for (int z = 0; z < nzs; ++z) {
+            emitSlice(z, slices[static_cast<size_t>(z)]);
+        }
+    } else {
+        std::atomic<int> next{0};
+        auto worker = [&]() {
+            for (;;) {
+                const int z = next.fetch_add(1, std::memory_order_relaxed);
+                if (z >= nzs) {
+                    break;
+                }
+                emitSlice(z, slices[static_cast<size_t>(z)]);
+            }
+        };
+        std::vector<std::thread> ths;
+        ths.reserve(nt);
+        for (unsigned i = 0; i < nt; ++i) {
+            ths.emplace_back(worker);
+        }
+        for (auto& t : ths) {
+            t.join();
+        }
+    }
+
+    // 按 z 顺序拼接（局部索引整体平移）
+    uint32_t base = 0;
+    for (auto& s : slices) {
+        if (s.v.empty()) {
+            continue;
+        }
+        indices.reserve(indices.size() + s.idx.size());
+        for (uint32_t i : s.idx) {
+            indices.push_back(base + i);
+        }
+        verts.insert(verts.end(), s.v.begin(), s.v.end());
+        nrm.insert(nrm.end(), s.n.begin(), s.n.end());
+        if (hasColor) {
+            colors.insert(colors.end(), s.c.begin(), s.c.end());
+        }
+        base += static_cast<uint32_t>(s.v.size());
     }
     return !verts.empty() && !indices.empty();
 }
@@ -347,11 +474,21 @@ bool quickSurfMesh(const std::vector<glm::vec3>& centers,
     }
     const float o[3] = {origin.x, origin.y, origin.z};
     const int d[3] = {dims.x, dims.y, dims.z};
+    const auto t0 = std::chrono::steady_clock::now();
     computeDensityDispatch(xyzr.data(), static_cast<int>(centers.size()), nullptr,
                            radscale, sp, kGaussLim, o, d, density.data(), grad.data(),
                            nullptr);
-    return extractSurface(density, grad, colormap, false, isovalue, origin, dims, sp,
-                          out);
+    const auto t1 = std::chrono::steady_clock::now();
+    const bool ok = extractSurface(density, grad, colormap, false, isovalue, origin, dims,
+                                   sp, out);
+    const auto t2 = std::chrono::steady_clock::now();
+    spdlog::info("[quicksurf] atoms={} grid={}x{}x{} sp={} density={:.1f}ms mc={:.1f}ms "
+            "tris={}",
+            centers.size(), dims.x, dims.y, dims.z, sp,
+            std::chrono::duration<double, std::milli>(t1 - t0).count(),
+            std::chrono::duration<double, std::milli>(t2 - t1).count(),
+            out.indices.size() / 3);
+    return ok;
 }
 
 void drawQuickSurf(const RepContext& ctx, SceneCommandList& out) {
@@ -377,7 +514,6 @@ void drawQuickSurf(const RepContext& ctx, SceneCommandList& out) {
     if (centers.empty()) {
         return;
     }
-
     // 密度/梯度/颜色计算（后端自动选择）
     glm::vec3 origin;
     glm::ivec3 dims;
@@ -414,31 +550,97 @@ void drawQuickSurf(const RepContext& ctx, SceneCommandList& out) {
     }
 
     // TriMesh 输出（法线 + 密度加权原子色）
-    TriMeshHeader hdr;
-    hdr.vertexCount = static_cast<uint32_t>(mesh.positions.size());
-    hdr.indexCount = static_cast<uint32_t>(mesh.indices.size());
-    std::vector<uint8_t> payload;
-    payload.reserve(sizeof(TriMeshHeader) +
-                    mesh.positions.size() * sizeof(TriMeshVertex) +
-                    mesh.indices.size() * sizeof(uint32_t));
-    const uint8_t* hdrp = reinterpret_cast<const uint8_t*>(&hdr);
-    payload.insert(payload.end(), hdrp, hdrp + sizeof(TriMeshHeader));
+    // 经 appendTriMesh 发射（按单命令载荷上限自动切块）：整体系 QuickSurf 的
+    // 网格可达数十 MB，单块超限会让命令流在解码时被静默截断。
+    std::vector<TriMeshVertex> verts;
+    verts.resize(mesh.positions.size());
     for (size_t i = 0; i < mesh.positions.size(); ++i) {
-        TriMeshVertex tv;
-        tv.pos = glm::vec4(mesh.positions[i], 0.0f);
-        tv.normal = glm::vec4(mesh.normals[i], 0.0f);
+        verts[i].pos = glm::vec4(mesh.positions[i], 0.0f);
+        verts[i].normal = glm::vec4(mesh.normals[i], 0.0f);
         // 密度加权原子色（QuickSurf 体积色）；无则浅蓝
-        const glm::vec3 c = i < mesh.colors.size() ? mesh.colors[i] : glm::vec3(0.55f, 0.75f, 0.95f);
-        tv.color = glm::vec4(glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
-        const uint8_t* vp = reinterpret_cast<const uint8_t*>(&tv);
-        payload.insert(payload.end(), vp, vp + sizeof(TriMeshVertex));
+        const glm::vec3 c =
+            i < mesh.colors.size() ? mesh.colors[i] : glm::vec3(0.55f, 0.75f, 0.95f);
+        verts[i].color = glm::vec4(glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
     }
-    const uint8_t* ip = reinterpret_cast<const uint8_t*>(mesh.indices.data());
-    payload.insert(payload.end(), ip, ip + mesh.indices.size() * sizeof(uint32_t));
-    while (payload.size() % 16 != 0) {
-        payload.push_back(0);
+    out.appendTriMesh(verts, mesh.indices);
+}
+
+// —— 整体系 QuickSurf：计算输入与纯 CPU 计算（可安全跨线程）——
+// 任务体只持有此结构（纯数值拷贝），不引用 RepContext/场景/命令流 —— 那些都属于
+// 主线程，跨线程访问会数据竞争。工作线程算完把结果写进带互斥的网格缓存。
+struct SystemQuickSurfInput {
+    std::vector<float> xyzr;        // 每原子 4 float：cx, cy, cz, radius（Å）
+    std::vector<float> flatColors;  // 每原子 3 float：密度加权原子色
+    glm::vec3 origin{0.0f};         // 网格原点（Å）
+    glm::ivec3 dims{0};             // 网格维度
+    float spacing = 0.0f;           // 实际网格间距（Å）
+    float isovalue = 0.0f;          // 等值面阈值
+};
+
+// 纯 CPU：高斯密度场 → Marching Cubes → TriMesh 顶点/索引。
+// 线程安全：只读输入、只写局部缓冲，不触碰任何全局可变状态 → 可在工作线程调用。
+bool buildSystemQuickSurfMesh(const SystemQuickSurfInput& in,
+                              std::vector<TriMeshVertex>& verts,
+                              std::vector<uint32_t>& indices) {
+    const int atomCount = static_cast<int>(in.xyzr.size() / 4);
+    const size_t nvox = static_cast<size_t>(in.dims.x) * in.dims.y * in.dims.z;
+    if (atomCount <= 0 || nvox == 0) {
+        return false;
     }
-    out.append(Cmd::TriMesh, payload.data(), static_cast<uint32_t>(payload.size()));
+    std::vector<float> density(nvox, 0.0f);
+    std::vector<float> grad(nvox * 3, 0.0f);
+    std::vector<float> colormap(nvox * 3, 0.0f);
+    const float o[3] = {in.origin.x, in.origin.y, in.origin.z};
+    const int d[3] = {in.dims.x, in.dims.y, in.dims.z};
+    const auto t0 = std::chrono::steady_clock::now();
+    computeDensityDispatch(in.xyzr.data(), atomCount, in.flatColors.data(), 1.0f,
+                           in.spacing, kGaussLim, o, d, density.data(), grad.data(),
+                           colormap.data());
+    const auto t1 = std::chrono::steady_clock::now();
+
+    QuickSurfMesh mesh;
+    if (!extractSurface(density, grad, colormap, true, in.isovalue, in.origin, in.dims,
+                        in.spacing, mesh)) {
+        return false;
+    }
+    const auto t2 = std::chrono::steady_clock::now();
+    const auto ms = [](auto a, auto b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    spdlog::info("[quicksurf] system atoms={} grid={}x{}x{} sp={} backend={} "
+                 "density={:.1f}ms mc={:.1f}ms tris={}",
+                 atomCount, d[0], d[1], d[2], in.spacing, g_actualBackend,
+                 ms(t0, t1), ms(t1, t2), mesh.indices.size() / 3);
+    verts.resize(mesh.positions.size());
+    for (size_t i = 0; i < mesh.positions.size(); ++i) {
+        verts[i].pos = glm::vec4(mesh.positions[i], 0.0f);
+        verts[i].normal = glm::vec4(mesh.normals[i], 0.0f);
+        const glm::vec3 c = i < mesh.colors.size() ? mesh.colors[i]
+                                                   : glm::vec3(0.55f, 0.75f, 0.95f);
+        verts[i].color = glm::vec4(glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
+    }
+    indices = std::move(mesh.indices);
+    return !verts.empty() && !indices.empty();
+}
+
+// 写入整体系网格缓存（主线程与工作线程共用；内部加锁，调用方无需持锁）
+void storeSystemQuickSurfMesh(uint64_t key, std::vector<TriMeshVertex> verts,
+                              std::vector<uint32_t> indices) {
+    std::lock_guard<std::mutex> lk(g_systemMeshCache.mtx);
+    g_systemMeshCache.verts = std::move(verts);
+    g_systemMeshCache.indices = std::move(indices);
+    g_systemMeshCache.key = key;
+    g_systemMeshCache.valid = true;
+    ++g_systemMeshCache.misses;
+}
+
+// —— 异步生成开关（见 quicksurf.h）——
+void quickSurfSetAsyncEnabled(bool enabled) {
+    g_asyncEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+bool quickSurfAsyncEnabled() {
+    return g_asyncEnabled.load(std::memory_order_relaxed);
 }
 
 // 体系级 QuickSurf（G5）：聚合全部可见实例原子（含溶剂分子）为一个整体高斯密度表面
@@ -492,59 +694,79 @@ void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out) {
     if (!computeGrid(centers, radii, 1.0f, ctx.rep->surfGridSpacing, origin, dims, sp)) {
         return;
     }
-    const size_t nvox = static_cast<size_t>(dims.x) * dims.y * dims.z;
-    std::vector<float> density(nvox, 0.0f);
-    std::vector<float> grad(nvox * 3, 0.0f);
-    std::vector<float> colormap(nvox * 3, 0.0f);
-    std::vector<float> xyzr(centers.size() * 4);
-    std::vector<float> flatColors(colors.size() * 3);
-    for (size_t i = 0; i < centers.size(); ++i) {
-        xyzr[i * 4 + 0] = centers[i].x;
-        xyzr[i * 4 + 1] = centers[i].y;
-        xyzr[i * 4 + 2] = centers[i].z;
-        xyzr[i * 4 + 3] = radii[i];
-        flatColors[i * 3 + 0] = colors[i].x;
-        flatColors[i * 3 + 1] = colors[i].y;
-        flatColors[i * 3 + 2] = colors[i].z;
-    }
-    const float o[3] = {origin.x, origin.y, origin.z};
-    const int d[3] = {dims.x, dims.y, dims.z};
-    computeDensityDispatch(xyzr.data(), static_cast<int>(centers.size()),
-                           flatColors.data(), 1.0f, sp, kGaussLim, o, d,
-                           density.data(), grad.data(), colormap.data());
+    // —— 几何指纹 → 网格缓存 ——
+    // 键只含**影响几何**的输入；材质/透明度/配色方案等改动不入键，故拖动不透明度
+    // 滑杆时不会重算表面（实测整体系 QuickSurf 单次 ~197 ms，逐帧重算会让界面卡死）。
+    // 必须带互斥：后台导出线程（MolScene::exportToPng）会与主线程并发调用本函数。
+    uint64_t fp = 1469598103934665603ull;
+    auto mix = [&fp](const void* data, size_t bytes) {
+        const auto* p = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < bytes; ++i) {
+            fp ^= p[i];
+            fp *= 1099511628211ull;
+        }
+    };
+    mix(&ctx.rep->surfGridSpacing, sizeof(float));
+    mix(&ctx.rep->surfIsovalue, sizeof(float));
+    mix(&ctx.rep->radiusScale, sizeof(float));
+    mix(&dims, sizeof(dims));
+    mix(&sp, sizeof(float));
+    mix(centers.data(), centers.size() * sizeof(glm::vec3));
+    mix(radii.data(), radii.size() * sizeof(float));
+    mix(colors.data(), colors.size() * sizeof(glm::vec3));
 
-    QuickSurfMesh mesh;
-    if (!extractSurface(density, grad, colormap, true, ctx.rep->surfIsovalue, origin,
-                        dims, sp, mesh)) {
+    {
+        std::lock_guard<std::mutex> lk(g_systemMeshCache.mtx);
+        if (g_systemMeshCache.valid && g_systemMeshCache.key == fp) {
+            g_systemMeshCache.hits++;
+            emitQuickSurfMesh(g_systemMeshCache.verts, g_systemMeshCache.indices, out);
+            return;
+        }
+    }
+
+    // 组装可跨线程的计算输入（纯数值拷贝，不引用 ctx/scene/命令流）。
+    SystemQuickSurfInput in;
+    in.xyzr.resize(centers.size() * 4);
+    in.flatColors.resize(colors.size() * 3);
+    for (size_t i = 0; i < centers.size(); ++i) {
+        in.xyzr[i * 4 + 0] = centers[i].x;
+        in.xyzr[i * 4 + 1] = centers[i].y;
+        in.xyzr[i * 4 + 2] = centers[i].z;
+        in.xyzr[i * 4 + 3] = radii[i];
+        in.flatColors[i * 3 + 0] = colors[i].x;
+        in.flatColors[i * 3 + 1] = colors[i].y;
+        in.flatColors[i * 3 + 2] = colors[i].z;
+    }
+    in.origin = origin;
+    in.dims = dims;
+    in.spacing = sp;
+    in.isovalue = ctx.rep->surfIsovalue;
+
+    // —— 异步路径（GUI 主线程）——
+    // 缓存未命中 → 提交后台生成并立即返回：本帧不发射该表面，Renderer 检测到
+    // "有任务在跑"后保留旧命令流（旧画面继续显示）；任务完成 → 主线程下一次重建
+    // 时命中上面的缓存 → 表面一次换上。主线程从此不再阻塞 ~197 ms。
+    if (quickSurfAsyncEnabled()) {
+        auto input = std::make_shared<SystemQuickSurfInput>(std::move(in));
+        async::submitSurfaceJob(fp, [input, fp]() {
+            std::vector<TriMeshVertex> verts;
+            std::vector<uint32_t> indices;
+            if (buildSystemQuickSurfMesh(*input, verts, indices)) {
+                storeSystemQuickSurfMesh(fp, std::move(verts), std::move(indices));
+            }
+        });
         return;
     }
 
-    // TriMesh 输出（法线 + 密度加权原子色，与 drawQuickSurf 一致）
-    TriMeshHeader hdr;
-    hdr.vertexCount = static_cast<uint32_t>(mesh.positions.size());
-    hdr.indexCount = static_cast<uint32_t>(mesh.indices.size());
-    std::vector<uint8_t> payload;
-    payload.reserve(sizeof(TriMeshHeader) +
-                    mesh.positions.size() * sizeof(TriMeshVertex) +
-                    mesh.indices.size() * sizeof(uint32_t));
-    const uint8_t* hdrp = reinterpret_cast<const uint8_t*>(&hdr);
-    payload.insert(payload.end(), hdrp, hdrp + sizeof(TriMeshHeader));
-    for (size_t i = 0; i < mesh.positions.size(); ++i) {
-        TriMeshVertex tv;
-        tv.pos = glm::vec4(mesh.positions[i], 0.0f);
-        tv.normal = glm::vec4(mesh.normals[i], 0.0f);
-        const glm::vec3 c = i < mesh.colors.size() ? mesh.colors[i]
-                                                   : glm::vec3(0.55f, 0.75f, 0.95f);
-        tv.color = glm::vec4(glm::clamp(c, glm::vec3(0.0f), glm::vec3(1.0f)), 1.0f);
-        const uint8_t* vp = reinterpret_cast<const uint8_t*>(&tv);
-        payload.insert(payload.end(), vp, vp + sizeof(TriMeshVertex));
+    // —— 同步路径（CLI / 导出线程 / 单元测试 / Renderer 关闭异步时）——
+    std::vector<TriMeshVertex> verts;
+    std::vector<uint32_t> indices;
+    if (!buildSystemQuickSurfMesh(in, verts, indices)) {
+        return;
     }
-    const uint8_t* ip = reinterpret_cast<const uint8_t*>(mesh.indices.data());
-    payload.insert(payload.end(), ip, ip + mesh.indices.size() * sizeof(uint32_t));
-    while (payload.size() % 16 != 0) {
-        payload.push_back(0);
-    }
-    out.append(Cmd::TriMesh, payload.data(), static_cast<uint32_t>(payload.size()));
+    // 写入缓存（供材质/配色等**不影响几何**的改动命中，省掉整次密度场 + MC）
+    storeSystemQuickSurfMesh(fp, verts, indices);
+    emitQuickSurfMesh(verts, indices, out);
 }
 
 } // namespace moleculens::engine

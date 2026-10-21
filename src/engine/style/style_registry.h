@@ -37,13 +37,16 @@ inline constexpr StyleDrawFn kStyleStaticTable[static_cast<int>(RepresentationTy
     drawSpacefill,         // 3  Spacefill    —— 空间填充（VdW）
     drawCartoon,           // 4  Cartoon      —— 卡通（6 步蛋白质风格）
     drawSurface,           // 5  Surface      —— vdW/MC 等值面
-    drawLabelPlaceholder,  // 6  Label        —— 标签（M2 落地占位）
-    drawVdw,               // 7  Vdw          —— 范德华全半径空间填充
-    drawQuickSurf,         // 8  QuickSurf    —— 高斯密度等值面
-    drawLicorice,          // 9  Licorice     —— 甘草棍（粗圆柱，无端帽球）
-    drawTube,              // 10 Tube         —— 管状（backbone 平滑管）
-    drawNewCartoon,        // 11 NewCartoon   —— 改进卡通（更平滑样条）
-    drawRibbon,            // 12 Ribbon       —— 丝带（薄带状，仅 backbone）
+    drawVdw,               // 6  Vdw          —— 范德华全半径空间填充
+    drawQuickSurf,         // 7  QuickSurf    —— 高斯密度等值面
+    drawLicorice,          // 8  Licorice     —— 甘草棍（粗圆柱，无端帽球）
+    drawTube,              // 9  Tube         —— 管状（backbone 平滑管）
+    drawNewCartoon,        // 10 NewCartoon   —— 改进卡通（更平滑样条）
+    drawRibbon,            // 11 Ribbon       —— 丝带（薄带状，仅 backbone）
+    drawEspSurface,        // 12 EspSurface   —— ESP 映射表面（密度等值面 + 电势着色）
+    drawPlate,             // 13 Plate        —— 平板（每残基/分子一块扁平方板）
+    drawDiamond,           // 14 Diamond      —— 菱形（每残基/分子一颗八面体宝石）
+    drawDotCloud,          // 15 DotCloud     —— 点云（每原子一个点精灵）
 };
 
 // 编译期按类型查询：直接取静态表对应槽位；未注册/越界返回 nullptr（不改动表）。

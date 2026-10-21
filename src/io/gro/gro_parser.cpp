@@ -194,13 +194,15 @@ Result<ParseResult> GroParser::parse(const std::filesystem::path& path,
         chainMap.emplace(name, id);
         return id;
     };
-    auto residueIdFor = [&](const std::string& name) -> int32_t {
-        auto it = residueMap.find(name);
+    // 残基按"每分子一个实例"分配：GRO 没有真残基概念，若按名字去重，
+    // md.gro 的 2032 个 SOL 会共用同一个 residueId → "按残基"配色整片同色。
+    auto residueIdForInstance = [&](const std::string& key, const std::string& name) -> int32_t {
+        auto it = residueMap.find(key);
         if (it != residueMap.end()) {
             return it->second;
         }
         const int32_t id = scene->addResidue(name.empty() ? " " : name);
-        residueMap.emplace(name, id);
+        residueMap.emplace(key, id);
         return id;
     };
 
@@ -308,7 +310,8 @@ Result<ParseResult> GroParser::parse(const std::filesystem::path& path,
         std::vector<uint32_t> atomNameIds;
         std::vector<glm::vec3> positions;
         std::vector<glm::vec3> velocities;
-        const int32_t rid = residueIdFor(mol.resName);
+        const int32_t rid = residueIdForInstance(
+            mol.resName + "#" + std::to_string(moleculeCount), mol.resName);
         const int32_t cid = chainIdFor(mol.resName);
         for (const auto& rec : mol.atoms) {
             // 元素解析（GRO 原子名 → 元素）：正确距离判键的前提。GRO 名如 OW/HW/NA/CL/C05
@@ -327,6 +330,13 @@ Result<ParseResult> GroParser::parse(const std::filesystem::path& path,
             if (rec.hasVel) {
                 velocities.push_back(rec.vel);
             }
+        }
+
+        // 补齐跨盒子边界的分子（pbc mol / unwrap）：判键用最小镜像是正确的，但
+        // **渲染**按原始坐标连键 —— 被拆开的分子会画成一根接近盒长的长棍（实测
+        // md.gro 有 20 根、盒长 40.28 Å）。必须在判键与渲染之前把分子拉成连续几何。
+        if (usePbc) {
+            unwrapAroundFirst(positions.data(), positions.size(), box);
         }
 
         // 分子内键（PBC 最小镜像，仅本分子原子，无跨分子假键）
@@ -375,22 +385,21 @@ Result<ParseResult> GroParser::parse(const std::filesystem::path& path,
     scene->setDirty(DIRTY_ALL);
     scene->bumpSerial();
 
+    // 原子/键总数必须按**实例**累加，不能遍历 structures()：结构池按 StructureKey
+    // 去重，md.gro 的 2032 个水分子只共享一个结构，遍历池子会报成 210 原子
+    // （实际 6452），日志与文件严重不符、误导排查。
+    size_t totalAtoms = 0;
+    size_t totalBonds = 0;
+    for (const auto& inst : scene->instances()) {
+        if (inst.structureIndex >= scene->structures().size()) {
+            continue;
+        }
+        const auto& ms = scene->structures()[inst.structureIndex];
+        totalAtoms += ms.elements.size();
+        totalBonds += ms.bonds.size();
+    }
     spdlog::info("[io] GRO loaded: {} molecules ({} solvent), {} atoms, {} bonds from {}",
-                 moleculeCount, solventCount,
-                 [&]() {
-                     size_t s = 0;
-                     for (const auto& ms : scene->structures()) {
-                         s += ms.elements.size();
-                     }
-                     return s;
-                 }(),
-                 [&]() {
-                     size_t s = 0;
-                     for (const auto& ms : scene->structures()) {
-                         s += ms.bonds.size();
-                     }
-                     return s;
-                 }(),
+                 moleculeCount, solventCount, totalAtoms, totalBonds,
                  path.filename().string());
     return result;
 }

@@ -6,6 +6,7 @@
 //           仅列出平铺分子且删除为空桩。
 // =============================================================================
 
+#include "app/i18n/language.h"
 #include "app/view/tools/mol_list/mol_list_tool.h"
 
 #include <algorithm>
@@ -57,13 +58,13 @@ void drawExpandArrow(ImDrawList* dl, ImVec2 center, float size, bool expanded) {
 
 void MolListTool::render(DataManager* dm, MolScene* scene) {
     if (!dm || !sceneCtl_) {
-        ImGui::TextDisabled("控制器未就绪");
+        ImGui::TextDisabled(tr("控制器未就绪"));
         return;
     }
     const size_t sysCount = dm->systemCount();
     if (sysCount == 0) {
-        ImGui::TextDisabled("暂无体系（Ctrl+O 打开 PDB/GRO）");
-        if (ImGui::Button("+ 新建体系")) {
+        ImGui::TextDisabled(tr("暂无体系（Ctrl+O 打开 PDB/GRO）"));
+        if (ImGui::Button(tr("+ 新建体系"))) {
             sceneCtl_->addSystem("");
         }
         return;
@@ -80,7 +81,7 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
         expandedSystem_ = SIZE_MAX;
     }
 
-    if (ImGui::Button("+ 新建体系")) {
+    if (ImGui::Button(tr("+ 新建体系"))) {
         sceneCtl_->addSystem("");
         selectedSystem_ = sysCount;   // 新体系在末尾（下一帧 clamp）
         selectedInstance_ = -1;
@@ -119,16 +120,16 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
         }
         // 体系右键：重命名 / 定位 / 删除
         if (ImGui::BeginPopupContextItem("sys_ctx")) {
-            if (ImGui::MenuItem("重命名")) {
+            if (ImGui::MenuItem(tr("重命名"))) {
                 renameSystemIndex_ = static_cast<int>(si);
                 std::snprintf(renameBuf_, sizeof(renameBuf_), "%s", name.c_str());
             }
-            if (ImGui::MenuItem("体系定位到原点")) {
+            if (ImGui::MenuItem(tr("体系定位到原点"))) {
                 sceneCtl_->setSystemPosition(sysId, glm::vec3(0.0f));
             }
             // 体系独立渲染模式（实心/线框/透明/点；互不影响）
-            if (ImGui::BeginMenu("渲染模式")) {
-                static const char* modeNames[] = {"实心", "线框", "透明", "点"};
+            if (ImGui::BeginMenu(tr("渲染模式"))) {
+                static const char* modeNames[] = {tr("实心"), tr("线框"), tr("透明"), tr("点")};
                 int curMode = 0;
                 if (const auto* scp = scene ? scene->scene() : nullptr) {
                     if (si < scp->systems().size()) {
@@ -143,7 +144,7 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
                 ImGui::EndMenu();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("删除体系")) {
+            if (ImGui::MenuItem(tr("删除体系"))) {
                 spdlog::info("[ui] 删除体系 {}", name);
                 sceneCtl_->removeSystem(sysId);
                 if (selectedSystem_ >= si && selectedSystem_ > 0) {
@@ -170,7 +171,7 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
             ImGui::Indent();
             const size_t mc = dm->systemMemberCount(si);
             if (mc == 0) {
-                ImGui::TextDisabled("（空体系）");
+                ImGui::TextDisabled(tr("（空体系）"));
             }
             // 按 (structureIndex) 聚合：同一体系内相同原子结构合并显示为一条带计数项
             struct Group { uint32_t structureIndex = 0; uint32_t firstInst = 0; size_t count = 0; };
@@ -216,11 +217,11 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
                 }
                 // 分子/组右键：定位 / 删除（组删除全部）/ 跨组移交（组移交全部）
                 if (ImGui::BeginPopupContextItem("mol_ctx")) {
-                    if (ImGui::MenuItem("定位到原点")) {
+                    if (ImGui::MenuItem(tr("定位到原点"))) {
                         sceneCtl_->setInstancePosition(inst, glm::vec3(0.0f));
                     }
                     if (groups[gi].count > 1) {
-                        if (ImGui::MenuItem("删除全部")) {
+                        if (ImGui::MenuItem(tr("删除全部"))) {
                             // 删除该结构在本体系内的全部实例；自后向前删，避免下标失效
                             const auto* sc = scene ? scene->scene() : nullptr;
                             const size_t cc = dm->systemMemberCount(si);
@@ -237,13 +238,13 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
                             for (uint32_t v : victims) sceneCtl_->removeInstance(v);
                             selectedInstance_ = -1;
                         }
-                    } else if (ImGui::MenuItem("删除")) {
+                    } else if (ImGui::MenuItem(tr("删除"))) {
                         spdlog::info("[ui] 删除分子 {}", inst);
                         sceneCtl_->removeInstance(inst);
                         selectedInstance_ = -1;
                     }
                     ImGui::Separator();
-                    if (ImGui::BeginMenu("移动到体系")) {
+                    if (ImGui::BeginMenu(tr("移动到体系"))) {
                         for (size_t ts = 0; ts < sysCount; ++ts) {
                             if (ts == si) continue;
                             std::string tn = displayName(dm->systemName(ts), "system", ts);
@@ -267,7 +268,7 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
                                 }
                             }
                         }
-                        if (ImGui::MenuItem("新建体系并移动")) {
+                        if (ImGui::MenuItem(tr("新建体系并移动"))) {
                             const uint32_t nid = sceneCtl_->addSystem("");
                             if (groups[gi].count > 1) {
                                 const auto* scp4_ = scene ? scene->scene() : nullptr;
@@ -308,24 +309,24 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
         const uint32_t sysId = dm->systemId(selectedSystem_);
         const uint32_t si2 = sc->systemIndexById(sysId);
         if (si2 != UINT32_MAX) {
-            UITheme::sectionHeader("体系位置");
+            UITheme::sectionHeader(tr("体系位置"));
             glm::vec3 pos = sc->systems()[si2].transform.translation;
-            if (ImGui::DragFloat3("平移", &pos.x, 0.5f)) {
+            if (ImGui::DragFloat3(tr("平移"), &pos.x, 0.5f)) {
                 sceneCtl_->setSystemPosition(sysId, pos);
             }
-            if (UITheme::primaryButton("体系定位到原点")) {
+            if (UITheme::primaryButton(tr("体系定位到原点"))) {
                 sceneCtl_->setSystemPosition(sysId, glm::vec3(0.0f));
             }
         }
     }
     if (selectedInstance_ >= 0 &&
         static_cast<size_t>(selectedInstance_) < sc->instances().size()) {
-        UITheme::sectionHeader("分子位置");
+        UITheme::sectionHeader(tr("分子位置"));
         glm::vec3 pos = sc->instances()[selectedInstance_].transform.translation;
-        if (ImGui::DragFloat3("平移", &pos.x, 0.5f)) {
+        if (ImGui::DragFloat3(tr("平移"), &pos.x, 0.5f)) {
             sceneCtl_->setInstancePosition(static_cast<uint32_t>(selectedInstance_), pos);
         }
-        if (UITheme::primaryButton("分子定位到原点")) {
+        if (UITheme::primaryButton(tr("分子定位到原点"))) {
             sceneCtl_->setInstancePosition(static_cast<uint32_t>(selectedInstance_),
                                            glm::vec3(0.0f));
         }

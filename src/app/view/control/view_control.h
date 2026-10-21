@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <GLFW/glfw3.h>
@@ -17,10 +18,13 @@
 #include <volk.h>             // VkCommandBuffer（renderImGuiUi 静态回调签名）
 
 #include "app/data/log_buffer.h"   // LogRecord（日志面板快照成员，完整类型）
+#include "app/view/chrome/window_chrome.h"      // MaximizeState（成员，完整类型）
 #include "app/view/container/main_view.h"
-#include "app/view/timeline/time_axis.h"   // TimeAxis 值成员（完整类型）
+#include "app/view/overlay/loading_overlay.h"   // LoadingState（成员，完整类型）
+#include "app/view/timeline/time_axis.h"        // TimeAxis 值成员（完整类型）
 #include "app/view/tool/tool_registry.h"
 #include "app/view/viewport/mol_scene.h"
+#include "app/workbench/workbench.h"
 
 namespace moleculens::engine {
 class Renderer;
@@ -38,6 +42,7 @@ class DataManager;
 class MolListTool;
 class StylesTool;
 class MaterialTool;
+class RepsTool;
 class ExportImgTool;
 class PaintingTool;
 class TimeAxis;
@@ -49,15 +54,10 @@ class RenderController;
 class RepresentationController;
 class CameraController;
 
-// 加载遮罩状态机（主方案 §7.5）
-enum class LoadingStage { Queued, ReadingFile, AnalyzingBonds, UploadingGPU, Done, Failed };
-struct LoadingState {
-    LoadingStage stage = LoadingStage::Done;
-    std::string  fileName;
-    uint64_t     fileSize = 0;
-    float        progress = -1.0f;      // <0 表示不确定进度
-    int          delayFrames = 0;       // 完成/失败后的关闭倒计时
-};
+// 加载遮罩状态机已抽到 app/view/overlay/loading_overlay.h（本文件 include 之）；
+// 保留别名以免既有调用点（Application/IoController）改动。
+using LoadingStage = overlay::LoadingStage;
+using LoadingState = overlay::LoadingState;
 
 class ViewControl {
 public:
@@ -88,6 +88,10 @@ public:
     // 窗口控制（自绘标题栏，主方案 §7.3）
     void toggleMaximize();
 
+    // 启动时待导入的轨迹（命令行给出"结构文件 + 轨迹文件"时用）。
+    // 必须延迟：结构解析是异步的，立即导入会因为没有实例可挂载而失败。
+    void setPendingTrajectory(std::string path) { pendingTrajectory_ = std::move(path); }
+
     [[nodiscard]] GLFWwindow* window() const { return window_; }
     [[nodiscard]] bool windowShouldClose() const { return windowShouldClose_; }
     MolScene& molScene() { return molScene_; }
@@ -95,8 +99,8 @@ public:
     ToolRegistry& tools() { return tools_; }
 
     // 控制器服务注入（Application 装配）
-    void svcTimeline(TimelineController* ctl) { timelineCtl_ = ctl; }
-    void svcIo(IoController* ctl) { ioCtl_ = ctl; }
+    void svcTimeline(TimelineController* ctl);   // 定义在 cpp（需 RepsTool 完整类型）
+    void svcIo(IoController* ctl);               // 定义在 cpp（IoController 注入 RepsTool）
     void svcSelection(SelectionController* ctl) { selectionCtl_ = ctl; }
     void svcScene(SceneController* ctl);
     void svcRender(RenderController* ctl);
@@ -116,25 +120,46 @@ public:
     static std::string saveFileDialogEx(const char* defaultName, const char* filter,
                                         const char* defExt);
 
+    // 通用"打开文件"：filter 为 Win32 过滤器串（同 saveFileDialogEx），defExt 为默认
+    // 扩展名（可为 nullptr）。返回用户选择的完整路径；空串 = 用户取消。
+    // 用途：ESP 参数面板选择 density / ESP cube 文件。
+    static std::string openFileDialogEx(const char* filter, const char* defExt);
+
 private:
     bool createWindow();
     bool initImGuiBackends();
     static void newFrame(float dt);
     void render();                          // 菜单 + DockSpace + 所有面板 + 遮罩
-    void renderMainMenuBar();               // 自绘标题栏（主方案 §7.3）
+    void renderMainMenuBar();
+    void initWorkbench();               // 自绘标题栏（主方案 §7.3）
     void setupDocking();                    // Dock 布局（主方案 §7.4）
     void renderLoadingOverlay();            // 加载遮罩（主方案 §7.5）
     [[nodiscard]] bool windowIsMaximized() const;         // 真实窗口最大化状态（Win32 查询）
 
+    // 帧时间观测（性能）：记录每帧实际耗时，每 kFrameStatsPeriodSec 秒打一条
+    // 分布日志（avg/p50/p95/p99/max 与最低 FPS）。
+    // 为什么需要它：moleculens_bench 测的是**引擎**渲染路径（headless、不含 ImGui/
+    // Dock/面板），而用户感受到的是整帧（事件 → ImGui 全量重建 → 引擎 → 呈现）。
+    // 两者差值就是 UI 层的成本，只有在这里量才拿得到。
+    // dtMs = 帧**周期**（含末尾为限帧而睡的时间），workMs = 本帧实际工作量。
+    // 两者必须分开看：周期接近限帧目标而工作量远小于它 → 是限帧在起作用（还有
+    // 余量）；工作量已逼近周期 → 真的饱和了。只报周期会把"限帧"误读成"性能到头"。
+    void recordFrameTime(float dtMs, float workMs);
+    static constexpr size_t kFrameTimeWindow = 600;      // 约 10 s @60fps
+    static constexpr double kFrameStatsPeriodSec = 5.0;
+
+    std::vector<float> frameTimes_;
+    std::vector<float> workTimes_;
+    size_t frameTimeCursor_ = 0;
+    double frameStatsLastLog_ = 0.0;
+    // 启动时待导入的轨迹（见 setPendingTrajectory）
+    std::string pendingTrajectory_;
+
     GLFWwindow* window_ = nullptr;
     bool windowShouldClose_ = false;
-    bool maximized_ = false;
-#ifdef _WIN32
-    // 自绘标题栏最大化：记录还原位置（Win32 手动最大化/还原，绕开
-    // GLFW 无边框窗口 glfwMaximizeWindow/glfwRestoreWindow 的尺寸不同步问题）
-    bool restoreRectValid_ = false;
-    int restoreL_ = 0, restoreT_ = 0, restoreR_ = 0, restoreB_ = 0;
-#endif
+    bool maximized_ = false;   // 标题栏按钮图标用（真值以 chrome::windowIsMaximized 为准）
+    // 自绘标题栏最大化状态机（还原矩形记录）——实现在 view/chrome/window_chrome.cpp
+    chrome::MaximizeState maximizeState_;
     float lastFrameTime_ = 0.0f;
     float fps_ = 0.0f;
     // 自绘标题栏实际高度（renderMainMenuBar 每帧测量；setupDocking 用其偏移，
@@ -158,12 +183,15 @@ private:
     MolListTool* molListTool_ = nullptr;
     StylesTool* stylesTool_ = nullptr;
     MaterialTool* materialTool_ = nullptr;
+    RepsTool* repsTool_ = nullptr;
 
 
     MainView mainView_;
     MolScene molScene_;
     TimeAxis timeAxis_;
     ToolRegistry tools_;
+    Workbench workbench_;   // v2 Aurora 工作台（固定五区 + 检查器模块）
+    bool workbenchReady_ = false;   // 首帧延迟装配（控制器注入晚于 init）
 
     // 面板可见性（菜单控制）
     bool showMolList_ = true;

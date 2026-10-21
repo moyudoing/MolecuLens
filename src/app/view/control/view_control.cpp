@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <thread>
 
 #include <imgui_impl_glfw.h>
@@ -22,6 +23,7 @@
 #endif
 #include <windows.h>
 #include <commdlg.h>
+#include <timeapi.h>   // timeBeginPeriod/timeEndPeriod（限帧睡眠精度）
 #define GLFW_EXPOSE_NATIVE_WIN32   // glfwGetWin32Window（自绘标题栏手动最大化）
 #include <GLFW/glfw3native.h>
 #endif
@@ -33,6 +35,9 @@
 #include "app/data/data_manager.h"
 #include "app/data/log_buffer.h"
 #include "app/shell/application.h"
+#include "app/i18n/language.h"
+#include "app/view/dock/dock_layout.h"       // 默认布局构建 + 布局序列化 + 稳定 ID
+#include "app/view/overlay/loading_overlay.h"   // 加载遮罩绘制
 #include "app/view/theme/ui_theme.h"
 #include "app/view/timeline/time_axis.h"
 
@@ -40,6 +45,7 @@
 #include "app/view/tools/material/material_tool.h"
 #include "app/view/tools/mol_list/mol_list_tool.h"
 #include "app/view/tools/paint/painting_tool.h"
+#include "app/view/tools/reps/reps_tool.h"
 #include "app/view/tools/styles/styles_tool.h"
 #include "app/view/tools/theme/theme_tool.h"
 
@@ -55,47 +61,137 @@ namespace moleculens::app {
 
 namespace {
 
-// 文件打开对话框（Windows；PDB/GRO/MLSCENE 过滤器，主方案 §7.3 打开 Ctrl+O）
-std::string openFileDialog() {
 #ifdef _WIN32
-    char path[MAX_PATH] = {};
-    OPENFILENAMEA ofn{};
+// UTF-8 → UTF-16（Win32 W 版 API 必需）。
+// 为什么必须走 W 版：`GetOpenFileNameA` 用系统 ANSI 代码页解释路径，中文/日文/
+// 含 emoji 或其它非 GBK 字符的目录名会被截成 '?'，于是对话框"看不到目标文件"
+// 或选中后路径错乱 —— 用户报的正是这个现象。
+std::wstring widenUtf8(const std::string& s) {
+    if (s.empty()) {
+        return {};
+    }
+    const int n = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(),
+                                        static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) {
+        // 不是合法 UTF-8（历史调用方可能传 ANSI 串）→ 按系统代码页再试一次
+        const int m = ::MultiByteToWideChar(CP_ACP, 0, s.data(),
+                                            static_cast<int>(s.size()), nullptr, 0);
+        if (m <= 0) {
+            return {};
+        }
+        std::wstring w(static_cast<size_t>(m), L'\0');
+        ::MultiByteToWideChar(CP_ACP, 0, s.data(), static_cast<int>(s.size()),
+                              w.data(), m);
+        return w;
+    }
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(),
+                          static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+// UTF-16 → UTF-8（把对话框返回的路径交回 std::string 世界）
+std::string narrowUtf8(const std::wstring& w) {
+    if (w.empty()) {
+        return {};
+    }
+    const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                                        nullptr, 0, nullptr, nullptr);
+    if (n <= 0) {
+        return {};
+    }
+    std::string s(static_cast<size_t>(n), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n,
+                          nullptr, nullptr);
+    return s;
+}
+
+// 对话框 owner：不设 owner 时对话框可能被无边框主窗口挡在下面，看起来像
+// "点了没反应"。主窗口是当前前台窗口（自绘标题栏 → 点击时必为前台）。
+HWND dialogOwner() {
+    HWND hwnd = ::GetActiveWindow();
+    return hwnd != nullptr ? hwnd : ::GetForegroundWindow();
+}
+
+// 32 KiB 路径缓冲：MAX_PATH(260) 在中文长路径 + 深层目录下真的会溢出，
+// 而 Win32 对话框的 nMaxFile 允许更大缓冲（与 IFileOpenDialog 的长路径能力对齐）。
+constexpr DWORD kDialogPathChars = 32768;
+#endif
+
+// 平台原生"打开文件"对话框的公共实现（Windows；过滤器串由各调用方给出）。
+// defExt 为 nullptr 表示不自动补扩展名。
+std::string nativeOpenFileDialog(const std::string& filter, const char* defExt) {
+#ifdef _WIN32
+    // 过滤器串是"说明\0通配\0…\0\0"（UTF-8，由 trItems 逐段翻译生成）。
+    // std::wstring 可以内含 '\0'，故透传后 LPWSTR 语义与 ANSI 版一致。
+    const std::wstring filterW = widenUtf8(filter);
+    const std::wstring defExtW = widenUtf8(defExt != nullptr ? defExt : "");
+    std::wstring path(kDialogPathChars, L'\0');
+    OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter =
-        "分子结构文件 (*.pdb;*.gro;*.sdf;*.mol)\0*.pdb;*.gro;*.sdf;*.mol\0"
-        "场景文件 (*.mlscene)\0*.mlscene\0"
-        "所有文件 (*.*)\0*.*\0";
-    ofn.lpstrFile = path;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameA(&ofn)) {
-        return path;
+    ofn.hwndOwner = dialogOwner();
+    ofn.lpstrFilter = filterW.c_str();
+    ofn.lpstrFile = path.data();
+    ofn.nMaxFile = kDialogPathChars;
+    ofn.lpstrDefExt = defExtW.empty() ? nullptr : defExtW.c_str();
+    // OFN_EXPLORER：资源管理器样式（默认视图/图标）；OFN_HIDEREADONLY：只读文件可选；
+    // nFilterIndex=1：默认落在第一组过滤器（而不是"所有文件"）。
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST |
+                OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
+    ofn.nFilterIndex = 1;
+    if (GetOpenFileNameW(&ofn)) {
+        return narrowUtf8(std::wstring(path.c_str()));
     }
 #else
     // 非 Windows：占位（M5 接入 native dialog）
+    (void)filter;
+    (void)defExt;
 #endif
     return {};
 }
 
-// 轨迹文件打开对话框（.dcd；.xtc 待接入）
+// 文件打开对话框（Windows；分子结构 + 场景过滤器，主方案 §7.3 打开 Ctrl+O）
+std::string openFileDialog() {
+    // ⚠ 跨行隐式拼接的字面量必须**整体**包一次 tr()：写成 tr(a) tr(b) 不是合法
+    //   表达式（相邻字符串字面量的隐式拼接只对字面量成立，对函数调用不成立）。
+    // ⚠ 含 '\0' 的多段串必须**逐段**翻译（trItems）：tr(const char*) 的键在第一个
+    //   NUL 处截断，整串交给 tr() 永远匹配不上（详见 language.h）。
+    // ⚠ 扩展名清单与 ParserRegistry 同源（.pdb/.ent/.gro/.sdf/.mol/.cube/.cub），
+    //   新增解析器时这里不必再改 —— 见 Workbench::openFileDialog。
+    const std::string filter = trItems({
+        "分子结构文件 (*.pdb;*.ent;*.gro;*.sdf;*.mol;*.cube;*.cub)",
+        "*.pdb;*.ent;*.gro;*.sdf;*.mol;*.cube;*.cub",
+        "场景文件 (*.mlscene)", "*.mlscene",
+        "所有文件 (*.*)", "*.*"});
+    return nativeOpenFileDialog(filter, nullptr);
+}
+
+// 轨迹文件打开对话框（.dcd / .xtc / .trr —— 与 IoController::importTrajectory 的分派一致）
 std::string openTrajectoryDialog() {
-#ifdef _WIN32
-    char path[MAX_PATH] = {};
-    OPENFILENAMEA ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter =
-        "轨迹文件 (*.dcd)\0*.dcd\0"
-        "所有文件 (*.*)\0*.*\0";
-    ofn.lpstrFile = path;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetOpenFileNameA(&ofn)) {
-        return path;
+    const std::string filter = trItems({
+        "轨迹文件 (*.dcd;*.xtc;*.trr)", "*.dcd;*.xtc;*.trr",
+        "DCD (CHARMM/NAMD) (*.dcd)", "*.dcd",
+        "XTC (GROMACS) (*.xtc)", "*.xtc",
+        "TRR (GROMACS) (*.trr)", "*.trr",
+        "所有文件 (*.*)", "*.*"});
+    return nativeOpenFileDialog(filter, nullptr);
+}
+
+// 改一个设置字段并立即落盘（load → 改 → save）。
+// 与 ThemeTool 里的 persistThemePreference 同一取舍：不持有 Application 的设置
+// 副本，避免出现两份设置状态（那正是 export_img_tool 曾"界面值与生效参数不一致"
+// 的成因）。这里的字段少、写盘频率低，整份读改写最简单也最不容易错。
+void persistSettingField(const std::function<void(persist::Settings&)>& mutate) {
+    persist::Settings settings;
+    auto loaded = persist::SettingsStore::load();
+    if (loaded) {
+        settings = loaded.value();
     }
-#else
-    // 非 Windows：占位（M5 接入 native dialog）
-#endif
-    return {};
+    mutate(settings);
+    auto saved = persist::SettingsStore::save(settings);
+    if (!saved) {
+        spdlog::warn("[ui] 设置保存失败: {}", saved.errorMessage());
+    }
 }
 
 // 上次导出目录（会话内记忆；首次为空 → 由系统决定/当前目录）。
@@ -105,73 +201,50 @@ std::string& lastExportDir() {
     return dir;
 }
 
-// 自绘标题栏窗口按钮图标（绘制列表画，不依赖字体字形——最大化/还原需随状态切换）
-enum class WindowGlyph { Minimize, Maximize, Restore, Close };
-
-void drawWindowGlyph(const ImVec2& pos, const ImVec2& size, WindowGlyph glyph) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 col = IM_COL32(208, 211, 222, 255);
-    const float t = 2.0f;
-    const ImVec2 c(pos.x + size.x * 0.5f, pos.y + size.y * 0.5f);
-    switch (glyph) {
-        case WindowGlyph::Minimize:
-            dl->AddLine(ImVec2(c.x - 6.0f, c.y), ImVec2(c.x + 6.0f, c.y), col, t);
-            break;
-        case WindowGlyph::Maximize:
-            dl->AddRect(ImVec2(c.x - 6.0f, c.y - 5.0f), ImVec2(c.x + 6.0f, c.y + 5.0f),
-                        col, 0.0f, 0, t);
-            break;
-        case WindowGlyph::Restore: {
-            // 两个错位方框（后框 + 前景底 + 前框），表示"还原"
-            const ImVec2 a(c.x - 3.0f, c.y - 4.0f), b(c.x + 6.0f, c.y + 5.0f);
-            const ImVec2 a2(c.x - 6.0f, c.y - 5.0f), b2(c.x + 3.0f, c.y + 4.0f);
-            dl->AddRect(a2, b2, col, 0.0f, 0, t);
-            dl->AddRectFilled(a, b, IM_COL32(26, 30, 45, 255));
-            dl->AddRect(a, b, col, 0.0f, 0, t);
-            break;
-        }
-        case WindowGlyph::Close:
-            dl->AddLine(ImVec2(c.x - 5.0f, c.y - 5.0f), ImVec2(c.x + 5.0f, c.y + 5.0f), col, t);
-            dl->AddLine(ImVec2(c.x - 5.0f, c.y + 5.0f), ImVec2(c.x + 5.0f, c.y - 5.0f), col, t);
-            break;
-    }
-}
-
 } // namespace
 
 // 平台原生"另存为"对话框（Windows 资源管理器；PNG 过滤器）。
 // 用户确认返回所选路径；取消返回空串。成功后记忆目录供下次默认定位。
 std::string ViewControl::saveFileDialog(const char* defaultName) {
-    return saveFileDialogEx(defaultName, "PNG 图像 (*.png)\0*.png\0所有文件 (*.*)\0*.*\0",
-                            "png");
+    const std::string filter =
+        trItems({"PNG 图像 (*.png)", "*.png", "所有文件 (*.*)", "*.*"});
+    return saveFileDialogEx(defaultName, filter.c_str(), "png");
 }
 
 std::string ViewControl::saveFileDialogEx(const char* defaultName, const char* filter,
                                           const char* defExt) {
 #ifdef _WIN32
-    char path[MAX_PATH] = {};
     // 默认文件名（无扩展名时按 defExt 补齐）
     std::string name = (defaultName && *defaultName) ? defaultName : "untitled";
     if (name.find('.') == std::string::npos) {
         name += ".";
-        name += defExt;
+        name += (defExt != nullptr ? defExt : "dat");
     }
-    std::snprintf(path, sizeof(path), "%s", name.c_str());
+    // 与 nativeOpenFileDialog 同一取舍：W 版 + 显式 owner + 32 KiB 缓冲，
+    // 否则中文/特殊字符路径下另存为同样会出错（用户可能分不清"打开"和"保存"哪个坏了）。
+    const std::wstring filterW = widenUtf8(filter != nullptr ? filter : "");
+    const std::wstring defExtW = widenUtf8(defExt != nullptr ? defExt : "");
+    std::wstring path = widenUtf8(name);
+    path.resize(kDialogPathChars, L'\0');
 
-    OPENFILENAMEA ofn{};
+    OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = filter;
-    ofn.lpstrFile = path;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = defExt;   // 用户未输扩展名时自动补
+    ofn.hwndOwner = dialogOwner();
+    ofn.lpstrFilter = filterW.c_str();
+    ofn.lpstrFile = path.data();
+    ofn.nMaxFile = kDialogPathChars;
+    ofn.lpstrDefExt = defExtW.empty() ? nullptr : defExtW.c_str();
     // OFN_NOCHANGEDIR：对话框不改应用当前工作目录（避免相对路径副作用）；
     // OFN_OVERWRITEPROMPT：覆盖前询问；OFN_PATHMUSTEXIST：路径必须存在。
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.Flags = OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST |
+                OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
+    ofn.nFilterIndex = 1;
     const std::string& initDir = lastExportDir();
-    ofn.lpstrInitialDir = initDir.empty() ? nullptr : initDir.c_str();
+    const std::wstring initDirW = widenUtf8(initDir);
+    ofn.lpstrInitialDir = initDirW.empty() ? nullptr : initDirW.c_str();
 
-    if (GetSaveFileNameA(&ofn)) {
-        const std::string chosen(path);
+    if (GetSaveFileNameW(&ofn)) {
+        const std::string chosen = narrowUtf8(std::wstring(path.c_str()));
         // 记忆目录（供下次默认定位到同一文件夹）
         const size_t slash = chosen.find_last_of("\\/");
         lastExportDir() =
@@ -180,8 +253,31 @@ std::string ViewControl::saveFileDialogEx(const char* defaultName, const char* f
     }
 #else
     (void)defaultName;   // 非 Windows：占位（M5 接入 native dialog）
+    (void)filter;
+    (void)defExt;
 #endif
     return {};
+}
+
+// 通用"打开文件"对话框：与 saveFileDialogEx 对称，供面板（ESP 参数面板选择
+// density / ESP cube 文件）使用。空串 = 用户取消。
+std::string ViewControl::openFileDialogEx(const char* filter, const char* defExt) {
+    // ⚠ 关键修复：Win32 过滤器串是 "说明\0通配\0…\0\0"，含**内嵌 NUL**。
+    //   `std::string(filter)`（从 const char* 构造）会在第一个 NUL 处截断，
+    //   交给对话框后就只剩一句说明、没有任何通配符 —— 表现为"文件类型识别不到、
+    //   目标文件不显示"（用户报的 bug）。这里按"双 NUL 结束"显式量长度。
+    std::string filterStr;
+    if (filter != nullptr) {
+        // 上限防止调用方传入未按双 NUL 终止的串时越界读
+        constexpr size_t kMaxFilterBytes = 4096;
+        size_t n = 0;
+        while (n + 1 < kMaxFilterBytes && !(filter[n] == '\0' && filter[n + 1] == '\0')) {
+            ++n;
+        }
+        n += 2;   // 含结尾双 NUL
+        filterStr.assign(filter, n);
+    }
+    return nativeOpenFileDialog(filterStr, defExt);
 }
 
 ViewControl::~ViewControl() { shutdown(); }
@@ -209,6 +305,23 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
     engine::RenderConfig cfg;
     cfg.debug = false;
     cfg.msaaSamples = 4;
+    // 垂直同步：从设置读（旧配置缺该键 → 默认 true，与历史行为一致）
+    {
+        auto boot = persist::SettingsStore::load();
+        if (boot) {
+            cfg.vsync = boot.value().vsync;
+            // MSAA：此前固定 4，设置里的 msaa 从未生效（I-08 排查顺带修复）
+            cfg.msaaSamples = boot.value().msaa > 0 ? boot.value().msaa : 1;
+            spdlog::info("[ui] vsync = {} (FIFO), msaa = {}",
+                         cfg.vsync ? "on" : "off", cfg.msaaSamples);
+        }
+    }
+    // 排查用覆盖：MOLECULENS_MSAA=0/1/2/4/8 强制采样数
+    if (const char* msaaEnv = std::getenv("MOLECULENS_MSAA")) {
+        const int v = std::atoi(msaaEnv);
+        cfg.msaaSamples = v > 0 ? v : 1;
+        spdlog::info("[ui] msaa overridden by env = {}", cfg.msaaSamples);
+    }
     std::string vkError;
     spdlog::info("[ui] init: VulkanRenderer init (instance/device/swapchain) ...");
     if (!vk_->init(window_, cfg, &vkError)) {
@@ -221,25 +334,43 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
         return false;
     }
     spdlog::info("[ui] init: ImGui backends ok");
-    // 设计系统（主方案 §7.6）
+    // 设计系统（主方案 §7.6）：先套默认主题，再按下方的用户配置覆盖。
+    // 顺序不能反——applyTheme() 读的是 ui::C_* 全局配色，提前套主题会被这里覆盖掉。
     UITheme::applyTheme();
     spdlog::info("[ui] init: theme applied");
 
-    // 设置加载（主方案 §12.2：布局 base64 恢复 + 相机/渲染参数）
+    // 设置加载（主方案 §12.2：布局 base64 恢复 + 主题 + 相机/渲染参数）
     spdlog::info("[ui] init: loading settings ...");
     auto settingsResult = persist::SettingsStore::load();
     if (settingsResult) {
         const auto& settings = settingsResult.value();
+        // 主题：键未知（旧配置/手改）时 setThemeByKey 返回 false 并保持当前主题，
+        // 这里显式记一条日志，避免"配置写了却没生效"变成无声行为。
+        if (!settings.theme.empty() && !UITheme::setThemeByKey(settings.theme)) {
+            spdlog::warn("[ui] settings.theme='{}' 无法识别，沿用默认主题 {}",
+                         settings.theme, UITheme::themeKey());
+        }
+        // 语言：必须在任何面板构造/渲染之前设置好 —— 面板标题与文案都是 tr()，
+        // 晚设会出现"首帧中文、次帧英文"的闪变
+        i18n::Language lang = i18n::Language::Zh;
+        if (!settings.language.empty() &&
+            i18n::languageFromKey(settings.language.c_str(), &lang)) {
+            i18n::setLanguage(lang);
+        } else if (!settings.language.empty()) {
+            spdlog::warn("[ui] settings.language='{}' 无法识别，沿用中文",
+                         settings.language);
+        }
         if (!settings.layout.empty()) {
             deserializeLayout(settings.layout);
         }
-        if (settings.recentFiles.size() > 0) {
-            // M5：最近文件菜单（当前仅记录）
-            (void)settings;
-        }
+        // M5：最近文件菜单（当前仅记录）
     }
 
     // 面板注册（主方案 §7.9：5 个工具面板 + 日志）
+    // v2：旧工具面板不再构造 —— 它们订阅 EventBus，加载文件时会各自新建/
+    // 改写表示（实测启动后表示数从 1 变成 5，并叠出一层半透明大球），
+    // 与新工作台的表示管理互相打架。保留代码但不实例化。
+#if 0
     {
         auto ml = std::make_unique<MolListTool>();
         molListTool_ = ml.get();
@@ -255,19 +386,83 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
         materialTool_ = mt.get();
         addModule(std::move(mt));
     }
+    {
+        // 图形表示面板（VMD 式四页签）：表示级增删与全部参数都在这里；
+        // styles_tool 只保留场景级设置（背景/雾/光照/视角）
+        auto rp = std::make_unique<RepsTool>();
+        repsTool_ = rp.get();
+        addModule(std::move(rp));
+    }
     addModule(std::make_unique<ExportImgTool>());
     addModule(std::make_unique<PaintingTool>());
     addModule(std::make_unique<ThemeTool>());
+#endif
 
 
     spdlog::info("[ui] init: panels registered");
     spdlog::info("[ui] init: MolScene viewport (offscreen renderer) ...");
     molScene_.init(renderer_, camera_, vk_);
     spdlog::info("[ui] init: MolScene viewport ready");
+    // 表面生成异步化（REMAINING_WORK §1.1）：整体系 QuickSurf 在后台线程生成，
+    // 主线程不再阻塞约 197 ms；生成期间保留旧画面并在视口左上角提示"表面生成中…"。
+    // CLI / 导出 / 单元测试不走此开关（默认同步），行为与既有一致。
+    if (renderer_) {
+        renderer_->setAsyncSurfaceEnabled(true);
+    }
+
+    // v2 Aurora 工作台在首帧延迟装配：控制器由 Application 在 view_->init() 之后
+    // 才通过 svcXxx() 注入，这里过早读它们会拿到空指针。
     return true;
 }
 
+void ViewControl::initWorkbench() {
+    WorkbenchServices ws;
+    ws.vk = vk_;
+    ws.renderer = renderer_;
+    ws.data = dataMgr_;
+    ws.viewport = &molScene_;
+    ws.scene = svc_ != nullptr ? svc_->scene : nullptr;
+    ws.sceneCtl = sceneCtl_;
+    ws.renderCtl = renderCtl_;
+    ws.repCtl = repCtl_;
+    ws.timelineCtl = timelineCtl_;
+    ws.cameraCtl = cameraCtl_;
+    ws.ioCtl = ioCtl_;
+    ws.fps = &fps_;
+    ws.requestClose = [this]() { windowShouldClose_ = true; };
+    ws.minimizeWindow = [this]() { glfwIconifyWindow(window_); };
+    ws.toggleMaximize = [this]() { this->toggleMaximize(); };
+    ws.isMaximized = [this]() { return windowIsMaximized(); };
+    ws.dragWindow = [this](float dx, float dy) {
+        int wx = 0;
+        int wy = 0;
+        glfwGetWindowPos(window_, &wx, &wy);
+        glfwSetWindowPos(window_, wx + static_cast<int>(dx), wy + static_cast<int>(dy));
+    };
+    ws.dlgOpen = [](const char* filter, const char* defExt) {
+        return ViewControl::openFileDialogEx(filter, defExt);
+    };
+    ws.dlgSave = [](const char* name, const char* filter, const char* defExt) {
+        return ViewControl::saveFileDialogEx(name, filter, defExt);
+    };
+    workbench_.init(ws);
+    // 场景标注桥（v2.3）：保存 .mlscene 时把当前标注交给 IoController 写进文件；
+    // 打开 .mlscene 时把文件里的标注回填到工作台。控制器不直接依赖表现层。
+    if (ioCtl_ != nullptr) {
+        ioCtl_->setAnnotationBridge(
+            [this]() { return workbench_.exportAnnotations(); },
+            [this](const persist::mlscene::Annotations& annotations) {
+                workbench_.importAnnotations(annotations);
+            });
+    }
+    spdlog::info("[ui] workbench v2 ready (fixed five-region layout)");
+}
+
 void ViewControl::shutdown() {
+    // 断开标注桥：回调捕获了 this（Workbench 成员），窗口销毁后不能再被控制器调用
+    if (ioCtl_ != nullptr) {
+        ioCtl_->setAnnotationBridge(nullptr, nullptr);
+    }
     // ImGui 后端与窗口清理（Vulkan 设备由 VulkanRenderer 管理）
     if (window_) {
         // 先释放 MolScene 注册的纹理描述符：它们由 ImGui 描述符池分配，
@@ -289,7 +484,21 @@ bool ViewControl::createWindow() {
     }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);       // Vulkan 专用
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);         // 自绘标题栏（主方案 §7.3）
-    window_ = glfwCreateWindow(1280, 800, "MolecuLens", nullptr, nullptr);
+    // 默认窗口按显示器工作区自适应：1920×1080 上 1280×800 偏小，右检查器与
+    // 表示表格会被挤得过密（"UI 看不清"的体感来源之一）。有空间就给 1440×900，
+    // 小屏仍回落到 1280×800 / 工作区尺寸。
+    int winW = 1440;
+    int winH = 900;
+    if (GLFWmonitor* mon = glfwGetPrimaryMonitor()) {
+        int mx = 0, my = 0, mw = 0, mh = 0;
+        glfwGetMonitorWorkarea(mon, &mx, &my, &mw, &mh);
+        if (mw > 0 && mh > 0) {
+            winW = std::min(winW, std::max(960, mw - 80));
+            winH = std::min(winH, std::max(640, mh - 80));
+        }
+    }
+    spdlog::info("[ui] window size {}x{} (adaptive to monitor work area)", winW, winH);
+    window_ = glfwCreateWindow(winW, winH, "MolecuLens", nullptr, nullptr);
     if (!window_) {
         spdlog::error("[ui] glfwCreateWindow failed");
         return false;
@@ -351,6 +560,13 @@ void ViewControl::runLoop() {
     // 占用异常；睡眠到帧预算结束，负载低时省资源、帧率稳定在目标附近）。
     constexpr float kTargetFps = 120.0f;
     constexpr double kFrameBudget = 1.0 / static_cast<double>(kTargetFps);
+    // 收尾自旋窗口：Windows 默认计时器粒度 ~15.6ms，sleep_for 会把"还剩 8ms"
+    // 的帧睡成 15ms+（实测 120FPS 目标被拖到 ~107FPS）。用 timeBeginPeriod(1)
+    // 把粒度降到 1ms，且最后 ~1.2ms 改为自旋收尾，保证精确落在帧预算上。
+    constexpr double kSpinMarginSec = 0.0012;
+#ifdef _WIN32
+    timeBeginPeriod(1);
+#endif
     lastFrameTime_ = static_cast<float>(glfwGetTime());
 
     /// @brife 进入主循环
@@ -372,13 +588,26 @@ void ViewControl::runLoop() {
 
         UITheme::advanceTime(dt);
         if (svc_->bus) {
-            svc_->bus->poll();
+            // 传入实测 dt：时间轴据此推进播放（与渲染帧率解耦，速度可复现）
+            svc_->bus->poll(dt);
         }
 
         // QS.5 文件导入多线程：后台解析完成 → 主线程合并（渲染器读场景须在主线程）
         if (ioCtl_) {
             ioCtl_->consumeParsed();
+            // 命令行给了轨迹文件：等结构解析并合并进场景后再导入（见
+            // setPendingTrajectory 的时序说明）
+            if (!pendingTrajectory_.empty() && svc_ && svc_->scene &&
+                !svc_->scene->instances().empty()) {
+                const std::string trajPath = pendingTrajectory_;
+                pendingTrajectory_.clear();
+                spdlog::info("[ui] 命令行轨迹导入: {}", trajPath);
+                if (!ioCtl_->importTrajectory(trajPath)) {
+                    spdlog::error("[ui] 命令行轨迹导入失败: {}", trajPath);
+                }
+            }
         }
+
 
         // 帧更新
         newFrame(dt);
@@ -404,13 +633,29 @@ void ViewControl::runLoop() {
         vk_->execute(empty, view);
         vk_->endFrame();
 
-        // 帧率限制：本帧耗时 < 预算 → 睡眠补足剩余时间（稳定上限，省资源）
-        const double elapsed = glfwGetTime() - frameStart;
-        const double remain = kFrameBudget - elapsed;
+        // 帧时间分布（每 5 s 汇总一条日志）。必须在**限帧睡眠之前**取工作量：
+        // 周期含睡眠、工作量不含 —— 只看周期会把"限帧在起作用"误判成"性能到顶"
+        //（本机实测两者差 3 倍以上，结论完全不同）。
+        recordFrameTime(dt * 1000.0f,
+                        static_cast<float>((glfwGetTime() - frameStart) * 1000.0));
+
+        // 帧率限制：本帧耗时 < 预算 → 先睡到"预算 - 自旋窗口"，再用自旋精确等
+        // 到帧截止时刻（见函数开头的精度说明）。
+        const double deadline = frameStart + kFrameBudget;
+        const double remain = deadline - glfwGetTime();
         if (remain > 0.0) {
-            std::this_thread::sleep_for(std::chrono::duration<double>(remain));
+            if (remain > kSpinMarginSec) {
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(remain - kSpinMarginSec));
+            }
+            while (glfwGetTime() < deadline) {
+                std::this_thread::yield();
+            }
         }
     }
+#ifdef _WIN32
+    timeEndPeriod(1);
+#endif
 
     // 退出时保存设置（主方案 §12.2：布局 base64 + 相机）
     persist::Settings settings;
@@ -419,8 +664,68 @@ void ViewControl::runLoop() {
         settings = loaded.value();
     }
     settings.layout = serializeLayout();
+    // 主题由 ThemeTool 在切换时即时落盘；这里再写一次当前值，保证"改完主题后
+    // 直接退出"与"重启"两条路径读到的是同一份状态（也兜住外部改过配置的情况）。
+    settings.theme = UITheme::themeKey();
+    settings.language = i18n::languageKey(i18n::current());
     persist::SettingsStore::save(settings);
-    spdlog::info("[ui] settings saved on exit");
+    spdlog::info("[ui] settings saved on exit (theme={}, lang={})", settings.theme,
+                 settings.language);
+}
+
+// 帧时间观测：滚动窗口记录 + 周期汇总日志。开销 = 每帧一次 push 与 5 秒一次的
+// 排序（≤600 个 float），相对于整帧成本可忽略，故常开（无需编译开关）。
+void ViewControl::recordFrameTime(float dtMs, float workMs) {
+    if (frameTimes_.size() < kFrameTimeWindow) {
+        frameTimes_.push_back(dtMs);
+        workTimes_.push_back(workMs);
+    } else {
+        frameTimes_[frameTimeCursor_] = dtMs;
+        workTimes_[frameTimeCursor_] = workMs;
+        frameTimeCursor_ = (frameTimeCursor_ + 1) % kFrameTimeWindow;
+    }
+    const double now = glfwGetTime();
+    if (frameStatsLastLog_ <= 0.0) {
+        frameStatsLastLog_ = now;   // 首帧只起算，避免把加载期的首帧计入
+        return;
+    }
+    if (now - frameStatsLastLog_ < kFrameStatsPeriodSec) {
+        return;
+    }
+    frameStatsLastLog_ = now;
+
+    std::vector<float> s = frameTimes_;
+    std::sort(s.begin(), s.end());
+    if (s.empty()) {
+        return;
+    }
+    auto pct = [&s](double p) {
+        const size_t i = static_cast<size_t>(p * (s.size() - 1) + 0.5);
+        return s[std::min(i, s.size() - 1)];
+    };
+    double sum = 0.0;
+    for (float v : s) {
+        sum += v;
+    }
+    const double avg = sum / static_cast<double>(s.size());
+    // 工作量均值（不含限帧睡眠）与周期对比 —— 见头文件里两者的区别
+    double wsum = 0.0;
+    float wmax = 0.0f;
+    for (float v : workTimes_) {
+        wsum += v;
+        wmax = std::max(wmax, v);
+    }
+    const double wavg = workTimes_.empty() ? 0.0
+                                           : wsum / static_cast<double>(workTimes_.size());
+    // 注意 avg 是"帧时间均值"，最低 FPS 应取**最慢帧**（max 帧时间）的倒数 ——
+    // 用平均 FPS 描述流畅度会掩盖卡顿
+    // 日志保持中文（诊断输出，不随界面语言切换）；跨行拼接的格式串不能被逐段包 tr()
+    spdlog::info("[perf] 整帧 {} samples: avg {:.2f} ms ({:.0f} FPS) | p50 {:.2f} "
+                 "p95 {:.2f} p99 {:.2f} max {:.2f} ms (最低 {:.0f} FPS) | 工作量 avg "
+                 "{:.2f} max {:.2f} ms (占周期 {:.0f}%)",
+                 s.size(), avg, avg > 0.0 ? 1000.0 / avg : 0.0, pct(0.50), pct(0.95),
+                 pct(0.99), s.back(), s.back() > 0.0 ? 1000.0 / s.back() : 0.0, wavg,
+                 wmax, avg > 0.0 ? 100.0 * wavg / avg : 0.0);
 }
 
 void ViewControl::newFrame(float dt) {
@@ -431,6 +736,15 @@ void ViewControl::newFrame(float dt) {
 }
 
 void ViewControl::render() {
+    // v2：Aurora 工作台接管全部布局（固定五区 + 9 个检查器模块）。
+    // 旧 Dock / 工具面板代码保留在下方 #if 0 中仅供对照，不再进入渲染路径。
+    if (!workbenchReady_) {
+        workbenchReady_ = true;
+        initWorkbench();
+    }
+    workbench_.render();
+    renderLoadingOverlay();
+#if 0
     renderMainMenuBar();
     setupDocking();
 
@@ -448,23 +762,28 @@ void ViewControl::render() {
     ctx.timeline = timelineCtl_;
     ctx.selection = selectionCtl_;
     ctx.fps = fps_;
+    // 时间轴显示帧率（此前 TimeAxis::showFps 声明后无人写入 → 恒为 0）
+    timeAxis_.setFps(fps_);
     // 主视图渲染
     moleculens::app::MainView::renderAll(ctx);
 
     // 日志面板（spdlog 环形缓冲，主方案 §14.5）
     if (showLog_) {
-        ImGui::Begin("日志", &showLog_);
+        // 显示名可翻译、ID 恒定（同 dock_layout.h 的说明；见 main_view 的用法）
+        const std::string logLabel =
+            dock::windowLabel(i18n::tr("日志"), dock::panel::kLog);
+        ImGui::Begin(logLabel.c_str(), &showLog_);
 
         auto& ring = LogRingBuffer::instance();
-        if (ImGui::SmallButton("清空")) {
+        if (ImGui::SmallButton(tr("清空"))) {
             ring.clear();
             logSnapshot_.clear();
             logSeen_ = ring.totalPushed();
         }
         ImGui::SameLine();
-        ImGui::Checkbox("自动滚动", &logAutoScroll_);
+        ImGui::Checkbox(tr("自动滚动"), &logAutoScroll_);
         ImGui::SameLine();
-        ImGui::TextDisabled("%zu 条 / 上限 %zu", logSnapshot_.size(),
+        ImGui::TextDisabled(tr("%zu 条 / 上限 %zu"), logSnapshot_.size(),
                             LogRingBuffer::kCapacity);
         ImGui::Separator();
 
@@ -477,13 +796,14 @@ void ViewControl::render() {
         ImGui::BeginChild("##log_scroll", ImVec2(0, 0), false,
                           ImGuiWindowFlags_HorizontalScrollbar);
         for (const auto& rec : logSnapshot_) {
-            ImVec4 col(0.78f, 0.80f, 0.85f, 1.0f);   // 默认：正文灰
+            // 日志级别配色走主题（此前写死 5 个 ImVec4 → 切主题时日志面板不跟随）
+            ImVec4 col = ui::C_TEXT;                 // 默认：正文
             switch (rec.level) {
                 case spdlog::level::trace:
-                case spdlog::level::debug:  col = ImVec4(0.55f, 0.58f, 0.65f, 1.0f); break;
-                case spdlog::level::warn:   col = ImVec4(0.95f, 0.75f, 0.35f, 1.0f); break;
-                case spdlog::level::err:    col = ImVec4(0.95f, 0.45f, 0.42f, 1.0f); break;
-                case spdlog::level::critical: col = ImVec4(1.00f, 0.35f, 0.35f, 1.0f); break;
+                case spdlog::level::debug:    col = ui::C_TEXT_MUTED; break;
+                case spdlog::level::warn:     col = ui::C_WARN; break;
+                case spdlog::level::err:
+                case spdlog::level::critical: col = ui::C_DANGER; break;
                 default: break;
             }
             // spdlog 的 to_string_view 返回 fmt::string_view（非 std::string_view
@@ -492,9 +812,13 @@ void ViewControl::render() {
             const auto sv = spdlog::level::to_string_view(rec.level);
             std::snprintf(lvl, sizeof(lvl), "%-8.*s",
                           static_cast<int>(sv.size()), sv.data());
+            // 时间 + 级别用 fontSmall()（13px 档）：与正文拉开层级，日志更易扫读。
+            // （该字体同样属于"加载了却没用"的一档，此处接上。）
+            ImGui::PushFont(UITheme::fontSmall());
             ImGui::TextColored(col, "%s", rec.time.c_str());
             ImGui::SameLine();
             ImGui::TextColored(col, "[%s]", lvl);
+            ImGui::PopFont();
             ImGui::SameLine();
             ImGui::TextColored(col, "%s", rec.text.c_str());
         }
@@ -507,6 +831,7 @@ void ViewControl::render() {
     }
 
     renderLoadingOverlay();
+#endif
 }
 
 
@@ -529,8 +854,8 @@ void ViewControl::renderMainMenuBar() {
     titleBarHeight_ = ImGui::GetWindowHeight();
     if (ImGui::BeginMenuBar()) {
         // 菜单（主方案 §7.3）
-        if (ImGui::BeginMenu("文件")) {
-            if (ImGui::MenuItem("打开 (Ctrl+O)")) {
+        if (ImGui::BeginMenu(tr("文件"))) {
+            if (ImGui::MenuItem(tr("打开 (Ctrl+O)"))) {
                 const std::string path = openFileDialog();
                 if (!path.empty() && ioCtl_) {
                     // 加载遮罩（主方案 §7.5）+ 同步加载
@@ -538,60 +863,92 @@ void ViewControl::renderMainMenuBar() {
                     ioCtl_->openFile(path);
                 }
             }
-            if (ImGui::MenuItem("保存场景 (Ctrl+S)")) {
-                static const char* kSceneFilter =
-                    "MolecuLens 场景 (*.mlscene)\0*.mlscene\0所有文件 (*.*)\0*.*\0";
+            if (ImGui::MenuItem(tr("保存场景 (Ctrl+S)"))) {
+                // ⚠ 必须是具名的 std::string（不能用 static const char* 接 .c_str()）：
+                //   trItems 返回临时串，表达式结束即销毁 → 存指针就是悬垂。
+                const std::string sceneFilter =
+                    trItems({"MolecuLens 场景 (*.mlscene)", "*.mlscene",
+                             "所有文件 (*.*)", "*.*"});
                 const std::string path =
-                    saveFileDialogEx("scene.mlscene", kSceneFilter, "mlscene");
+                    saveFileDialogEx("scene.mlscene", sceneFilter.c_str(), "mlscene");
                 if (!path.empty() && ioCtl_) {
                     ioCtl_->saveScene(path);
                 }
             }
-            if (ImGui::MenuItem("导入轨迹 (.dcd)")) {
+            if (ImGui::MenuItem(tr("导入轨迹 (.dcd/.xtc)"))) {
                 const std::string path = openTrajectoryDialog();
                 if (!path.empty() && ioCtl_) {
                     ioCtl_->importTrajectory(path);
                 }
             }
-            if (ImGui::BeginMenu("导出")) {
+            if (ImGui::BeginMenu(tr("导出"))) {
                 // 图像导出面板已可用（ExportImgTool）；此处保留入口占位
-                ImGui::MenuItem("图像 (PNG)", nullptr, false);
-                ImGui::MenuItem("场景 (OBJ/STL)", nullptr, false);
+                ImGui::MenuItem(tr("图像 (PNG)"), nullptr, false);
+                ImGui::MenuItem(tr("场景 (OBJ/STL)"), nullptr, false);
                 ImGui::EndMenu();
             }
-            if (ImGui::MenuItem("退出", "Alt+F4")) {
+            if (ImGui::MenuItem(tr("退出"), "Alt+F4")) {
                 windowShouldClose_ = true;
             }
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("编辑")) {
-            ImGui::MenuItem("撤销", "Ctrl+Z", false);
-            ImGui::MenuItem("重做", "Ctrl+Y", false);
+        if (ImGui::BeginMenu(tr("编辑"))) {
+            ImGui::MenuItem(tr("撤销"), "Ctrl+Z", false);
+            ImGui::MenuItem(tr("重做"), "Ctrl+Y", false);
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("视图")) {
-            if (ImGui::MenuItem("重置视角", "R")) {
+        if (ImGui::BeginMenu(tr("视图"))) {
+            if (ImGui::MenuItem(tr("重置视角"), "R")) {
                 if (cameraCtl_) {
                     cameraCtl_->reset();   // 经相机控制器（唯一入口）
                 }
             }
             ImGui::Separator();
-            ImGui::MenuItem("分子列表", nullptr, &showMolList_);
-            ImGui::MenuItem("渲染设置", nullptr, &showStyles_);
-            ImGui::MenuItem("材质选择", nullptr, &showMaterial_);
-            ImGui::MenuItem("图像导出", nullptr, &showExport_);
-            ImGui::MenuItem("绘图工具", nullptr, &showPaint_);
-            ImGui::MenuItem("时间轴", nullptr, &showTimeline_);
-            ImGui::MenuItem("状态栏", nullptr, &showStatusBar_);
-            ImGui::MenuItem("日志", nullptr, &showLog_);
+            ImGui::MenuItem(tr("分子列表"), nullptr, &showMolList_);
+            ImGui::MenuItem(tr("渲染设置"), nullptr, &showStyles_);
+            ImGui::MenuItem(tr("材质选择"), nullptr, &showMaterial_);
+            ImGui::MenuItem(tr("图像导出"), nullptr, &showExport_);
+            ImGui::MenuItem(tr("绘图工具"), nullptr, &showPaint_);
+            ImGui::MenuItem(tr("时间轴"), nullptr, &showTimeline_);
+            ImGui::MenuItem(tr("状态栏"), nullptr, &showStatusBar_);
+            ImGui::MenuItem(tr("日志"), nullptr, &showLog_);
             ImGui::Separator();
-            if (ImGui::MenuItem("布局重置")) {
+            if (ImGui::MenuItem(tr("布局重置"))) {
                 resetLayout();
             }
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("帮助")) {
-            ImGui::MenuItem("关于 MolecuLens V1.0", nullptr, false);
+        // —— 设置：语言 / 主题（两大外观开关都收敛在这里，便于发现）——
+        if (ImGui::BeginMenu(tr("设置"))) {
+            if (ImGui::BeginMenu(tr("语言"))) {
+                for (int i = 0; i < static_cast<int>(i18n::Language::Count); ++i) {
+                    const auto lang = static_cast<i18n::Language>(i);
+                    // 语言名用**各自语言**书写：切错语言后用户仍认得出自己的那一项
+                    if (ImGui::MenuItem(i18n::languageNativeName(lang), nullptr,
+                                        i18n::current() == lang)) {
+                        i18n::setLanguage(lang);
+                        persistSettingField([lang](persist::Settings& s) {
+                            s.language = i18n::languageKey(lang);
+                        });
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            // 白天/暗黑一键切换（在各自模式最近用过的主题之间切换）。
+            // 菜单项文字随当前模式变化：现在是暗色就显示"白天模式"（点了变亮）。
+            const bool dark = UITheme::isDarkTheme();
+            if (ImGui::MenuItem(tr(dark ? "白天模式" : "暗黑模式"))) {
+                UITheme::toggleDarkLight();
+                persistSettingField([](persist::Settings& s) {
+                    s.theme = UITheme::themeKey();
+                });
+            }
+            UITheme::helpMarker("在「白天」与「暗黑」两套主题间切换；\n"
+                                "各自记住你最近选用的那一套（不是固定的一对）。");
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu(tr("帮助"))) {
+            ImGui::MenuItem(tr("关于 MolecuLens V1.0"), nullptr, false);
             ImGui::EndMenu();
         }
 
@@ -621,10 +978,11 @@ void ViewControl::renderMainMenuBar() {
         }
         const bool mz = maximized_;
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(mz ? "还原" : "最大化");
+            ImGui::SetTooltip(mz ? tr("还原") : tr("最大化"));
         }
-        drawWindowGlyph(ImGui::GetItemRectMin(), ImGui::GetItemRectSize(),
-                        mz ? WindowGlyph::Restore : WindowGlyph::Maximize);
+        chrome::drawWindowGlyph(ImGui::GetItemRectMin(), ImGui::GetItemRectSize(),
+                                mz ? chrome::WindowGlyph::Restore
+                                   : chrome::WindowGlyph::Maximize);
         ImGui::PopID();
         ImGui::SetCursorScreenPos(ImVec2(btnX + 2 * bw, row.y));
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
@@ -636,6 +994,9 @@ void ViewControl::renderMainMenuBar() {
         ImGui::PopStyleColor(3);
 
         // 2) 居中标题（相对整个标题栏水平居中，垂直居中于按钮高度）
+        //    用 fontTitle()（20px 档）：此前该字体**加载了却从未使用**，
+        //    标题栏与正文同号，白白多加载一档字形。
+        ImGui::PushFont(UITheme::fontTitle());
         const ImVec2 titleSize = ImGui::CalcTextSize("MolecuLens");
         ImGui::SetCursorScreenPos(
             ImVec2(viewport->Pos.x + (barW - titleSize.x) * 0.5f,
@@ -643,6 +1004,7 @@ void ViewControl::renderMainMenuBar() {
         ImGui::PushStyleColor(ImGuiCol_Text, ui::C_ACCENT_HI);
         ImGui::Text("MolecuLens");
         ImGui::PopStyleColor();
+        ImGui::PopFont();
 
         // 3) 拖拽区 —— 最后绘制，铺满"菜单之后 → 按钮之前"并接收点击；
         //    透明按钮盖在标题上不影响显示，标题区域点击同样可拖动窗口。
@@ -680,96 +1042,23 @@ void ViewControl::renderMainMenuBar() {
     ImGui::PopStyleVar(2);
 }
 
+// 窗口最大化/还原状态机与图标绘制在 app/view/chrome/window_chrome.{h,cpp}；
+// 此处只做状态转发（MaximizeState 由本类持有，生命周期与其一致）。
 bool ViewControl::windowIsMaximized() const {
-#ifdef _WIN32
-    HWND hwnd = glfwGetWin32Window(window_);
-    if (!hwnd) {
-        return maximized_;
-    }
-    // 原生最大化（WS_MAXIMIZE 置位）
-    if (::IsZoomed(hwnd)) {
-        return true;
-    }
-    // 自绘最大化：SetWindowPos 铺满工作区（不置 WS_MAXIMIZE 位，IsZoomed 为假），
-    // 用"当前矩形 ≈ 所在监视器工作区"判断，外部还原后矩形变化 → 状态自动同步。
-    RECT cur, work{};
-    if (!GetWindowRect(hwnd, &cur)) {
-        return maximized_;
-    }
-    HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi{sizeof(mi)};
-    if (mon && GetMonitorInfo(mon, &mi)) {
-        work = mi.rcWork;
-    } else {
-        SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
-    }
-    constexpr int kTol = 4;   // 像素容差（任务栏/边框/缩放误差）
-    return (std::abs(cur.left - work.left) <= kTol &&
-            std::abs(cur.top - work.top) <= kTol &&
-            std::abs(cur.right - work.right) <= kTol &&
-            std::abs(cur.bottom - work.bottom) <= kTol);
-#else
-    return maximized_;
-#endif
+    return chrome::windowIsMaximized(window_, maximizeState_);
 }
 
 void ViewControl::toggleMaximize() {
     if (!window_) {
         return;
     }
-#ifdef _WIN32
-    // 无边框窗口用 glfwMaximizeWindow/glfwRestoreWindow 时 GLFW 内部尺寸不同步
-    // （ImGui DisplaySize 停留在旧值，UI 不铺满、还原失效）。改用 Win32 手动
-    // 最大化到工作区 / 还原到记录位置，SetWindowPos → WM_SIZE → GLFW 同步尺寸。
-    if (HWND hwnd = glfwGetWin32Window(window_)) {
-        if (windowIsMaximized()) {
-            // 还原
-            if (restoreRectValid_) {
-                SetWindowPos(hwnd, nullptr, restoreL_, restoreT_,
-                             restoreR_ - restoreL_, restoreB_ - restoreT_,
-                             SWP_NOZORDER | SWP_NOACTIVATE);
-            } else {
-                ShowWindow(hwnd, SW_RESTORE);
-            }
-        } else {
-            // 最大化：先记录当前矩形，再铺满工作区（排除任务栏）
-            RECT cur;
-            if (GetWindowRect(hwnd, &cur)) {
-                restoreRectValid_ = true;
-                restoreL_ = cur.left;
-                restoreT_ = cur.top;
-                restoreR_ = cur.right;
-                restoreB_ = cur.bottom;
-            }
-            RECT work{};
-            HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-            MONITORINFO mi{sizeof(mi)};
-            if (mon && GetMonitorInfo(mon, &mi)) {
-                work = mi.rcWork;
-            } else {
-                SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0);
-            }
-            SetWindowPos(hwnd, HWND_TOP, work.left, work.top,
-                         work.right - work.left, work.bottom - work.top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-        maximized_ = windowIsMaximized();   // 同步到操作后的真实状态
-        return;
-    }
-#endif
-    // 非 Windows 兜底
-    if (maximized_) {
-        glfwRestoreWindow(window_);
-        maximized_ = false;
-    } else {
-        glfwMaximizeWindow(window_);
-        maximized_ = true;
-    }
+    chrome::toggleMaximize(window_, maximizeState_);
+    maximized_ = maximizeState_.maximized;
 }
 
 void ViewControl::setupDocking() {
-    // DockSpace 布局（主方案 §7.4：先右分 25%，再下分 5%，right 再下分 55%；
-    // 用 WorkSize 而非 DisplaySize）
+    // DockSpace 布局（主方案 §7.4）。默认布局树的构建与序列化在
+    // app/view/dock/dock_layout.{h,cpp}（本函数只负责 dockspace 窗口本身）。
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     // 偏移用实测标题栏高度（renderMainMenuBar 每帧测量）：字号/内边距变化后
     // 高度不再是 34，硬编码会导致 DockSpace 上移/下移、与标题栏重叠或留缝。
@@ -797,35 +1086,7 @@ void ViewControl::setupDocking() {
     ImGui::DockSpace(dockspaceId, workSize, ImGuiDockNodeFlags_None);
 
     if (!layoutInitialized_) {
-        // 默认布局（主方案 §7.4）
-        ImGui::DockBuilderRemoveNode(dockspaceId);
-        ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(dockspaceId, workSize);
-
-        ImGuiID right = ImGui::DockBuilderSplitNode(
-            dockspaceId, ImGuiDir_Right, 0.25f, nullptr, &dockspaceId);
-        ImGuiID bot = ImGui::DockBuilderSplitNode(
-            dockspaceId, ImGuiDir_Down, 0.10f, nullptr, &dockspaceId);
-        ImGuiID rightBot = ImGui::DockBuilderSplitNode(
-            right, ImGuiDir_Down, 0.55f, nullptr, &right);
-
-        // 3D 主视口：中央节点禁用标签栏（NoTabBar）——上方不再显示
-        // 窗口标签/功能栏（配合视口窗口 NoTitleBar），"主视口上方工具栏
-        // 默认隐藏且不再显示"（主方案 §7.4 主视图沉浸式）。
-        ImGui::DockBuilderDockWindow("##3D 视口", dockspaceId);
-        if (ImGuiDockNode* viewNode = ImGui::DockBuilderGetNode(dockspaceId)) {
-            viewNode->LocalFlags |= ImGuiDockNodeFlags_NoTabBar;
-        }
-        ImGui::DockBuilderDockWindow("分子列表", right);
-        ImGui::DockBuilderDockWindow("渲染设置", rightBot);
-        ImGui::DockBuilderDockWindow("主题设置", rightBot);
-        ImGui::DockBuilderDockWindow("材质选择", rightBot);
-        ImGui::DockBuilderDockWindow("图像导出", rightBot);
-        ImGui::DockBuilderDockWindow("绘图工具", rightBot);
-        ImGui::DockBuilderDockWindow("时间轴", bot);
-        ImGui::DockBuilderDockWindow("状态栏", bot);
-        ImGui::DockBuilderDockWindow("日志", bot);
-        ImGui::DockBuilderFinish(dockspaceId);
+        dock::buildDefaultLayout(dockspaceId, workSize);
         layoutInitialized_ = true;
     }
     ImGui::End();
@@ -835,75 +1096,16 @@ void ViewControl::resetLayout() {
     layoutInitialized_ = false;   // 下一帧重建默认布局
 }
 
-std::string ViewControl::serializeLayout() {
-    // base64(imgui_dock_serialized)，主方案 §12.2
-    if (ImGui::GetCurrentContext() == nullptr) {
-        return {};
-    }
-    size_t size = 0;
-    const char* ini = ImGui::SaveIniSettingsToMemory(&size);
-    if (ini == nullptr || size == 0) {
-        return {};
-    }
-    const std::string raw(ini, size);
-    static const char kBase64[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((raw.size() + 2) / 3 * 4);
-    for (size_t i = 0; i < raw.size(); i += 3) {
-        const uint32_t a = static_cast<uint8_t>(raw[i]);
-        const uint32_t b = i + 1 < raw.size() ? static_cast<uint8_t>(raw[i + 1]) : 0;
-        const uint32_t c = i + 2 < raw.size() ? static_cast<uint8_t>(raw[i + 2]) : 0;
-        const uint32_t n = (a << 16) | (b << 8) | c;
-        out += kBase64[(n >> 18) & 63];
-        out += kBase64[(n >> 12) & 63];
-        out += i + 1 < raw.size() ? kBase64[(n >> 6) & 63] : '=';
-        out += i + 2 < raw.size() ? kBase64[n & 63] : '=';
-    }
-    return out;
-}
+// 布局序列化/反序列化：实现在 app/view/dock/dock_layout.cpp（与默认布局同一模块）。
+// 此处保留同名静态包装以维持既有调用点（Application 启动/退出），
+// 并在恢复成功后把 layoutInitialized_ 置 false → 按保存布局重建 Dock 节点。
+std::string ViewControl::serializeLayout() { return dock::serializeLayout(); }
 
 bool ViewControl::deserializeLayout(const std::string& base64) {
-    if (base64.empty() || ImGui::GetCurrentContext() == nullptr) {
+    if (!dock::deserializeLayout(base64)) {
         return false;
     }
-    // base64 解码
-    static const std::array<int8_t, 256> kRev = [] {
-        std::array<int8_t, 256> table{};
-        table.fill(-1);
-        const char* k =
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        for (int i = 0; i < 64; ++i) {
-            table[static_cast<uint8_t>(k[i])] = static_cast<int8_t>(i);
-        }
-        return table;
-    }();
-    std::string raw;
-    raw.reserve(base64.size() / 4 * 3);
-    uint32_t buf = 0;
-    int bits = 0;
-    for (char ch : base64) {
-        if (ch == '=' || ch == '\n' || ch == '\r') {
-            continue;
-        }
-        const int8_t v = kRev[static_cast<uint8_t>(ch)];
-        if (v < 0) {
-            return false;
-        }
-        buf = (buf << 6) | static_cast<uint32_t>(v);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            raw += static_cast<char>((buf >> bits) & 0xFF);
-        }
-    }
-    if (raw.empty()) {
-        return false;
-    }
-    // 恢复布局（下次 ImGui::NewFrame 后生效）
-    ImGui::LoadIniSettingsFromMemory(raw.c_str(), raw.size());
-    layoutInitialized_ = false;   // 强制按保存布局重建 Dock 节点
-    spdlog::info("[ui] layout restored from settings ({} bytes)", raw.size());
+    layoutInitialized_ = false;
     return true;
 }
 
@@ -921,50 +1123,28 @@ void ViewControl::updateLoading(const LoadingState& state) {
     loadingActive_ = state.stage != LoadingStage::Done && state.stage != LoadingStage::Failed;
 }
 
+// 遮罩绘制在 app/view/overlay/loading_overlay.cpp；此处只做状态转发（倒计时
+// 由该模块自行处理并回置 loadingActive_）。
 void ViewControl::renderLoadingOverlay() {
-    if (!loadingActive_) {
-        return;
+    overlay::render(loading_, loadingActive_);
+}
+
+void ViewControl::svcTimeline(TimelineController* ctl) {
+    timelineCtl_ = ctl;
+    // 图形表示面板的 Trajectory 页签直接操作时间轴（帧范围/步长是**全局**的，
+    // 不是逐表示参数）—— 与时间轴面板共用同一份状态
+    if (repsTool_) {
+        repsTool_->setTimelineController(ctl);
     }
-    // 全屏半透明黑幕（主方案 §7.5：WindowBg alpha 0.55，NoInputs 屏蔽交互）
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->Pos);
-    ImGui::SetNextWindowSize(viewport->Size);
-    ImGui::SetNextWindowBgAlpha(0.55f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::Begin("##loading_overlay", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
-                     ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings);
-    ImGui::PopStyleVar();
-    // 居中卡片（文件名 + 大小 + 阶段指示 + 进度条）
-    const float cardW = 420.0f, cardH = 150.0f;
-    ImGui::SetCursorPos(ImVec2((viewport->Size.x - cardW) * 0.5f,
-                               (viewport->Size.y - cardH) * 0.5f));
-    ImGui::BeginChild("##loading_card", ImVec2(cardW, cardH), true);
-    ImGui::TextUnformatted(loading_.fileName.c_str());
-    ImGui::SameLine();
-    // formatFileSize（主方案 §7.5：人性化 KB/MB）
-    char sizeBuf[64];
-    const double mb = static_cast<double>(loading_.fileSize) / (1024.0 * 1024.0);
-    if (mb >= 1.0) {
-        std::snprintf(sizeBuf, sizeof(sizeBuf), "(%.1f MB)", mb);
-    } else {
-        std::snprintf(sizeBuf, sizeof(sizeBuf), "(%.1f KB)",
-                      static_cast<double>(loading_.fileSize) / 1024.0);
-    }
-    ImGui::TextDisabled("%s", sizeBuf);
-    ImGui::Separator();
-    static const char* stageNames[] = {"排队中", "读取文件", "分析键", "上传 GPU",
-                                       "完成", "失败"};
-    ImGui::Text("阶段：%s", stageNames[static_cast<int>(loading_.stage)]);
-    ImGui::Dummy(ImVec2(0, 8));
-    UITheme::loadingBar(loading_.progress, ImVec2(cardW - 40, 8));
-    ImGui::EndChild();
-    ImGui::End();
-    // 完成/失败倒计时关闭（主方案 §7.5：0.5–1s）
-    if (loading_.stage == LoadingStage::Done || loading_.stage == LoadingStage::Failed) {
-        if (++loading_.delayFrames > 45) {
-            loadingActive_ = false;
-        }
+}
+
+void ViewControl::svcIo(IoController* ctl) {
+    ioCtl_ = ctl;
+    // 图形表示面板的 ESP 参数需要两样 IO 能力：
+    //   · "当前加载文件路径" → 密度 cube 的默认值（打开 density.cube 时就是它）
+    //   · 文件打开对话框 → 选择 density / ESP cube
+    if (repsTool_) {
+        repsTool_->setIoController(ctl);
     }
 }
 
@@ -986,12 +1166,14 @@ void ViewControl::svcRender(RenderController* ctl) {
 
 void ViewControl::svcRep(RepresentationController* ctl) {
     repCtl_ = ctl;
-    // 渲染设置（样式/着色/缩放）与材质面板直通表示控制器
-    if (stylesTool_) {
-        stylesTool_->setRepController(ctl);
-    }
+    // 表示控制器只注入**表示级**面板：材质面板与「图形表示」面板。
+    // styles_tool 是场景级的（视角/背景/雾/光照），不再持有表示控制器 ——
+    // 表示的一切入口收敛到「图形表示」一处。
     if (materialTool_) {
         materialTool_->setRepController(ctl);
+    }
+    if (repsTool_) {
+        repsTool_->setRepController(ctl);
     }
 }
 

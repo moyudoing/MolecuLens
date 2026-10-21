@@ -27,6 +27,12 @@ public:
     size_t atomCount(size_t index) const;
     size_t bondCount(size_t index) const;
     size_t frameCount(size_t index) const;
+    // 轨迹来源文件名（无轨迹返回空串）；帧间隔 ps（无轨迹返回 0）
+    std::string moleculeTrajectorySource(size_t index) const;
+    float moleculeTrajectoryDt(size_t index) const;
+    // 实例指向的原子结构下标（同一结构的多个实例共享一份原子/键数据；
+    // 分子列表按它聚合，避免一个水盒刷出几千行同名条目）
+    uint32_t moleculeStructureIndex(size_t index) const;
 
     // 体系（组）列表：以体系为单位管理
     size_t systemCount() const;

@@ -23,7 +23,12 @@ public:
     // 便捷：parse 一站式
     Result<ParseResult> parseFile(const std::filesystem::path&, const ParseOptions& = {});
 
-    static ParserRegistry& defaultRegistry();   // 内建 PDB/GRO
+    // 全部已注册解析器支持的扩展名（小写、不含点、去重、按注册顺序）。
+    // 用途：文件对话框过滤器与解析器**共用同一事实来源** —— 新增格式只注册一次，
+    // UI 的"可打开文件类型"自动跟上，不会出现"解析器能读、对话框看不到"的错配。
+    [[nodiscard]] std::vector<std::string> allExtensions() const;
+
+    static ParserRegistry& defaultRegistry();   // 内建 PDB/GRO/SDF/cube
 
 private:
     std::vector<std::shared_ptr<IFileReader>> parsers_;

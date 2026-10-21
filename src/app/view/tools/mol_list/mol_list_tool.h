@@ -18,6 +18,9 @@ class MolScene;
 class MolListTool : public BaseToolView {
 public:
     const char* getTitle() const override { return "分子列表"; }
+    // 窗口稳定 ID（与 dock_layout.h 的 panel::kMolList 必须一致；
+    // 它参与 Dock 布局持久化，**不可随语言变化**）
+    [[nodiscard]] const char* getStableId() const override { return dock::panel::kMolList; }
     void render(DataManager* dm, MolScene* scene) override;
 
     // 控制器注入（ViewControl::svcScene 装配）

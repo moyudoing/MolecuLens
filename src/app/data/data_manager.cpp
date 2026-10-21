@@ -26,6 +26,13 @@ bool DataManager::moleculeVisible(size_t index) const {
     return scene_->instances()[index].visible;
 }
 
+uint32_t DataManager::moleculeStructureIndex(size_t index) const {
+    if (!scene_ || index >= scene_->instances().size()) {
+        return UINT32_MAX;
+    }
+    return scene_->instances()[index].structureIndex;
+}
+
 size_t DataManager::atomCount(size_t index) const {
     if (!scene_ || index >= scene_->instances().size()) {
         return 0;
@@ -46,6 +53,22 @@ size_t DataManager::frameCount(size_t index) const {
         return 0;
     }
     return scene_->instances()[index].trajectory->frames.size();
+}
+
+std::string DataManager::moleculeTrajectorySource(size_t index) const {
+    if (!scene_ || index >= scene_->instances().size() ||
+        !scene_->instances()[index].trajectory) {
+        return {};
+    }
+    return scene_->instances()[index].trajectory->source;
+}
+
+float DataManager::moleculeTrajectoryDt(size_t index) const {
+    if (!scene_ || index >= scene_->instances().size() ||
+        !scene_->instances()[index].trajectory) {
+        return 0.0f;
+    }
+    return scene_->instances()[index].trajectory->dt;
 }
 
 size_t DataManager::systemCount() const {

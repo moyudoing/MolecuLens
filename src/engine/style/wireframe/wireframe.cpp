@@ -41,14 +41,24 @@ namespace moleculens::engine {
                 continue;
                 }
 
-            // 构造线段实例数据 LineInst
-            LineInst inst{};
-            inst.aPos = glm::vec4(pos[ga], 0.0f);
-            inst.bPos = glm::vec4(pos[gb], 0.0f);
-            inst.color = Representer::colorForAtom(ctx, ga);
+            // 半键着色（VMD Lines 的做法）：一条键拆成两段，各用本端原子的颜色。
+            // 以前整条键用 a 端颜色 —— 水分子 O-H 全画成红色、蛋白质里 C-N 全按碳色，
+            // 视觉上就像"一条链只有一种颜色"。拆半后按原子名/元素配色才分得开。
+            const glm::vec3 pa = pos[ga];
+            const glm::vec3 pb = pos[gb];
+            const glm::vec3 mid = (pa + pb) * 0.5f;
 
-            // 往渲染命令列表追加一条LineInst绘制命令
-            out.append(Cmd::LineInst, &inst, sizeof(inst));
+            LineInst first{};
+            first.aPos = glm::vec4(pa, 0.0f);
+            first.bPos = glm::vec4(mid, 0.0f);
+            first.color = Representer::colorForAtom(ctx, ga);
+            out.append(Cmd::LineInst, &first, sizeof(first));
+
+            LineInst second{};
+            second.aPos = glm::vec4(mid, 0.0f);
+            second.bPos = glm::vec4(pb, 0.0f);
+            second.color = Representer::colorForAtom(ctx, gb);
+            out.append(Cmd::LineInst, &second, sizeof(second));
         }
     }
 

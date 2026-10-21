@@ -1,15 +1,13 @@
 // =============================================================================
-// MolecuLens · engine · style/ribbon/ribbon.cpp —— Ribbon 实现
+// Moleculens · engine · style/ribbon/ribbon.cpp —— Ribbon 实现
 // 规格：薄带状 backbone 表现，仅显示骨架路径
 // =============================================================================
 
 #include "engine/style/ribbon/ribbon.h"
 
-#include <map>
-
 #include <glm/glm.hpp>
 
-#include "engine/rep/representer.h"
+#include "engine/style/backbone/backbone_trace.h"
 #include "entity/molecule/molecule.h"
 #include "entity/scene/scene.h"
 
@@ -21,48 +19,12 @@ void drawRibbon(const RepContext& ctx, SceneCommandList& out) {
     if (!pos) {
         return;
     }
-    const size_t n = st.elements.size();
 
-    // 按 (chainId, residueId) 提取 backbone CA 原子（与 cartoon 同法）
-    struct ResidueCA {
-        glm::vec3 ca;
-        bool      hasCA = false;
-    };
-    struct Key {
-        int32_t chain;
-        int32_t res;
-        bool operator<(const Key& o) const {
-            return chain != o.chain ? chain < o.chain : res < o.res;
-        }
-    };
-    std::map<Key, ResidueCA> byRes;
-    for (size_t i = 0; i < n; ++i) {
-        const std::string_view name = ctx.scene->atomName(ctx.instance->structureIndex,
-                                                          static_cast<uint32_t>(i));
-        if (name != "CA" && name != "CA ") {
-            continue;
-        }
-        const int32_t cid = st.atoms[i].chainId;
-        const int32_t rid = st.atoms[i].residueId;
-        byRes[{cid, rid}].ca = pos[ctx.globalAtomBase + static_cast<uint32_t>(i)];
-        byRes[{cid, rid}].hasCA = true;
-    }
+    // CA 骨架路径（点自带全局原子下标 —— 配色/拾取必须用它，见 backbone_trace.h）
+    std::vector<std::vector<CaPoint>> chains;
+    extractCaChains(ctx, st, pos, chains);
 
-    // 按链分组（残基顺序由 map 保证）
-    std::vector<std::vector<glm::vec3>> chains;
-    int32_t curChain = INT32_MIN;
-    for (const auto& [k, r] : byRes) {
-        if (!r.hasCA) {
-            continue;
-        }
-        if (k.chain != curChain) {
-            chains.emplace_back();
-            curChain = k.chain;
-        }
-        chains.back().push_back(r.ca);
-    }
-
-    // Ribbon：薄带由细圆柱近似（薄，非管状：Thickness 远小于 Tube 半径）
+    // Ribbon：薄带由细圆柱近似（薄，非管状：厚度远小于 Tube 半径）
     const float ribbonThickness = 0.15f * ctx.rep->radiusScale;
 
     for (const auto& chain : chains) {
@@ -70,15 +32,22 @@ void drawRibbon(const RepContext& ctx, SceneCommandList& out) {
             continue;
         }
         for (size_t i = 0; i + 1 < chain.size(); ++i) {
+            const CaPoint& a = chain[i];
+            const CaPoint& b = chain[i + 1];
+            // 断链不连；选择子集须两端都在掩码内（见 backbone_trace.h）
+            if (glm::length(b.p - a.p) > kCaBreakThreshold) {
+                continue;
+            }
+            if (!caSegmentSelected(ctx, a, b)) {
+                continue;
+            }
             CylinderInst cyl;
-            cyl.aPos = glm::vec4(chain[i], 0.0f);
-            cyl.bPos = glm::vec4(chain[i + 1], 0.0f);
+            cyl.aPos = glm::vec4(a.p, 0.0f);
+            cyl.bPos = glm::vec4(b.p, 0.0f);
             cyl.radius = ribbonThickness;
             cyl.pad = 0.0f;
-            cyl.color = Representer::colorForAtom(ctx, ctx.globalAtomBase
-                                                      + static_cast<uint32_t>(i));
-            cyl.pickId_pad = glm::uvec2(ctx.globalAtomBase
-                                            + static_cast<uint32_t>(i), 0);
+            cyl.color = Representer::colorForAtom(ctx, a.globalAtom);
+            cyl.pickId_pad = glm::uvec2(a.globalAtom, 0);
             out.append(Cmd::CylinderInst, &cyl, sizeof(cyl));
         }
     }

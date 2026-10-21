@@ -2,10 +2,11 @@
 // MolecuLens · cli · cmd/convert/convert_cmd.cpp —— 格式转换
 // 规格来源：主方案 §11.3（moleculens-cli convert input output）
 //
-// 支持：.obj（含 .mtl）/ .stl / .pov —— 由命令流经对应导出器写出。
-// 说明：模型导出**不需要 GPU**：Renderer::prepare() 只做"场景 → 命令流"，
+// 支持：.obj（含 .mtl）/ .stl / .pov / .mlscene。
+//   · .obj/.stl/.pov —— 由命令流经对应导出器写出
+//   · .mlscene       —— 场景快照（SceneStructure → SceneSnapshot，engine 侧桥接）
+// 说明：以上都**不需要 GPU**：Renderer::prepare() 只做"场景 → 命令流"，
 //       不触碰任何 Vk* 资源，故 CLI 可在无窗口/无设备环境完整跑通导出链路。
-//       （.mlscene 需要 SceneStructure → SceneSnapshot 的桥接，另行落地。）
 // =============================================================================
 
 #include "src/cli/cmd/convert/convert_cmd.h"
@@ -23,7 +24,9 @@
 #include "engine/export/stl/stl_exporter.h"
 #include "engine/rep/representation.h"
 #include "engine/render/renderer.h"
+#include "engine/serialize/scene_bridge.h"   // .mlscene：SceneStructure → SceneSnapshot
 #include "entity/scene/scene.h"
+#include "persist/mlscene/mlscene.h"
 #include "io/registry/parser_registry.h"
 #include "spdlog/spdlog.h"
 
@@ -51,6 +54,9 @@ bool parseStyle(const std::string& name, engine::RepresentationType* out) {
     else if (s == "tube" || name == "管状") *out = RT::Tube;
     else if (s == "newcartoon") *out = RT::NewCartoon;
     else if (s == "ribbon" || name == "丝带") *out = RT::Ribbon;
+    else if (s == "plate" || name == "平板") *out = RT::Plate;
+    else if (s == "diamond" || s == "gem" || name == "菱形") *out = RT::Diamond;
+    else if (s == "dotcloud" || s == "dots" || name == "点云") *out = RT::DotCloud;
     else return false;
     return true;
 }
@@ -62,9 +68,9 @@ int convertCommand(CLI::App& app) {
     static std::string input, out;
     static std::string style = "ballstick";
 
-    auto* sub = app.add_subcommand("convert", "转换结构文件格式（.obj/.stl/.pov）");
+    auto* sub = app.add_subcommand("convert", "转换结构文件格式（.obj/.stl/.pov/.mlscene）");
     sub->add_option("input", input, "输入文件（.pdb/.gro/.sdf）")->required();
-    sub->add_option("output", out, "输出文件（.obj/.stl/.pov）")->required();
+    sub->add_option("output", out, "输出文件（.obj/.stl/.pov/.mlscene）")->required();
     sub->add_option("--repr", style, "表示风格（影响导出的几何）")
         ->default_val("ballstick");
 
@@ -118,8 +124,26 @@ int convertCommand(CLI::App& app) {
             rc = engine::StlExporter::exportScene(renderer.commandList(), out);
         } else if (endsWith(".pov")) {
             rc = engine::PovExporter::exportScene(renderer.commandList(), out);
+        } else if (endsWith(".mlscene")) {
+            // 场景快照：SceneStructure → SceneSnapshot（engine 侧桥接）→ 序列化。
+            // 命令流段由桥接从 commandStream 取出（此前 save() 内新建空命令流，
+            // 导致该段永远存不进文件）。相机不在 CLI 语义内 → 留空用快照默认值。
+            engine::SnapshotSource src;
+            src.scene = parsed->scene.get();
+            src.representations = &reps;
+            src.commandStream = &renderer.commandList();
+            const persist::mlscene::SceneSnapshot snap = engine::makeSnapshot(src);
+            auto sres = persist::mlscene::MlSceneSerializer::save(snap, out);
+            if (!sres) {
+                spdlog::error("[cli] convert: .mlscene 写出失败: {}",
+                              sres.errorMessage());
+                std::exit(3);
+            }
+            spdlog::info("[cli] convert: {} -> {} 完成（场景快照）", input, out);
+            return;
         } else {
-            spdlog::error("[cli] convert: 不支持的输出格式 '{}'（支持 .obj/.stl/.pov）",
+            spdlog::error("[cli] convert: 不支持的输出格式 '{}'（支持 .obj/.stl/.pov/"
+                          ".mlscene）",
                           out);
             std::exit(3);
         }

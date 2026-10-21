@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="tile2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#EAF2FF"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="116" fill="url(#tile2)"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="url(#ink)" stroke-width="24"/>
+  <circle cx="256" cy="256" r="112" fill="none" stroke="#2563EB" stroke-opacity="0.16" stroke-width="6"/>
+
+  <!-- 字母 M：以键线构成单字，两端与顶点即原子 -->
+  <path d="M168 344 L168 196 L256 292 L344 196 L344 344"
+        fill="none" stroke="url(#ink)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="168" cy="344" r="22" fill="#0EA5E9"/>
+  <circle cx="344" cy="344" r="22" fill="#0EA5E9"/>
+  <circle cx="256" cy="292" r="18" fill="#2563EB"/>
+</svg>

@@ -5,18 +5,10 @@
 // =============================================================================
 
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "global_ubo.glsl"
 
 layout(location = 0) in vec3 aLocalPos;      // 共享单位 icosphere 顶点
-
-layout(set = 0, binding = 0) uniform GlobalUBO {
-    mat4 viewProj;
-    vec4 cameraPos;
-    vec4 lightDir;
-    vec4 lightColor;
-    vec4 ambient;
-    vec4 fog;
-    vec4 sceneProps;
-} ubo;
 
 // 实例数据（binding 1）：SphereInst 48B
 layout(location = 1) in vec4  instPosRadius;   // xyz 中心, w 半径
@@ -32,9 +24,11 @@ layout(location = 4) out float vDist;
 
 void main() {
     // 解析法线：片元法线 = normalize(局部坐标)，主方案 §5.7.1
-    vec3 local = aLocalPos;
-    vec3 worldPos = instPosRadius.xyz + local * instPosRadius.w;
-    vec3 worldN = normalize(local);
+    const vec3 local = aLocalPos;
+    // sceneProps.x = 全局缩放：绕世界原点等比缩放（球心与半径同乘，均匀缩放不改法线）
+    const vec3 worldPos =
+        (instPosRadius.xyz + local * instPosRadius.w) * ubo.sceneProps.x;
+    const vec3 worldN = normalize(local);
 
     gl_Position = ubo.viewProj * vec4(worldPos, 1.0);
     vColor = instColor;

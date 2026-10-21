@@ -4,25 +4,37 @@
 //
 // 链路：解析 → 场景 → 命令流（Renderer::prepare，无 GPU）→ 离屏渲染
 //       （OffscreenRenderer headless 自建设备）→ RGBA8 回读 → PNG。
-// 说明：--depth 16 需要 16F 回读（readbackPixels 支持），但当前 PNG 编码器
-//       仅支持 8-bit，故此处对 16 显式报错而不是静默降级。
+// 说明：--depth 16 走"SSAA 浮点求平均 → 量化到 16 bit"路径（与 GUI 导出同一策略），
+//       由 writePng16 写出真正的 16-bit PNG。
 // =============================================================================
 
 #include "src/cli/cmd/render/render_cmd.h"
+#include "engine/export/overlay/esp_overlay_raster.h"   // ESP 色标条/极值标签栅格化
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>   // std::memcpy（16F 半浮点回读缓冲重组）
+#include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "engine/camera/camera.h"
 #include "engine/export/png/png_encoder.h"
+#include "engine/raytrace/ray_tracer.h"   // --rt：CPU 光追出图（P1）
 #include "engine/rep/representation.h"
+#include "engine/rep/representer.h"
+#include "engine/render/render_parameter.h"   // LightParams（--light-az/--light-el）
 #include "engine/render/renderer.h"
+#include "engine/style/espsurface/esp_surface.h"
 #include "engine/vulkan/offscreen/offscreen_renderer.h"
 #include "entity/scene/scene.h"
+#include "entity/trajectory/dcd_reader.h"
+#include "entity/trajectory/trr/trr_reader.h"
+#include "entity/trajectory/xtc/xtc_reader.h"
 #include "io/registry/parser_registry.h"
 #include "spdlog/spdlog.h"
 
@@ -47,8 +59,43 @@ bool parseStyle(const std::string& name, engine::RepresentationType* out) {
     else if (s == "tube") *out = RT::Tube;
     else if (s == "newcartoon") *out = RT::NewCartoon;
     else if (s == "ribbon") *out = RT::Ribbon;
+    else if (s == "espsurface" || s == "esp") *out = RT::EspSurface;
+    else if (s == "plate" || s == "平板") *out = RT::Plate;
+    else if (s == "diamond" || s == "gem" || s == "菱形") *out = RT::Diamond;
+    else if (s == "dotcloud" || s == "dots" || s == "点云") *out = RT::DotCloud;
     else return false;
     return true;
+}
+
+// 配色方案（与 GUI 的「配色」下拉一致；name = VMD Name 观感）
+bool parseColorScheme(const std::string& name, engine::ColorScheme* out) {
+    std::string s = name;
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    using CS = engine::ColorScheme;
+    if (s == "element" || s == "cpk") *out = CS::ElementCPK;
+    else if (s == "chain") *out = CS::Chain;
+    else if (s == "residue" || s == "resid") *out = CS::Residue;
+    else if (s == "bfactor" || s == "beta") *out = CS::BFactor;
+    else if (s == "uniform" || s == "single") *out = CS::Uniform;
+    else if (s == "name") *out = CS::AtomName;
+    else return false;
+    return true;
+}
+
+// 多表示规格解析：style[:selection[:color[:opacity]]]
+void splitColon(const std::string& s, std::vector<std::string>* out) {
+    out->clear();
+    std::string cur;
+    for (char c : s) {
+        if (c == ':') {
+            out->push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    out->push_back(cur);
 }
 
 // 相机预设（对齐到包围球正面 / 侧面 / 俯视）
@@ -106,22 +153,132 @@ int renderCommand(CLI::App& app) {
     // static：callback 在 CLI11_PARSE（main）时执行，函数已返回——局部变量悬垂
     static std::string input, out = "out.png";
     static std::string repr = "ballstick";
+    static std::string colorName;           // 空 = 自动（线框默认按原子名，其余元素 CPK）
+    static std::vector<std::string> repSpecs;   // --rep 可重复：style[:sel[:color[:opacity]]]
     static int width = 1920, height = 1080;
+    static bool systemSurface = false;   // --system-surface：整体系合并为一个表面（G5）
+    static int meshDetail = 3;      // 球体细分档（1=80 … 4=5120 面）
+static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图（P1 原型）
+    static int meshSegments = 24;   // 键圆柱截面段数
+    static float zoom = 1.0f;       // 相机拉近倍数（用于验证视锥剔除）
     static std::string camera = "front";
     static int scale = 1, msaa = 4;
     static std::string bg = "current";
+    // 渲染风格预设：default / soft / publication / vivid（见 engine/render_parameter.h）。
+    // publication 会同时切到白底 + 高调柔光 + 关闭阴影，适合论文插图。
+    static std::string styleName = "default";
+    // 剖切面（v2.3）：--clip x|-x|y|-y|z|-z，--clip-offset 为沿法线的位置（Å）
+    static std::string clipAxis;
+    static float clipOffset = 0.0f;
+    // 统一色（v2.3）：--color "#RRGGBB"，给基础表示一个低饱和主色（表面/球棍均可）
+    static std::string baseColor;
     static int depth = 8;
+    // 方向光角度（度）：999 = 用场景默认。加这两个开关是为了能复现/验证
+    // "壳内分子把影子投到半透明壳上" 这类只在特定光向下可见的缺陷。
+    static float lightAzDeg = 999.0f;
+    static float lightElDeg = 999.0f;
+    // —— ESP 映射表面（density 定几何 / ESP cube 定颜色）——
+    static std::string espCube;          // 静电势 cube 路径；提供则叠加 ESP 表面
+    static std::string densityCube;      // 密度 cube 路径（ESP 表面几何；可缺省）
+    static std::string espCmap = "reference";   // 色标方案（默认参考截图配色）
+    static float isoLevel = 0.001f;      // 密度等值面阈值（a.u.）
+    static float espVmin = -45.0f;       // 色标下限（kcal/mol）
+    static float espVmax = 45.0f;        // 色标上限（kcal/mol）
+    static bool  espNoAutoRange = false; // --no-auto-range：使用固定 vmin/vmax
+    static float espOpacity = 0.85f;     // 表面不透明度
+    static float espDiffuse = 0.90f;     // 表面漫反射强度（烘进顶点色，控制颜色深浅）
+    static float espAmbient = 0.30f;     // 表面环境光
+    static float espSpecular = 0.15f;    // 表面高光
+    static float espShininess = 48.0f;   // 表面高光指数
+    static bool  espInvert = false;      // 翻转 ESP 色标方向
+    static float baseOpacity = 1.0f;     // 基础表示不透明度（测试/透明表面用）
+    static std::string materialName;     // 材质预设名（Opaque/Glass1/Glass2/...）
+    // 表面/快速表面参数（<=0 表示沿用 Representation 默认值）
+    static float surfIso = -1.0f;        // 等值面阈值
+    static float surfGrid = -1.0f;       // 网格间距（Å；越小越精细越慢）
+    // 轨迹：把指定帧的坐标写进场景后再渲染（DCD/XTC/TRR）
+    static std::string trajPath;         // 轨迹文件；空则渲染结构文件本身
+    static int trajFrame = 0;            // 帧号（0 起；-1 = 末帧）
 
     auto* sub = app.add_subcommand("render", "无头渲染分子为图像");
     sub->add_option("input", input, "输入结构文件 (.pdb/.gro)")->required();
     sub->add_option("--repr", repr, "表示风格 (wireframe/stick/ballstick/spacefill/...)");
+    sub->add_option("--coloring", colorName,
+                    "配色方法 (element/chain/residue/bfactor/uniform/name；"
+                    "name = VMD Name 观感：碳青/氮蓝/氧红/氢白)");
+    sub->add_option("--rep", repSpecs,
+                    "多表示（可重复），格式 style[:selection[:color[:opacity]]]，"
+                    "例如 --rep 'quicksurf:all:name:0.25' --rep 'surface:not resname SOL:name'");
+    sub->add_option("--material", materialName,
+                    "材质预设名（Opaque/Transparent/Glass1/Glass2/Glass3/Diffuse/"
+                    "Glossy/...；缺省 Opaque。玻璃类需配合 --opacity 才透）");
+    sub->add_flag("--system-surface", systemSurface,
+                  "整体系合并表面：Surface/QuickSurf 只生成一个表面（含溶剂）");
+    sub->add_option("--surf-iso", surfIso,
+                    "表面等值面阈值（surface/quicksurf，缺省用内置 0.5）");
+    sub->add_option("--surf-grid", surfGrid,
+                    "表面网格间距 Å（越小越精细越慢，缺省 0.5）");
     sub->add_option("--size", width, "宽度")->default_val(1920);
     sub->add_option("--height", height, "高度")->default_val(1080);
+    sub->add_option("--detail", meshDetail,
+                    "球体细分档 1-4（1=80/2=320/3=1280/4=5120 面；预览默认 3）")
+        ->default_val(3);
+    sub->add_option("--seg", meshSegments, "键圆柱截面段数（预览默认 24，导出可用 48）")
+        ->default_val(24);
+    sub->add_option("--zoom", zoom, "相机拉近倍数（>1 放大；用于验证视锥剔除）")
+        ->default_val(1.0f);
+    sub->add_option("--rt", rtSpp, "CPU 光追采样数（>0 时改用光追出图；1 = 单样本，4 = 抗锯齿）")->default_val(0);
     sub->add_option("--camera", camera, "相机预设 (front/side/top)");
     sub->add_option("--scale", scale, "超采样倍数（SSAA）")->default_val(1);
     sub->add_option("--msaa", msaa, "MSAA（离屏恒 1x，保留参数）")->default_val(4);
     sub->add_option("--bg", bg, "背景 (current/white/transparent)")->default_val("current");
+    sub->add_option("--style", styleName,
+                    "渲染风格预设 (default/soft/publication/vivid)；publication 自动白底+柔光+无阴影")
+        ->default_val("default");
+    sub->add_option("--clip", clipAxis,
+                    "剖切面轴向 (x/-x/y/-y/z/-z)；切开分子/表面观察内部");
+    sub->add_option("--clip-offset", clipOffset,
+                    "剖切面沿法线的位置 Å（保留 <= 该位置的一侧）")
+        ->default_val(0.0f);
+    sub->add_option("--color", baseColor,
+                    "统一色 #RRGGBB（覆盖基础表示的元素配色；ESP/轨道表示不受影响）");
     sub->add_option("--depth", depth, "位深 (8/16)")->default_val(8);
+    sub->add_option("--light-az", lightAzDeg,
+                    "方向光方位角（度；0 = +Z 正对相机，180 = 背光；缺省用场景默认）");
+    sub->add_option("--light-el", lightElDeg,
+                    "方向光仰角（度；90 = 正上方；缺省用场景默认）");
+    sub->add_option("--esp", espCube,
+                    "静电势 cube 文件（Multiwfn/Gaussian ESP.cub）；提供后叠加 ESP 映射表面");
+    sub->add_option("--density", densityCube,
+                    "密度 cube 文件（ESP 表面几何）；缺省时用 --esp 文件本身");
+    sub->add_option("--iso", isoLevel, "密度等值面阈值 (a.u.，默认 0.001 ≈ vdW 表面)")
+        ->default_val(0.001);
+    sub->add_option("--vmin", espVmin, "ESP 色标下限 (kcal/mol，--no-auto-range 时生效)")
+        ->default_val(-45.0);
+    sub->add_option("--vmax", espVmax, "ESP 色标上限 (kcal/mol，--no-auto-range 时生效)")
+        ->default_val(45.0);
+    sub->add_flag("--no-auto-range", espNoAutoRange,
+                  "关闭 ESP 色标自动范围（改用 --vmin/--vmax）");
+    sub->add_flag("--invert", espInvert, "翻转 ESP 色标方向（低值端 ↔ 高值端）");
+    sub->add_option("--cmap", espCmap,
+                    "ESP 色标方案 (reference/spectral/rainbow/rwb/bwr/coolwarm/turbo/viridis/jet)")
+        ->default_val("reference");
+    sub->add_option("--esp-opacity", espOpacity, "ESP 表面不透明度 (0.05~1.0)")
+        ->default_val(0.85);
+    sub->add_option("--esp-diffuse", espDiffuse,
+                    "ESP 表面漫反射强度/颜色深浅 (0.2~1.0)")
+        ->default_val(0.90);
+    sub->add_option("--esp-ambient", espAmbient, "ESP 表面环境光 (0.0~1.0)")
+        ->default_val(0.30);
+    sub->add_option("--esp-specular", espSpecular, "ESP 表面高光强度 (0.0~1.0)")
+        ->default_val(0.15);
+    sub->add_option("--esp-shininess", espShininess, "ESP 表面高光指数")
+        ->default_val(48.0);
+    sub->add_option("--opacity", baseOpacity, "基础表示不透明度 (0.05~1.0)")
+        ->default_val(1.0);
+    sub->add_option("--traj", trajPath,
+                    "轨迹文件 (.dcd/.xtc/.trr)；提供后渲染其中一帧而非结构文件首帧");
+    sub->add_option("--frame", trajFrame, "轨迹帧号（0 起；-1 = 末帧）")->default_val(0);
     sub->add_option("--out", out, "输出路径")->default_val("out.png");
 
     sub->callback([&]() {
@@ -131,8 +288,8 @@ int renderCommand(CLI::App& app) {
             spdlog::error("[cli] render: 非法尺寸 {}x{}", width, height);
             std::exit(3);
         }
-        if (depth != 8) {
-            spdlog::error("[cli] render: --depth {} 暂不支持（PNG 编码器仅 8-bit）", depth);
+        if (depth != 8 && depth != 16) {
+            spdlog::error("[cli] render: --depth {} 非法（仅 8 或 16）", depth);
             std::exit(3);
         }
 
@@ -148,21 +305,313 @@ int renderCommand(CLI::App& app) {
             std::exit(3);
         }
 
+        // —— 1.5 轨迹帧（可选）：把指定帧的世界坐标写进场景后再渲染 ——
+        if (!trajPath.empty()) {
+            entity::TrrReader trr;
+            entity::XtcReader xtc;
+            entity::DcdReader dcd;
+            entity::ITrajectoryReader* rdr = nullptr;
+            if (trr.canOpen(trajPath)) {
+                rdr = &trr;
+            } else if (xtc.canOpen(trajPath)) {
+                rdr = &xtc;
+            } else if (dcd.canOpen(trajPath)) {
+                rdr = &dcd;
+            }
+            if (rdr == nullptr) {
+                spdlog::error("[cli] render: 无法识别轨迹格式（支持 .dcd/.xtc/.trr）: {}",
+                              trajPath);
+                std::exit(3);
+            }
+            auto opened = rdr->open(trajPath);
+            if (!opened) {
+                spdlog::error("[cli] render: 轨迹打开失败: {}", opened.errorMessage());
+                std::exit(3);
+            }
+            const uint64_t frames = rdr->frameCount();
+            uint64_t frame = 0;
+            if (trajFrame < 0) {
+                frame = frames > 0 ? frames - 1 : 0;
+            } else {
+                frame = static_cast<uint64_t>(trajFrame);
+            }
+            auto ts = rdr->readFrame(frame);
+            if (!ts) {
+                spdlog::error("[cli] render: 读取轨迹帧 {} 失败: {}", frame, ts.errorMessage());
+                std::exit(3);
+            }
+            std::vector<glm::vec3> world(ts->positions.size());
+            const auto& inst = parsed->scene->instances()[0];
+            for (size_t i = 0; i < world.size(); ++i) {
+                world[i] = inst.transform.apply(ts->positions[i]);
+            }
+            parsed->scene->writeFramePositions(0, world);
+            spdlog::info("[cli] render: 使用轨迹帧 {}/{}（{} 原子）", frame, frames,
+                         ts->positions.size());
+        }
+
+        // —— 1.6 方向光角度（可选）：覆盖场景默认光向 ——
+        // 用途：复现只在特定光向下可见的渲染缺陷（例如壳内分子把影子投到
+        // 半透明壳上形成的"幽灵"），也便于出图时统一光位。
+        if (lightAzDeg < 900.0f || lightElDeg < 900.0f) {
+            engine::LightParams lp;
+            lp.setDirLightAngles(glm::radians(lightAzDeg < 900.0f ? lightAzDeg : 33.7f),
+                                 glm::radians(lightElDeg < 900.0f ? lightElDeg : 48.0f));
+            auto& props = parsed->scene->properties();
+            for (int i = 0; i < 3; ++i) {
+                props.dirLightDir[i] = lp.dirLightDir[i];
+            }
+            parsed->scene->setDirty(entity::DIRTY_PROPERTIES);
+            spdlog::info("[cli] render: 方向光 az={}° el={}°",
+                         lightAzDeg < 900.0f ? lightAzDeg : 33.7f,
+                         lightElDeg < 900.0f ? lightElDeg : 48.0f);
+        }
+
         // —— 2. 场景 → 命令流 ——
         engine::RepresentationType type = engine::RepresentationType::BallAndStick;
         if (!parseStyle(repr, &type)) {
             spdlog::error("[cli] render: 未知风格 '{}'", repr);
             std::exit(3);
         }
+        engine::ColorScheme colorScheme = engine::ColorScheme::ElementCPK;
+        // 白底/透明底导出时，氢的白色会隐没 -> 让配色逻辑压暗氢
+        engine::Representer::setLightBackground(bg == "white" || bg == "transparent");
+        if (!colorName.empty()) {
+            if (!parseColorScheme(colorName, &colorScheme)) {
+                spdlog::error("[cli] render: 未知配色 '{}'", colorName);
+                std::exit(3);
+            }
+        } else if (type == engine::RepresentationType::Wireframe) {
+            // 未指定配色时：线框默认用 VMD 的按原子名配色（与 GUI 默认策略一致）
+            colorScheme = engine::ColorScheme::AtomName;
+        }
+        // ESP 表面：--esp 提供静电势 cube 时追加一条 EspSurface 表示
+        // （密度 cube = 输入结构文件；颜色来自 ESP cube）。
+        if (!espCube.empty() && !std::filesystem::exists(espCube)) {
+            spdlog::error("[cli] render: 静电势 cube 不存在: {}", espCube);
+            std::exit(3);
+        }
         static std::vector<engine::Representation> reps;
-        engine::Representation rep;
-        rep.name = "cli";
-        rep.type = type;
-        reps.assign(1, rep);
+        reps.clear();
+        if (!repSpecs.empty()) {
+            // 多表示：每条 --rep 生成一条表示（顺序即绘制顺序；透明层放前面）
+            int repIdx = 0;
+            for (const auto& spec : repSpecs) {
+                std::vector<std::string> fields;
+                splitColon(spec, &fields);
+                engine::Representation rep;
+                rep.name = "cli-" + std::to_string(repIdx++);
+                if (fields.empty() || !parseStyle(fields[0], &rep.type)) {
+                    spdlog::error("[cli] render: --rep 规格里未知风格 '{}'", spec);
+                    std::exit(3);
+                }
+                if (fields.size() > 1) {
+                    rep.selection = fields[1];
+                }
+                if (fields.size() > 2 && !fields[2].empty() &&
+                    !parseColorScheme(fields[2], &rep.colorScheme)) {
+                    spdlog::error("[cli] render: --rep 规格里未知配色 '{}'", fields[2]);
+                    std::exit(3);
+                }
+                if (fields.size() > 3 && !fields[3].empty()) {
+                    try {
+                        rep.opacity = std::clamp(std::stof(fields[3]), 0.05f, 1.0f);
+                    } catch (const std::exception&) {
+                        spdlog::error("[cli] render: --rep 规格里非法不透明度 '{}'", fields[3]);
+                        std::exit(3);
+                    }
+                }
+                if (fields.size() > 4 && !fields[4].empty()) {
+                    const int mi = engine::materialPresetIndexByName(fields[4].c_str());
+                    if (mi < 0) {
+                        spdlog::error("[cli] render: --rep 规格里未知材质 '{}'", fields[4]);
+                        std::exit(3);
+                    }
+                    rep.materialPreset = mi;
+                }
+                if (surfIso > 0.0f) {
+                    rep.surfIsovalue = surfIso;
+                }
+                if (surfGrid > 0.0f) {
+                    rep.surfGridSpacing = surfGrid;
+                }
+                // --system-surface 对 --rep 生成的每条表示同样生效（此前只作用于 --repr，
+                // 导致「多表示 + 整体系表面」的组合静默退化成逐分子表面）
+                rep.systemSurface = systemSurface;
+                reps.push_back(rep);
+            }
+        } else if (type != engine::RepresentationType::EspSurface) {
+            engine::Representation rep;
+            rep.name = "cli";
+            rep.type = type;
+            rep.opacity = std::clamp(baseOpacity, 0.05f, 1.0f);
+            // 配色（v2.3）：element / chain / residue / bfactor / uniform / name
+            rep.colorScheme = colorScheme;
+            rep.systemSurface = systemSurface;
+            // 表面/快速表面的等值面与网格质量（仅在这两种风格下有意义）
+            if (surfIso > 0.0f) {
+                rep.surfIsovalue = surfIso;
+            }
+            if (surfGrid > 0.0f) {
+                rep.surfGridSpacing = surfGrid;
+            }
+            reps.push_back(rep);
+        }
+        if (!espCube.empty()) {
+            engine::Representation esp;
+            esp.name = "cli-esp";
+            esp.type = engine::RepresentationType::EspSurface;
+            esp.espDensityCubePath =
+                std::filesystem::absolute(densityCube.empty() ? espCube : densityCube)
+                    .string();
+            esp.espPotentialCubePath = std::filesystem::absolute(espCube).string();
+            esp.espIsovalue = isoLevel;
+            esp.espVminKcal = espVmin;
+            esp.espVmaxKcal = espVmax;
+            esp.espAutoRange = !espNoAutoRange;
+            esp.espInvert = espInvert;
+            esp.espColormap = static_cast<int32_t>(engine::espColormapFromName(espCmap));
+            // 半透明表面：颜色完全来自逐顶点 ESP；材质给中性白 + 较强高光（更像
+            // 参考图的玻璃质感；ambient 略低让明暗对比更明显；diffuse 控制亮度：
+            // 顶点色已乘 diffuse，过高会被光照刷白、颜色发灰）。
+            esp.opacity = std::clamp(espOpacity, 0.05f, 1.0f);
+            esp.ambient[0] = esp.ambient[1] = esp.ambient[2] =
+                std::clamp(espAmbient, 0.0f, 1.0f);
+            esp.ambient[3] = 1.0f;
+            esp.diffuse[0] = esp.diffuse[1] = esp.diffuse[2] =
+                std::clamp(espDiffuse, 0.2f, 1.0f);
+            esp.diffuse[3] = 1.0f;
+            esp.specular[0] = esp.specular[1] = esp.specular[2] =
+                std::clamp(espSpecular, 0.0f, 1.0f);
+            esp.specular[3] = 1.0f;
+            esp.shininess = std::max(1.0f, espShininess);
+            esp.roughness = 0.30f;
+            reps.push_back(esp);
+        }
+        if (reps.empty()) {
+            spdlog::error(
+                "[cli] render: --repr espsurface 需要同时提供 --esp <静电势 cube>");
+            std::exit(3);
+        }
+
+        // —— 统一色（v2.3）：基础表示改 ColorScheme::Uniform + 低饱和主色 ——
+        if (!baseColor.empty() && !reps.empty()) {
+            auto nib = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            bool ok = baseColor.size() == 7 && baseColor[0] == '#';
+            int v[6] = {0, 0, 0, 0, 0, 0};
+            for (int i = 0; ok && i < 6; ++i) {
+                v[i] = nib(baseColor[static_cast<size_t>(i + 1)]);
+                ok = v[i] >= 0;
+            }
+            if (!ok) {
+                spdlog::error("[cli] render: --color 需要 #RRGGBB，收到 '{}'", baseColor);
+                std::exit(3);
+            }
+            const float c[3] = {
+                static_cast<float>(v[0] * 16 + v[1]) / 255.0f,
+                static_cast<float>(v[2] * 16 + v[3]) / 255.0f,
+                static_cast<float>(v[4] * 16 + v[5]) / 255.0f};
+            reps[0].colorScheme = engine::ColorScheme::Uniform;
+            for (int i = 0; i < 3; ++i) {
+                reps[0].diffuse[i] = c[i];
+                reps[0].ambient[i] = c[i] * 0.55f;
+            }
+            spdlog::info("[cli] render: 统一色 {}（只作用于基础表示）", baseColor);
+        }
+
+        // —— 材质预设默认值（v2.4）：--material 对所有未在 --rep 里显式指定材质的表示生效 ——
+        if (!materialName.empty()) {
+            const int mi = engine::materialPresetIndexByName(materialName.c_str());
+            if (mi < 0) {
+                spdlog::error(
+                    "[cli] render: 未知材质 '{}'（示例：Opaque/Transparent/Glass1/Glass2/"
+                    "Glass3/Diffuse/Glossy）",
+                    materialName);
+                std::exit(3);
+            }
+            int applied = 0;
+            for (auto& r : reps) {
+                if (r.materialPreset == 0) {  // 0 = Opaque（未被 --rep 第 5 段覆盖）
+                    r.materialPreset = mi;
+                    ++applied;
+                }
+            }
+            spdlog::info("[cli] render: 材质 {}（index {}，作用于 {} 个表示）", materialName,
+                         mi, applied);
+        }
 
         engine::Renderer renderer;
         renderer.setScene(parsed->scene.get());
         renderer.bindRepresentations(&reps, 1);
+
+        // —— 渲染风格预设（v2.2）——
+        // 风格只进 GlobalUBO（不重建命令流），必须在 viewFor 之前写进 renderer。
+        // publication 同时改光照/背景：单开"描边"而没有白底高调光，看起来只是
+        // 一圈脏边；预设把两者绑在一起才是可复现的出图配置。
+        const engine::RenderStylePreset stylePreset =
+            engine::renderStylePresetFromKey(styleName);
+        renderer.setRenderStyle(engine::renderStylePreset(stylePreset));
+        if (stylePreset == engine::RenderStylePreset::Publication) {
+            auto& props = parsed->scene->properties();
+            props.skyColor[0] = props.skyColor[1] = props.skyColor[2] = 1.0f;
+            props.groundColor[0] = 0.90f;
+            props.groundColor[1] = 0.90f;
+            props.groundColor[2] = 0.94f;
+            props.ambientColor[0] = 0.95f;
+            props.ambientColor[1] = 0.95f;
+            props.ambientColor[2] = 1.0f;
+            props.ambient = 0.34f;           // 高调环境光（比 0.42 收一档，避免洗白）
+            props.dirLightIntensity = 0.55f; // 主光保留造型
+            props.shadowsEnabled = false;    // 出版图普遍不用硬阴影
+            if (bg == "current") {
+                bg = "white";
+            }
+            parsed->scene->setDirty(entity::DIRTY_PROPERTIES);
+            spdlog::info("[cli] render: 风格 publication（白底 / 柔光 / 关闭阴影）");
+        } else if (stylePreset == engine::RenderStylePreset::Soft) {
+            auto& props = parsed->scene->properties();
+            props.ambient = std::max(props.ambient, 0.55f);
+            parsed->scene->setDirty(entity::DIRTY_PROPERTIES);
+        } else if (stylePreset == engine::RenderStylePreset::Vivid) {
+            auto& props = parsed->scene->properties();
+            props.ambient = std::min(props.ambient, 0.38f);
+            parsed->scene->setDirty(entity::DIRTY_PROPERTIES);
+        }
+
+        // —— 剖切面（v2.3）：世界空间平面，保留 <= offset 一侧 ——
+        if (!clipAxis.empty()) {
+            glm::vec3 n(1.0f, 0.0f, 0.0f);
+            if (clipAxis == "-x" || clipAxis == "-X") {
+                n = glm::vec3(-1.0f, 0.0f, 0.0f);
+            } else if (clipAxis == "x" || clipAxis == "X") {
+                n = glm::vec3(1.0f, 0.0f, 0.0f);
+            } else if (clipAxis == "-y" || clipAxis == "-Y") {
+                n = glm::vec3(0.0f, -1.0f, 0.0f);
+            } else if (clipAxis == "y" || clipAxis == "Y") {
+                n = glm::vec3(0.0f, 1.0f, 0.0f);
+            } else if (clipAxis == "-z" || clipAxis == "-Z") {
+                n = glm::vec3(0.0f, 0.0f, -1.0f);
+            } else if (clipAxis == "z" || clipAxis == "Z") {
+                n = glm::vec3(0.0f, 0.0f, 1.0f);
+            } else {
+                spdlog::error("[cli] render: 未知剖切轴 '{}'（x/-x/y/-y/z/-z）", clipAxis);
+                std::exit(3);
+            }
+            auto& props = parsed->scene->properties();
+            props.clipEnabled = true;
+            props.clipPlane[0] = n.x;
+            props.clipPlane[1] = n.y;
+            props.clipPlane[2] = n.z;
+            props.clipPlane[3] = -clipOffset;
+            parsed->scene->setDirty(entity::DIRTY_PROPERTIES);
+            spdlog::info("[cli] render: 剖切面 n=({:.2f},{:.2f},{:.2f}) offset={} Å",
+                         n.x, n.y, n.z, clipOffset);
+        }
         renderer.prepare();
 
         // 相机：自动取景后套用预设
@@ -173,7 +622,56 @@ int renderCommand(CLI::App& app) {
             cam.centerOn(center, radius);
         }
         applyCameraPreset(cam, camera);
+        if (zoom > 0.0f) {
+            cam.distance /= zoom;   // 拉近：验证视锥剔除（大部分实例移出视野）
+        }
 
+
+        // —— 2.9 可选：CPU 光追出图（P1 原型，--rt N）——
+        // 用途：验证 BVH 加速与光追画质；图元来自同一条命令流，因此与光栅化
+        //       路径共用材质/颜色，可直接对比。
+        if (rtSpp > 0) {
+            engine::RtScene rtScene;
+            const auto tScene0 = std::chrono::steady_clock::now();
+            if (!engine::buildRtScene(renderer.commandList(), rtScene)) {
+                spdlog::error("[cli] render: 光追场景构建失败");
+                std::exit(3);
+            }
+            const auto sceneMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - tScene0)
+                                     .count();
+            engine::RtCamera rtc;
+            rtc.position = cam.position();
+            rtc.target = cam.target;
+            rtc.up = glm::vec3(0.0f, 1.0f, 0.0f);
+            rtc.fovDeg = cam.fov;
+            rtc.width = static_cast<uint32_t>(width);
+            rtc.height = static_cast<uint32_t>(height);
+            engine::RtLight rtl;   // 默认半球光 + 方向光（与 GPU 侧默认预设一致）
+            glm::vec3 bgColor(0.05f, 0.05f, 0.08f);
+            if (bg == "white") {
+                bgColor = glm::vec3(1.0f);
+            }
+            std::vector<uint8_t> rgba;
+            const auto t0 = std::chrono::steady_clock::now();
+            if (!engine::rayTrace(rtScene, rtc, rtl, bgColor, rtSpp, rgba)) {
+                spdlog::error("[cli] render: 光追失败");
+                std::exit(3);
+            }
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
+            spdlog::info("[cli] rt: {} 球 + {} 胶囊 + {} 三角, {} spp, {}x{}, {} ms（场景解包 {} ms）",
+                         rtScene.spheres.size(), rtScene.cylinders.size(),
+                         rtScene.triangles.size(), rtSpp, width, height, ms, sceneMs);
+            if (!engine::writePng(out, rtc.width, rtc.height, rgba)) {
+                spdlog::error("[cli] render: PNG 写出失败: {}", out);
+                std::exit(3);
+            }
+            spdlog::info("[cli] render: {} -> {} ({}x{}, rt={} spp)", input, out, width,
+                         height, rtSpp);
+            return;
+        }
         // —— 3. 离屏渲染（headless 自建设备）——
         const int ss = std::max(1, scale);
         const uint32_t rw = static_cast<uint32_t>(width * ss);
@@ -188,10 +686,15 @@ int renderCommand(CLI::App& app) {
             spdlog::error("[cli] render: 离屏渲染器初始化失败: {}", err);
             std::exit(3);
         }
+        // 网格质量档：默认 3/24（= 预览）；--detail 4 --seg 48 为高倍放大导出用
+        off.setMeshQuality(meshDetail, meshSegments);
 
-        // 背景：white = 纯白；transparent 当前降级为白（PNG 编码器写不透明 alpha）
+        // 背景：white = 纯白；transparent = 真透明（清屏 alpha=0，几何写 alpha=1）
         const glm::vec4 bgSolid(0.05f, 0.05f, 0.08f, 1.0f);
-        if (bg == "white" || bg == "transparent") {
+        if (bg == "transparent") {
+            const float white[3] = {1.0f, 1.0f, 1.0f};
+            off.setBackground(white, 0.0f);
+        } else if (bg == "white") {
             const float white[3] = {1.0f, 1.0f, 1.0f};
             off.setBackground(white);
         } else {
@@ -199,6 +702,35 @@ int renderCommand(CLI::App& app) {
         }
 
         engine::RenderView view = renderer.viewFor(cam, rw, rh);
+
+        // 16-bit：优先走 16F 半浮点附件（线性、不经 8-bit 量化；回读后由
+        // writePng16FromHalfRgba 做色调映射 + sRGB + 16-bit 量化）。
+        // 设备不支持时退回下方的 8-bit 多采样求平均路径。
+        if (depth == 16 &&
+            off.setColorAttachment(engine::ColorAttachment::Rgba16Float)) {
+            off.execute(renderer.commandList(), view);
+            std::vector<uint8_t> halfBytes;
+            if (!off.readbackPixels(halfBytes, engine::PixelFormat::Rgba16F)) {
+                spdlog::error("[cli] render: 16F 像素回读失败");
+                std::exit(3);
+            }
+            std::vector<uint16_t> half(halfBytes.size() / 2);
+            if (!halfBytes.empty()) {
+                std::memcpy(half.data(), halfBytes.data(), halfBytes.size());
+            }
+            if (!engine::writePng16FromHalfRgba(out, static_cast<uint32_t>(width),
+                                                static_cast<uint32_t>(height), half, rw,
+                                                rh)) {
+                spdlog::error("[cli] render: PNG(16-bit/HDR) 写出失败: {}", out);
+                std::exit(3);
+            }
+            spdlog::info("[cli] render: {} -> {} ({}x{}, ssaa={}, 16-bit via 16F)",
+                         input, out, width, height, ss);
+            return;
+        }
+        if (depth == 16) {
+            spdlog::warn("[cli] render: 16F 颜色附件不可用 → 退回 8-bit 多采样求平均");
+        }
         off.execute(renderer.commandList(), view);
 
         std::vector<uint8_t> px;
@@ -208,10 +740,57 @@ int renderCommand(CLI::App& app) {
         }
 
         // —— 4. SSAA 降采样 + 编码 ——
+        // 16-bit：先在浮点上对 ssaa² 个样本求平均，再量化到 16 bit —— 这是 16-bit
+        // 唯一**真实**有意义的来源（N 个样本的均值携带超过 8 bit 的信息量，
+        // 量化回 8 bit 会丢弃它；ssaa=1 时 16-bit 只是容器变宽，无额外精度）。
+        if (depth == 16) {
+            std::vector<uint16_t> out16(static_cast<size_t>(width) * height * 4u);
+            const uint32_t n = static_cast<uint32_t>(ss) * ss;
+            const float inv = 1.0f / static_cast<float>(n);
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                    for (int dy = 0; dy < ss; ++dy) {
+                        for (int dx = 0; dx < ss; ++dx) {
+                            const size_t s = (static_cast<size_t>(y * ss + dy) * rw +
+                                              static_cast<size_t>(x * ss + dx)) * 4u;
+                            for (int c = 0; c < 4; ++c) {
+                                acc[c] += static_cast<float>(px[s + c]);
+                            }
+                        }
+                    }
+                    const size_t d = (static_cast<size_t>(y) * width + x) * 4u;
+                    for (int c = 0; c < 4; ++c) {
+                        // 8-bit 区间 [0,255] → 16-bit [0,65535]：乘 257
+                        const float v = acc[c] * inv * 257.0f;
+                        out16[d + c] =
+                            static_cast<uint16_t>(std::clamp(v, 0.0f, 65535.0f) + 0.5f);
+                    }
+                }
+            }
+            if (!engine::writePng16(out, static_cast<uint32_t>(width),
+                                    static_cast<uint32_t>(height), out16)) {
+                spdlog::error("[cli] render: PNG(16-bit) 写出失败: {}", out);
+                std::exit(3);
+            }
+            spdlog::info("[cli] render: {} -> {} ({}x{}, ssaa={}, 16-bit)", input, out,
+                         width, height, ss);
+            return;
+        }
         std::vector<uint8_t> finalPx =
             ss > 1 ? downsample(px, static_cast<uint32_t>(width),
                                 static_cast<uint32_t>(height), static_cast<uint32_t>(ss))
                    : px;
+        // ESP 叠加：色标条 + 极值点数值（与 GUI 视口叠加信息同源；无 ESP 表面时为空）
+        if (std::getenv("MOLECULENS_NO_ESP_OVERLAY") == nullptr) {
+            const engine::EspOverlay ov = engine::espOverlaySnapshot();
+            if (ov.active) {
+                const glm::mat4 vp = cam.viewProjMatrix(
+                    static_cast<float>(width) / static_cast<float>(height));
+                engine::esp_overlay::drawEspOverlay(finalPx, width, height, vp, ov,
+                                                    /*darkBackground=*/bg != "white");
+            }
+        }
         if (!engine::writePng(out, static_cast<uint32_t>(width),
                               static_cast<uint32_t>(height), finalPx)) {
             spdlog::error("[cli] render: PNG 写出失败: {}", out);

@@ -1,0 +1,29 @@
+color Display Background white
+axes location Off
+display projection Orthographic
+display depthcue off
+display resize 1200 900
+material add Glass
+material change ambient    Glass 0.25
+material change diffuse    Glass 0.55
+material change specular   Glass 0.90
+material change shininess  Glass 1.00
+material change opacity    Glass 0.32
+material change transmode  Glass 1
+material change outline    Glass 0.0
+material change outlinwidth Glass 0.0
+mol new F:/MolecuLens/data/EPI.pdb
+mol delrep 0 top
+mol representation QuickSurf 1.0 1.5 1.0 1.0
+mol color Name
+mol selection all
+mol material Glass
+mol addrep top
+mol representation DynamicBonds 1.6 0.30 20
+mol color Name
+mol selection all
+mol material Opaque
+mol addrep top
+scale by 1.6
+render TachyonInternal F:/MolecuLens/docs/figs_v2/vmd/vmd_ref_epi.tga
+quit

@@ -19,13 +19,16 @@
 namespace moleculens::engine {
 
 // 单位 icosphere（半径 1）→ 顶点 + 三角形索引。
-// 细分 2 级：80 → 320 三角形（比 80 面更平滑，主方案 §5.7.1）。
-// 顶点为唯一化位置（非索引去重的法线在着色器中按位置归一化处理）。
-void generateIcosphere(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices);
+// detail：细分档位。1 = 80 面（最省），2 = 320，3 = 1280（默认，导出清晰），
+//         4 = 5120（放大 5–10 倍仍圆）。
+void generateIcosphere(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices,
+                       int detail = 3);
 
-// 单位圆柱（半径 1，轴向 y ∈ [-1, 1]，8 段，**无端盖**）→ 顶点 + 三角形索引。
+// 单位圆柱（半径 1，轴向 y ∈ [-1, 1]，**无端盖**）→ 顶点 + 三角形索引。
+// segments：截面段数。8 = 省，24 = 默认，48 = 高倍放大导出用。
 // 键圆柱几何：由 cylinder.vert 以端点 A/B 与半径把单位圆柱变换到位。
-void generateCylinder(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices);
+void generateCylinder(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices,
+                      int segments = 24);
 
 // Vulkan 投影修正：Y 轴翻转 + 深度范围 [-1,1] → [0,1]。
 //

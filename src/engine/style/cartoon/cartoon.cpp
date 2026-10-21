@@ -7,6 +7,7 @@
 
 #include "engine/style/cartoon/cartoon.h"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 
@@ -128,12 +129,14 @@ void drawCartoon(const RepContext& ctx, SceneCommandList& out) {
             const auto& prev = chain[i - 1];
             const auto& cur = chain[i];
             const auto& next = chain[i + 1];
-            if (!prev.hasN || !cur.hasCA || !cur.hasC || !next.hasN) {
+            if (!prev.hasC || !cur.hasN || !cur.hasCA || !cur.hasC || !next.hasN) {
                 continue;
             }
-            const float phi = dihedral(prev.n, cur.ca, cur.c, next.n);
-            // psi 近似：用 C(i) → N(i+1) → CA(i+1) → C(i+1)
-            const float psi = dihedral(cur.c, next.n, next.ca, next.c);
+            // 标准二面角定义（此前两式都取错了原子，导致 1UBQ 全部判成 Coil）：
+            //   φ(i) = dihedral(C(i-1), N(i), CA(i), C(i))
+            //   ψ(i) = dihedral(N(i), CA(i), C(i), N(i+1))
+            const float phi = dihedral(prev.c, cur.n, cur.ca, cur.c);
+            const float psi = dihedral(cur.n, cur.ca, cur.c, next.n);
             if (phi >= K.phiHelixLo && phi <= K.phiHelixHi &&
                 psi >= K.psiHelixLo && psi <= K.psiHelixHi) {
                 ss[i] = SS::Helix;
@@ -146,16 +149,21 @@ void drawCartoon(const RepContext& ctx, SceneCommandList& out) {
         // ③+④ CA 样条 + 平行传输标架
         struct Sample {
             glm::vec3 p, T, N, B;
+            SS type = SS::Coil;    // 该采样点归属残基的二级结构（采样时确定，不再回推）
+            uint32_t run = 0;      // 连续段号：断链/缺原子处 +1，用于切断桥接
         };
         std::vector<Sample> samples;
+        uint32_t run = 0;
+        bool havePrevSample = false;   // 上一段是否已有采样点（决定续接标架还是重开）
         for (size_t i = 0; i + 1 < chain.size(); ++i) {
             const auto& r0 = chain[i];
             const auto& r1 = chain[i + 1];
-            if (!r0.hasCA || !r1.hasCA) {
-                continue;   // 断链/缺失 → 样条段重置（跳过该残基对）
-            }
-            // 断链阈值：CA 间距 > 4.2Å → 重置
-            if (glm::length(r1.ca - r0.ca) > K.breakThreshold) {
+            if (!r0.hasCA || !r1.hasCA ||
+                glm::length(r1.ca - r0.ca) > K.breakThreshold) {
+                // 断链/缺失：结束当前连续段。下一段不得与上一段桥接（否则会连出
+                // 一条跨越断口的假管子），标架也从默认值重新开始。
+                ++run;
+                havePrevSample = false;
                 continue;
             }
             const glm::vec3 p0 = r0.ca, p1 = r1.ca;
@@ -165,25 +173,37 @@ void drawCartoon(const RepContext& ctx, SceneCommandList& out) {
             const glm::vec3 p2 = (i + 2 < chain.size() && chain[i + 2].hasCA)
                                      ? chain[i + 2].ca
                                      : r1.ca + (r1.ca - r0.ca);
-            glm::vec3 prevN(0, 0, 1);
+            // 平行传输标架跨段连续：平移后的 N 从上一段末采样继承
+            glm::vec3 prevN = havePrevSample ? samples.back().N : glm::vec3(0, 0, 1);
             for (int k = 0; k < K.samplesPerSegment; ++k) {
                 const float t = static_cast<float>(k) / K.samplesPerSegment;
                 const glm::vec3 p = catmullRom(pm, p0, p1, p2, t);
                 Sample s;
                 s.p = p;
                 // 平行传输：T = 切线；N 由上一帧投影正交化；B = T×N
-                const glm::vec3 T = glm::normalize(
-                    catmullRom(pm, p0, p1, p2, std::min(1.0f, t + 1e-4f)) - p);
+                const glm::vec3 rawT =
+                    catmullRom(pm, p0, p1, p2, std::min(1.0f, t + 1e-4f)) - p;
+                const float tLen = glm::length(rawT);
+                const glm::vec3 T =
+                    tLen > 1e-8f ? rawT / tLen
+                                 : (havePrevSample ? samples.back().T : glm::vec3(0, 0, 1));
                 s.T = T;
-                if (glm::dot(T, prevN) < -0.999f) {
-                    prevN = glm::normalize(glm::cross(T, glm::vec3(1, 0, 0)));
+                glm::vec3 N = prevN - T * glm::dot(prevN, T);
+                if (glm::dot(N, N) < 1e-8f) {
+                    // 退化：参考轴与切线平行 → 换一个不平行轴重建 N
+                    const glm::vec3 axis =
+                        std::abs(T.y) < 0.9f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+                    N = axis - T * glm::dot(axis, T);
                 }
-                glm::vec3 N = glm::normalize(prevN - T * glm::dot(prevN, T));
+                N = glm::normalize(N);
                 s.N = N;
                 s.B = glm::normalize(glm::cross(T, N));
                 prevN = N;
+                s.type = ss[std::min(i + 1, ss.size() - 1)];
+                s.run = run;
                 samples.push_back(s);
             }
+            havePrevSample = true;
         }
 
         // ⑤ 几何挤出（按 SS 类型：Coil 管 / Helix 带 / Sheet 带+箭头）
@@ -194,12 +214,17 @@ void drawCartoon(const RepContext& ctx, SceneCommandList& out) {
         };
         std::vector<Vtx> verts;
         std::vector<uint32_t> indices;
-        // 三角形带构建：每条带记录上一环顶点基址
+        // 三角形带构建：记录上一环的**实际**基址与环顶点数。
+        // 历史缺陷：用“当前环顶点数”反推上一环基址 —— Coil(8 顶点) 与
+        // Helix/Sheet(2 顶点) 相邻时上一环基址算错，且桥接按当前环大小循环，
+        // 会在二级结构切换处生成穿模三角形。改为显式记录并用取模索引按
+        // max(prev, cur) 桥接，两种环大小可平滑过渡。
+        uint32_t prevRingBase = 0;
+        uint32_t prevRingSize = 0;
+        uint32_t prevRun = UINT32_MAX;
         for (size_t i = 0; i < samples.size(); ++i) {
             const auto& s = samples[i];
-            // 取 SS 类型（按最近残基近似：CA 索引 = i / samplesPerSegment）
-            const size_t resIdx = std::min(i / K.samplesPerSegment, ss.size() - 1);
-            const SS type = ss[resIdx];
+            const SS type = s.type;
             glm::vec4 col;
             if (type == SS::Helix) {
                 col = glm::vec4(K.helixColor[0], K.helixColor[1], K.helixColor[2], 1.0f);
@@ -211,6 +236,7 @@ void drawCartoon(const RepContext& ctx, SceneCommandList& out) {
 
             // 环截面（管或带）
             std::vector<glm::vec3> ring;
+            glm::vec3 ringNormal = s.B;   // 带：面法线 = 副法线；管：逐点径向
             if (type == SS::Coil) {
                 for (int k = 0; k < K.tubeSegments; ++k) {
                     const float a = 6.2831853f * k / K.tubeSegments;
@@ -238,53 +264,50 @@ void drawCartoon(const RepContext& ctx, SceneCommandList& out) {
             for (const auto& rp : ring) {
                 Vtx v;
                 v.p = rp;
-                v.nrm = glm::normalize(rp - s.p);
+                // 带是平面条带：法线用副法线（此前用径向 → 条带边缘受光，看起来
+                // 像一根细棍而不是带）；管用径向法线。
+                v.nrm = (type == SS::Coil) ? glm::normalize(rp - s.p) : ringNormal;
                 v.col = col;
                 verts.push_back(v);
             }
-            if (i > 0) {
-                const uint32_t prevBase = ringBase - static_cast<uint32_t>(ring.size());
-                // 桥接三角形带
-                for (size_t k = 0; k < ring.size(); ++k) {
-                    const uint32_t k1 = static_cast<uint32_t>((k + 1) % ring.size());
-                    indices.push_back(prevBase + static_cast<uint32_t>(k));
-                    indices.push_back(ringBase + static_cast<uint32_t>(k));
-                    indices.push_back(prevBase + static_cast<uint32_t>(k1));
-                    indices.push_back(prevBase + static_cast<uint32_t>(k1));
-                    indices.push_back(ringBase + static_cast<uint32_t>(k));
-                    indices.push_back(ringBase + static_cast<uint32_t>(k1));
+            // 仅在**同一连续段**内桥接（断链处不连）
+            if (i > 0 && s.run == prevRun && prevRingSize > 0 && !ring.empty()) {
+                const uint32_t nPrev = prevRingSize;
+                const uint32_t nCur = static_cast<uint32_t>(ring.size());
+                const uint32_t n = std::max(nPrev, nCur);
+                for (uint32_t k = 0; k < n; ++k) {
+                    const uint32_t k1 = k + 1;
+                    const uint32_t pa = prevRingBase + k % nPrev;
+                    const uint32_t pb = prevRingBase + k1 % nPrev;
+                    const uint32_t ca = ringBase + k % nCur;
+                    const uint32_t cb = ringBase + k1 % nCur;
+                    indices.push_back(pa);
+                    indices.push_back(ca);
+                    indices.push_back(pb);
+                    indices.push_back(pb);
+                    indices.push_back(ca);
+                    indices.push_back(cb);
                 }
             }
+            prevRingBase = ringBase;
+            prevRingSize = static_cast<uint32_t>(ring.size());
+            prevRun = s.run;
         }
 
-        // TriMesh 命令（每链一个，主方案 §5.7.8）
+        // TriMesh 命令（每链一个，主方案 §5.7.8）。
+        // 经 appendTriMesh 发射：大体系（长链）单链网格也可能超单命令载荷上限，
+        // 超限会让命令流在解码时被静默截断（整条链不可见）。
         if (verts.empty() || indices.empty()) {
             continue;
         }
-        TriMeshHeader hdr;
-        hdr.vertexCount = static_cast<uint32_t>(verts.size());
-        hdr.indexCount = static_cast<uint32_t>(indices.size());
-        std::vector<uint8_t> payload;
-        payload.reserve(sizeof(TriMeshHeader) +
-                        verts.size() * sizeof(TriMeshVertex) +
-                        indices.size() * sizeof(uint32_t));
-        const uint8_t* hdrp = reinterpret_cast<const uint8_t*>(&hdr);
-        payload.insert(payload.end(), hdrp, hdrp + sizeof(TriMeshHeader));
-        for (const auto& v : verts) {
-            TriMeshVertex tv;
-            tv.pos = glm::vec4(v.p, 0.0f);
-            tv.normal = glm::vec4(v.nrm, 0.0f);
-            tv.color = v.col;
-            const uint8_t* vp = reinterpret_cast<const uint8_t*>(&tv);
-            payload.insert(payload.end(), vp, vp + sizeof(TriMeshVertex));
+        std::vector<TriMeshVertex> mesh;
+        mesh.resize(verts.size());
+        for (size_t i = 0; i < verts.size(); ++i) {
+            mesh[i].pos = glm::vec4(verts[i].p, 0.0f);
+            mesh[i].normal = glm::vec4(verts[i].nrm, 0.0f);
+            mesh[i].color = verts[i].col;
         }
-        const uint8_t* ip = reinterpret_cast<const uint8_t*>(indices.data());
-        payload.insert(payload.end(), ip, ip + indices.size() * sizeof(uint32_t));
-        // 16B 对齐
-        while (payload.size() % 16 != 0) {
-            payload.push_back(0);
-        }
-        out.append(Cmd::TriMesh, payload.data(), static_cast<uint32_t>(payload.size()));
+        out.appendTriMesh(mesh, indices);
     }
 }
 

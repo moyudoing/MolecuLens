@@ -121,10 +121,27 @@ void BondSearch::search(const std::vector<glm::vec3>& positions,
     }
 
     // 3) 并行分块：按 x 切片分块，每线程独立候选列表，互斥合并
+    //
+    // ⚠ 线程数必须按**工作量**收敛，不能无脑 hardware_concurrency：
+    //   本函数会被按分子调用（GRO 解析器为避免跨分子假键，对每个分子各调一次；
+    //   md.gro 是 2042 个 3 原子水分子）。此时若起满 20 条线程，光线程创建
+    //   （Windows 上每条约 10^2 µs 量级）就要 ~0.75 ms/分子 → 全场 1.5 s，
+    //   而实际判键工作量只有几微秒。实测：Release 下 md.gro 解析 1550 ms。
+    //   故按"每线程至少分到 kMinAtomsPerThread 个原子"反推线程数上限，
+    //   小体系自动退化为串行；大体系（整体系判键）仍照常并行。
+    constexpr size_t kMinAtomsPerThread = 512;
     const int hardware = static_cast<int>(std::thread::hardware_concurrency());
-    const int threadCount = opts.multiThreaded && opts.threadCount > 0
-                                ? opts.threadCount
-                                : (opts.multiThreaded ? std::max(1, hardware) : 1);
+    int threadCount = 1;
+    if (opts.multiThreaded) {
+        if (opts.threadCount > 0) {
+            threadCount = opts.threadCount;
+        } else {
+            const size_t byWork = n / kMinAtomsPerThread;   // n < 512 → 0
+            threadCount = static_cast<int>(
+                std::min<size_t>(std::max<size_t>(byWork, 1),
+                                 static_cast<size_t>(std::max(1, hardware))));
+        }
+    }
 
     struct BlockResult {
         std::vector<std::pair<uint32_t, uint32_t>> pairs;

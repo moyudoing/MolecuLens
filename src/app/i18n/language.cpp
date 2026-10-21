@@ -1,0 +1,683 @@
+// =============================================================================
+// Moleculens · app · i18n/language.cpp —— 翻译表与查表实现
+// 键 = 中文源串；值 = English。增补方式见 language.h 与
+// tools/check_i18n_coverage.py（后者会报出尚未收录的界面文案）。
+// =============================================================================
+
+#include "app/i18n/language.h"
+
+#include <string_view>
+#include <unordered_map>
+
+namespace moleculens::app::i18n {
+
+namespace {
+
+struct Entry {
+    const char* zh;
+    const char* en;
+};
+
+// —— 翻译表 ——
+// 分组仅为便于阅读；查表与顺序无关。
+const Entry kTable[] = {
+    // ---- 窗口 / 菜单 ----
+    {"文件", "File"},
+    {"打开...", "Open..."},
+    {"保存场景...", "Save Scene..."},
+    {"导入轨迹 (.dcd/.xtc)...", "Import Trajectory (.dcd/.xtc)..."},
+    {"导出图像...", "Export Image..."},
+    {"退出", "Quit"},
+    {"视图", "View"},
+    {"重置视角", "Reset View"},
+    {"重置布局", "Reset Layout"},
+    {"设置", "Settings"},
+    {"语言", "Language"},
+    {"主题", "Theme"},
+    {"白天模式", "Light Mode"},
+    {"暗黑模式", "Dark Mode"},
+    {"帮助", "Help"},
+    {"关于 MolecuLens", "About MolecuLens"},
+
+    // ---- 面板标题 ----
+    {"分子列表", "Molecules"},
+    {"渲染设置", "Render Settings"},
+    {"材质选择", "Materials"},
+    {"图像导出", "Image Export"},
+    {"绘图工具", "Painting"},
+    {"主题设置", "Appearance"},
+    {"图形表示", "Graphical Representations"},
+    {"原子级控制", "Per-Atom Control"},
+    {"时间轴", "Timeline"},
+    {"状态栏", "Status Bar"},
+    {"日志", "Log"},
+
+    // ---- 图形表示面板（对齐 VMD 参考图）----
+    {"Selected Molecule", "Selected Molecule"},
+    {"Create Rep", "Create Rep"},
+    {"Delete Rep", "Delete Rep"},
+    {"Style", "Style"},
+    {"Color", "Color"},
+    {"Selection", "Selection"},
+    {"Selected Atoms", "Selected Atoms"},
+    {"Draw style", "Draw style"},
+    {"Selections", "Selections"},
+    {"Trajectory", "Trajectory"},
+    {"Periodic", "Periodic"},
+    {"Coloring Method", "Coloring Method"},
+    {"Material", "Material"},
+    {"Drawing Method", "Drawing Method"},
+    {"Default", "Default"},
+    {"Resolution", "Resolution"},
+    {"Radius Scale", "Radius Scale"},
+    {"Density Isovalue", "Density Isovalue"},
+    {"Grid Spacing", "Grid Spacing"},
+    {"Surface Quality", "Surface Quality"},
+    {"Sphere Scale", "Sphere Scale"},
+    {"Bond Radius", "Bond Radius"},
+    {"Bond Resolution", "Bond Resolution"},
+    {"Apply Changes Automatically", "Apply Changes Automatically"},
+    {"Apply", "Apply"},
+    {"Revert", "Revert"},
+    {"Singlewords", "Singlewords"},
+    {"Macro definition", "Macro definition"},
+    {"Keyword", "Keyword"},
+    {"Value", "Value"},
+    {"插入", "Insert"},
+    {"应用帧范围", "Apply Range"},
+    {"全范围", "Full Range"},
+    {"起始帧", "Start Frame"},
+    {"结束帧", "End Frame"},
+    {"显示周期镜像", "Show Periodic Images"},
+    {"整体系合并表面", "Merge System Surface"},
+    {"材质参数", "Material Parameters"},
+    {"透明度 (opacity)", "Opacity"},
+    {"光泽度 (gloss)", "Gloss (shininess)"},
+    {"粗糙度", "Roughness"},
+    {"金属度", "Metallic"},
+    {"等值面阈值", "Isovalue"},
+    {"网格间距", "Grid Spacing"},
+    {"有未应用的改动", "Unapplied changes"},
+    {"正在编辑：%s", "Editing: %s"},
+    {"无表示：点 Create Rep 新建", "No representations - click Create Rep"},
+    {"表示控制器未就绪", "Representation controller not ready"},
+    {"未知", "Unknown"},
+    {"自定义", "Custom"},
+    {"全部 (all atoms)", "All (all atoms)"},
+    {"作用域表达式：%s", "Scope: %s"},
+    {"%s  (%zu 原子)", "%s  (%zu atoms)"},
+    {"（隐藏）", " (hidden)"},
+    {"all", "all"},
+
+    // ---- 渲染设置（场景级）----
+    {"本面板：场景级设置（视角/背景/雾/光照）。",
+     "This panel: scene-level settings (view / background / fog / lighting)."},
+    {"表示的增删与样式/配色/材质请用「图形表示」面板。",
+     "Use the Graphical Representations panel for reps, styles, colors and materials."},
+    {"视口", "Viewport"},
+    {"视口光线追踪预览", "Viewport ray-traced preview"},
+    {"视角", "Camera"},
+    {"正交投影", "Orthographic"},
+    {"复位视角", "Reset camera"},
+    {"背景", "Background"},
+    {"背景色", "Background color"},
+    {"雾效", "Fog"},
+    {"雾效模式", "Fog mode"},
+    {"雾近", "Fog near"},
+    {"雾远", "Fog far"},
+    {"雾密度", "Fog density"},
+    {"光照", "Lighting"},
+    {"天顶色", "Sky color"},
+    {"地面色", "Ground color"},
+    {"环境光色", "Ambient color"},
+    {"半球光强度", "Hemisphere intensity"},
+    {"方向光", "Directional light"},
+    {"启用方向光", "Enable directional light"},
+    {"方位角", "Azimuth"},
+    {"仰角", "Elevation"},
+    {"光源色", "Light color"},
+    {"强度", "Intensity"},
+    {"投射阴影", "Cast shadows"},
+    {"阴影强度", "Shadow strength"},
+    {"相机未就绪（先打开文件）", "Camera not ready (open a file first)"},
+    {"视口/控制器未就绪", "Viewport / controller not ready"},
+    {"关", "Off"},
+    {"线性", "Linear"},
+    {"指数", "Exponential"},
+    {"指数²", "Exponential squared"},
+
+    // ---- 材质面板 ----
+    {"材质预设", "Material preset"},
+    {"Phong 参数", "Phong parameters"},
+    {"PBR 扩展", "PBR extensions"},
+    {"环境色", "Ambient"},
+    {"漫反射色", "Diffuse"},
+    {"高光色", "Specular"},
+    {"光泽度", "Shininess"},
+    {"控制器未就绪", "Controller not ready"},
+    {"无表示", "No representation"},
+
+    // ---- 主题面板 ----
+    {"配色方案", "Color scheme"},
+    {"当前主题", "Current theme"},
+    {"配色预览", "Palette preview"},
+    {"组件预览", "Component preview"},
+    {"主按钮", "Primary"},
+    {"次按钮", "Secondary"},
+    {"徽章", "Badge"},
+    {"成功", "OK"},
+    {"警告", "Warning"},
+    {"危险", "Danger"},
+    {"背景色 ", "Background"},
+    {"表面色", "Surface"},
+    {"边框色", "Border"},
+    {"主题色", "Accent"},
+    {"高亮色", "Accent (bright)"},
+    {"成功色", "Success"},
+    {"警告色", "Warning color"},
+    {"危险色", "Danger color"},
+    {"文字色", "Text"},
+    {"次要文字", "Muted text"},
+    {"昼夜模式", "Day / night"},
+
+    // ---- 时间轴 / 状态栏 ----
+    {"播放", "Play"},
+    {"暂停", "Pause"},
+    {"停止", "Stop"},
+    {"上一帧", "Previous frame"},
+    {"下一帧", "Next frame"},
+    {"循环", "Loop"},
+    {"速度", "Speed"},
+    {"帧", "Frame"},
+    {"选择", "Selection"},
+    {"个原子", "atoms"},
+
+    // ---- 渲染模型名：样式（引擎侧仍返回中文，此处翻译）----
+    {"线状", "Lines"},
+    {"棍状", "Sticks"},
+    {"球棍", "Ball & Stick"},
+    {"CPK", "CPK"},
+    {"VDW", "VDW"},
+    {"甘草棍", "Licorice"},
+    {"卡通", "Cartoon"},
+    {"新卡通", "NewCartoon"},
+    {"丝带", "Ribbons"},
+    {"平板", "Plates"},
+    {"平板（辅基）", "Plates (cofactors)"},
+    {"管状", "Tube"},
+    {"表面", "Surface"},
+    {"快速表面", "QuickSurf"},
+
+    // ---- 渲染模型名：配色 ----
+    {"元素 CPK", "Element (CPK)"},
+    {"按链", "Chain"},
+    {"按残基", "Residue"},
+    {"按 BFactor", "BFactor"},
+    {"统一色", "Uniform"},
+    {"按原子名 (VMD)", "Atom name (VMD)"},
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"3D 视口", "3D Viewport"},
+    {"（无）", "(none)"},
+    {"分子", "Molecules"},
+    {"当前分子", "Current molecule"},
+    {"清空", "Clear"},
+    {"自动滚动", "Auto-scroll"},
+    {"%zu 条 / 上限 %zu", "%zu entries / limit %zu"},
+    {"打开 (Ctrl+O)", "Open (Ctrl+O)"},
+    {"保存场景 (Ctrl+S)", "Save Scene (Ctrl+S)"},
+    {"导入轨迹 (.dcd/.xtc)", "Import Trajectory (.dcd/.xtc)"},
+    {"导出", "Export"},
+    {"图像 (PNG)", "Image (PNG)"},
+    {"场景 (OBJ/STL)", "Scene (OBJ/STL)"},
+    {"编辑", "Edit"},
+    {"撤销", "Undo"},
+    {"重做", "Redo"},
+    {"布局重置", "Reset Layout"},
+    {"关于 MolecuLens V1.0", "About MolecuLens V1.0"},
+    {"还原", "Restore"},
+    {"最大化", "Maximize"},
+    {"排队中", "Queued"},
+    {"读取文件", "Reading file"},
+    {"分析键", "Analyzing bonds"},
+    {"上传 GPU", "Uploading to GPU"},
+    {"完成", "Done"},
+    {"失败", "Failed"},
+    {"阶段：%s", "Stage: %s"},
+    {"单帧", "Single frame"},
+    {"帧 %llu / %llu   T = %.1f / %.1f ps  dt %.2f ps", "Frame %llu / %llu   T = %.1f / %.1f ps  dt %.2f ps"},
+    {"时间轴未激活（加载轨迹后可用）", "Timeline inactive (load a trajectory)"},
+    {"播放速度倍率（播放按帧循环的实测 dt 推进，与帧率解耦）", "Playback speed (advanced by measured dt, independent of frame rate)"},
+    {"（无轨迹：单帧）", "(no trajectory: single frame)"},
+    {"选区循环", "Loop in/out range"},
+    {"入", "In"},
+    {"出", "Out"},
+    {"在 [入, 出] 区间内循环播放（出 = 0 表示到末帧）。用于只看轨迹的一段。", "Loop between In and Out (Out = 0 means last frame). Use to view part of a trajectory."},
+    {"Tokyo Night", "Tokyo Night"},
+    {"Light", "Light"},
+    {"Solarized Light", "Solarized Light"},
+    {"东京之夜", "Tokyo Night"},
+    {"德古拉", "Dracula"},
+    {"北欧风", "Nord"},
+    {"暗黑一号", "One Dark"},
+    {"日光暗色", "Solarized Dark"},
+    {"浅色", "Light"},
+    {"日光浅色", "Solarized Light"},
+    {"这是一个帮助提示", "This is a help tooltip"},
+    {"这是普通文字", "Normal text"},
+    {"这是禁用文字", "Disabled text"},
+
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"高 DPI 图像", "High-DPI Image"},
+    {"渲染方式", "Render mode"},
+    {"RT 采样", "RT samples"},
+    {"光线追踪：方向光软阴影 + 球体反射；采样数越高越平滑、越慢（推荐 4-8）", "Ray tracing: directional-light soft shadows + sphere reflections. More samples = smoother but slower (4-8 recommended)."},
+    {"抗锯齿 (SSAA)", "Anti-aliasing (SSAA)"},
+    {"光栅化导出：超采样倍数（先渲染高分辨率再降采样，消除锯齿边缘；推荐 2-4，数值越大越慢）", "Rasterized export: supersampling factor (render larger, then downsample, to remove jagged edges). 2-4 recommended; higher is slower."},
+    {"尺寸模式", "Size mode"},
+    {"倍数", "Scale"},
+    {"相对视口尺寸的倍数（2x = 高清，4x = 超高清）", "Multiple of the viewport size (2x = HD, 4x = UHD)"},
+    {"宽", "Width"},
+    {"高", "Height"},
+    {"分辨率", "Resolution"},
+    {"  宽: %u  高: %u", "  W: %u  H: %u"},
+    {"透明：清屏 alpha=0，几何写自身 alpha -> PNG 可直接叠加合成", "Transparent: clear alpha=0 while geometry writes its own alpha -> the PNG composites directly"},
+    {"位深", "Color depth"},
+    {"16-bit 的真实来源是 SSAA：多个样本在浮点上求平均后再量化，精度高于 8-bit（SSAA=1 时仅容器变宽，无额外精度）", "The 16-bit precision comes from SSAA: averaging samples in float then quantizing exceeds 8-bit (with SSAA=1 only the container widens)"},
+    {"多重采样抗锯齿。注意：离屏 FBO 附件恒为 1x（管线/渲染通道一致性的硬约束），该参数当前不影响离屏导出——抗锯齿请用上方的 SSAA", "Multisample anti-aliasing. Note: the offscreen attachment is always 1x (hard constraint of pipeline/render-pass consistency), so this does not affect offscreen export - use SSAA above"},
+    {"相机适配", "Camera fit"},
+    {"默认文件名", "Default file name"},
+    {"导出中…", "Exporting..."},
+    {"后台导出中… 主视图可继续操作", "Exporting in background - you can keep working"},
+    {"动画导出", "Animation export"},
+    {"动画源", "Animation source"},
+    {"编解码器", "Codec"},
+    {"宽度倍数", "Width scale"},
+    {"逐帧导出与单帧导出共用同一抗锯齿/位深链路；帧数多时 SSAA 会成倍拉长导出时间", "Per-frame export shares the same AA/bit-depth path as single-frame; with many frames SSAA multiplies export time"},
+    {"输出路径", "Output path"},
+    {"导出动画", "Export animation"},
+    {"PNG 序列已支持；APNG/GIF/MP4/WebM 需外部编码器（未接入）", "PNG sequence supported; APNG/GIF/MP4/WebM need external encoders (not wired up)"},
+    {"动画导出中（界面暂时无响应）…", "Exporting animation (UI unresponsive for now)..."},
+    {"动画导出完成: ", "Animation export done: "},
+    {"动画导出失败: ", "Animation export failed: "},
+    {"导出完成: ", "Export done: "},
+    {"导出失败: ", "Export failed: "},
+    {"重命名", "Rename"},
+    {"体系定位到原点", "Center system at origin"},
+    {"渲染模式", "Render mode"},
+    {"删除体系", "Delete system"},
+    {"（空体系）", "(empty system)"},
+    {"原子 %zu · 键 %zu · 帧 %zu", "%zu atoms · %zu bonds · %zu frames"},
+    {"定位到原点", "Center at origin"},
+    {"删除全部", "Delete all"},
+    {"删除", "Delete"},
+    {"移动到体系", "Move to system"},
+    {"新建体系并移动", "New system and move"},
+    {"高光/环境光近似。", "approximated with specular/ambient."},
+    {"23 套材质（名字对齐 VMD 的 Material 下拉）。数值是按本引擎 Phong/PBR 管线观感调校的近似值，非 VMD 原表；Edgy*/AO* 在 VMD 里依赖描边与环境光遮蔽通道，本引擎以高光/环境光近似。", "23 materials (named after VMD's Material list). Values are approximations tuned for this engine's Phong/PBR pipeline, not VMD's original table; VMD's Edgy*/AO* rely on its outline and ambient-occlusion passes, approximated here with specular/ambient."},
+    {"光泽度 = 高光锐度（Phong 指数）。越小越哑光，越大高光越集中；需配合高光色才明显。", "Gloss = highlight sharpness (Phong exponent). Lower is matter, higher concentrates the highlight; only visible with a non-black specular color."},
+    {"透明度", "Transparency"},
+    {"不透明度", "Opacity"},
+    {"1 = 完全不透明；越小越透。与体系渲染模式「透明」叠加时取更小者。", "1 = fully opaque; lower is more transparent. Combined with the system Transparent mode, the smaller wins."},
+
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"光线追踪 (CPU)", "Ray traced (CPU)"},
+    {"绝对尺寸", "Absolute size"},
+    {"预设分辨率", "Presets"},
+    {"白色", "White"},
+    {"透明", "Transparent"},
+    {"相机旋转", "Camera rotation"},
+    {"轨迹+相机", "Trajectory + camera"},
+    {"PNG 图像 (*.png)", "PNG image (*.png)"},
+    {"所有文件 (*.*)", "All files (*.*)"},
+    {"分子结构文件 (*.pdb;*.gro;*.sdf;*.mol)", "Molecular structure (*.pdb;*.gro;*.sdf;*.mol)"},
+    // 文件对话框过滤器：扩展名清单与 ParserRegistry::allExtensions() 同源
+    {"分子结构文件 (*.pdb;*.ent;*.gro;*.sdf;*.mol;*.cube;*.cub)",
+     "Molecular structure (*.pdb;*.ent;*.gro;*.sdf;*.mol;*.cube;*.cub)"},
+    {"场景文件 (*.mlscene)", "Scene file (*.mlscene)"},
+    {"轨迹文件 (*.dcd;*.xtc)", "Trajectory (*.dcd;*.xtc)"},
+    {"轨迹文件 (*.dcd;*.xtc;*.trr)", "Trajectory (*.dcd;*.xtc;*.trr)"},
+    {"MolecuLens 场景 (*.mlscene)", "MolecuLens scene (*.mlscene)"},
+    {"线框", "Wireframe"},
+    {"点", "Points"},
+    {"测量", "Measure"},
+    {"标记", "Mark"},
+
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"当前：暗黑模式", "Current: Dark mode"},
+    {"当前：白天模式", "Current: Light mode"},
+    {"切换到白天模式", "Switch to Light mode"},
+    {"切换到暗黑模式", "Switch to Dark mode"},
+    {"主题偏好即时写入 settings.json（key: theme），下次启动自动恢复；存的是稳定键名而非枚举序号。", "The theme preference is written to settings.json (key: theme) immediately and restored on next launch; it stores stable key names, not enum indices."},
+    {"在「白天」与「暗黑」之间切换；各自记住你最近选用的那一套。", "Switches between Light and Dark; each remembers the last preset you used."},
+    {"着色", "Coloring"},
+    {"样式", "Style"},
+    {"名称", "Name"},
+
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"FPS %.1f   分子 %zu   当前分子 %s", "FPS %.1f   Molecules %zu   Current %s"},
+    {"|  选择 \"%s\" -> %zu 个原子", "|  Selection \"%s\" -> %zu atoms"},
+    {"体系位置", "System transform"},
+    {"分子位置", "Molecule transform"},
+    {"分子定位到原点", "Center molecule at origin"},
+    {"暂无体系（Ctrl+O 打开 PDB/GRO）", "No systems (Ctrl+O to open PDB/GRO)"},
+    {"+ 新建体系", "+ New system"},
+    {"本引擎未实现：%s", "Not implemented in this engine: %s"},
+    {"带灰条的项本引擎未实现（如实标注，不做静默近似映射）。", "Greyed-out entries are not implemented (marked honestly, never silently remapped)."},
+    {"复位该表示的材质与缩放参数（保留样式与选择表达式）。", "Resets this representation's material and scale parameters (keeps style and selection)."},
+    {"键半径缩放（真实生效：几何生成时按它算圆柱半径）。", "Bond radius scale (actually used when generating cylinder radii)."},
+    {"未实现：键圆柱是全局共享网格（固定 8 段），无逐表示细分参数。", "Not implemented: bond cylinders use one shared mesh (8 segments); no per-representation tessellation."},
+    {"关闭后改动先暂存，点 Apply 才生效（参考图同款行为）。", "When off, changes are staged and applied only on Apply (same as the reference dialog)."},
+    {"需要按帧重算键表，本引擎键表在导入时固定", "needs per-frame bond recalculation; bonds are fixed at import here"},
+    {"需要氢键判定", "needs hydrogen-bond detection"},
+    {"占位宏：解析器已注册但未实现，选中会产生空选择", "placeholder macro: registered but not implemented; selecting it yields an empty selection"},
+    {"本引擎的“点”是体系渲染模式，不是绘图方法", "in this engine Points is a system render mode, not a drawing method"},
+    {"宏定义未实现：解析器不支持自定义宏，故置灰。", "Macros are not implemented: the parser has no user-defined macros, hence greyed out."},
+    {"未实现", "not implemented"},
+    {"未实现（可用 Tube 近似）", "not implemented (Tube is a close approximation)"},
+    {"未实现（可用 Surf）", "not implemented (Surf is a close approximation)"},
+    {"需要体数据", "needs volumetric data"},
+    {"需要场数据", "needs field data"},
+    {"需要量子化学数据", "needs quantum-chemistry data"},
+    {"本引擎只实现了一种丝带（Ribbons）", "this engine implements one ribbon style (Ribbons)"},
+    {"未实现（可用选择表达式筛溶剂）", "not implemented (filter solvent with a selection expression)"},
+    {"球体缩放", "Sphere Scale"},
+    {"原子子集", "Atom subset"},
+    {"平移", "Translate"},
+    {"可见", "Visible"},
+    {"重置", "Reset"},
+
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"DCD/XTC 均不含拓扑，须与同源结构文件（PDB/GRO）配对导入", "DCD/XTC carry no topology; import together with a matching structure file (PDB/GRO)"},
+    {"体系级", "System-wide"},
+    {"实例级", "Per-instance"},
+    {"体系", "System"},
+    {"实例 ", "Instance "},
+    {"（可在面板关闭）", "(can be turned off in the panel)"},
+    {"p95 {:.2f} p99 {:.2f} max {:.2f} ms (最低 {:.0f} FPS) | 工作量 avg ", "p95 {:.2f} p99 {:.2f} max {:.2f} ms (lowest {:.0f} FPS) | work avg "},
+    {"{:.2f} max {:.2f} ms (占周期 {:.0f}%)", "{:.2f} max {:.2f} ms ({:.0f}% of period)"},
+    {"各自记住你最近选用的那一套（不是固定的一对）。", "each remembers the last preset you used (not a fixed pair)."},
+    {"在 [入, 出] 区间内循环播放（出 = 0 表示到末帧）。", "Loop between In and Out (Out = 0 means last frame)."},
+    {"用于只看轨迹的一段。", "Use to view part of a trajectory."},
+    {"16-bit 的真实来源是 SSAA：多个样本在浮点上求平均后再量化，", "The 16-bit precision comes from SSAA: samples are averaged in float and then quantized,"},
+    {"精度高于 8-bit（SSAA=1 时仅容器变宽，无额外精度）", "which exceeds 8-bit precision (with SSAA=1 only the container widens, no extra precision)"},
+    {"多重采样抗锯齿。注意：离屏 FBO 附件恒为 1x（管线/渲染通道", "Multisample anti-aliasing. Note: the offscreen FBO attachment is always 1x (pipeline/render-pass"},
+    {"一致性的硬约束），该参数当前不影响离屏导出——", "consistency is a hard constraint), so this does not affect offscreen export -"},
+    {"抗锯齿请用上方的 SSAA", "use SSAA above for anti-aliasing"},
+    {"逐帧导出与单帧导出共用同一抗锯齿/位深链路；", "Per-frame export shares the same AA/bit-depth path as single-frame export;"},
+    {"帧数多时 SSAA 会成倍拉长导出时间", "with many frames SSAA multiplies export time"},
+    {"光线追踪：方向光软阴影 + 球体反射；采样数越高越平滑、", "Ray tracing: directional-light soft shadows + sphere reflections. More samples = smoother but"},
+    {"越慢（推荐 4-8）", "slower (4-8 recommended)."},
+    {"光栅化导出：超采样倍数（先渲染高分辨率再降采样，", "Rasterized export: supersampling factor (render larger, then downsample,"},
+    {"消除锯齿边缘；推荐 2-4，数值越大越慢）", "to remove jagged edges). 2-4 recommended; higher is slower."},
+    {"光泽度 = 高光锐度（Phong 指数）。越小越哑光，越大高光越集中；", "Gloss = highlight sharpness (Phong exponent). Lower is matter, higher concentrates the highlight;"},
+    {"需配合高光色才明显。", "only visible with a non-black specular color."},
+    {"Edgy*/AO* 在 VMD 里依赖描边与环境光遮蔽通道，本引擎以", "Edgy*/AO* rely on outline and ambient-occlusion passes in VMD; this engine approximates them with"},
+    {"实心", "Solid"},
+    {"交互模式", "Interaction mode"},
+    {"预留", "Placeholder"},
+    {"拾取/测量/标记逻辑将在 M2 与拾取系统（§5.6）对接。", "Picking/measurement/labeling logic will be wired to the picking system (5.6) in M2."},
+    {"快捷键：", "Shortcuts:"},
+    {"F 聚焦选中 / R 重置相机 / H 切换 HUD", "F focus selection / R reset camera / H toggle HUD"},
+    {"Space 播放暂停 / Shift+左右方向键 帧步进", "Space play/pause / Shift+Left/Right arrow step frames"},
+    {"Ctrl+O 打开文件", "Ctrl+O open file"},
+    {"要限制某条表示作用于部分原子，请用 Selected Atoms / Selections。", "to limit a representation to some atoms, use Selected Atoms / Selections."},
+    {"VDW 样式按定义使用全范德华半径，不受此项影响）。", "VDW by definition uses full van der Waals radii and is unaffected)."},
+    {"命令流 316 MB -> 19.8 MB）。", "command stream 316 MB -> 19.8 MB)."},
+    {"另有 within <距离> of <条件> 与 same residue as <条件>。", "plus within <distance> of <condition> and same residue as <condition>."},
+    {"时间轴未就绪", "Timeline not ready"},
+    {"说明：帧范围/步长属于**时间轴**（全局），不是逐表示参数。", "Note: frame range/step belong to the **Timeline** (global), not to individual representations."},
+    {"本页签直接操作时间轴，与时间轴面板是同一份状态。", "This tab drives the Timeline directly; same state as the Timeline panel."},
+    {"结束帧 = 0 表示末帧（与时间轴 In/Out 同义）。", "Out frame = 0 means the last frame (same meaning as Timeline In/Out)."},
+    {"含表面的表示无法重放（顶点数随坐标变化），会退回整条重建。", "Representations with surfaces cannot replay (vertex count varies with coordinates) and fall back to a full rebuild."},
+    {"未加载场景", "No scene loaded"},
+    {"该体系无周期盒信息（正交盒对角线全 0）", "This system has no periodic box info (orthogonal box diagonal is all 0)"},
+    {"周期盒（正交）: %.2f × %.2f × %.2f Å", "Periodic box (orthogonal): %.2f × %.2f × %.2f Å"},
+    {"本引擎已实现的周期处理：", "Periodic handling implemented in this engine:"},
+    {"跨边界分子补齐（unwrap）—— 否则会被画成一根盒长的长棍", "Cross-boundary molecule unwrapping - otherwise they get drawn as one box-length stick"},
+    {"判键按最小镜像（避免跨边界假键与漏键）", "Bond detection uses the minimum image (avoids false and missed bonds across boundaries)"},
+    {"未实现（置灰而非静默忽略）：", "Not implemented (greyed out rather than silently ignored):"},
+    {"周期镜像（把相邻盒子里的副本一并画出）与盒边框绘制未实现。", "Periodic images (drawing copies in neighbouring boxes) and box border drawing are not implemented."},
+    {"表达式无法解析，未应用（仍为：%s）", "Expression could not be parsed; not applied (still: %s)"},
+    {"场景未就绪", "Scene not ready"},
+    {"半球环境光：天顶亮/地面暗的渐变 + 均匀环境光补光；", "Hemisphere ambient: sky-bright/ground-dark gradient + uniform ambient fill;"},
+    {"强度越大天顶地面差异越明显", "higher intensity makes the sky/ground difference more visible"},
+    {"关闭后仅剩半球环境光（无高光/无明暗造型，等同改动前的观感）", "When off, only hemisphere ambient remains (no highlights, no shading; same look as before)"},
+    {"方向光阴影：光源视角深度图 + 3×3 PCF 软阴影。", "Directional-light shadows: light-view depth map + 3x3 PCF soft shadows."},
+    {"仅球/柱类表示投影（表面/卡通/QuickSurf 不投影）", "Only sphere/cylinder representations cast shadows (Surface/Cartoon/QuickSurf do not)"},
+    {"开启后 3D 视口用自研 CPU 光线追踪渲染（低分辨率预览，", "When on, the 3D viewport renders with the in-house CPU ray tracer (low-resolution preview,"},
+    {"相机/场景变化时重渲；导出面板另有高分辨率 RT 导出）", "re-rendered on camera/scene changes; the export panel offers high-resolution RT export)"},
+    {"正交投影无近大远小，适合比对结构差异；透视更接近肉眼观感", "Orthographic has no perspective foreshortening, good for comparing structures; perspective is closer to the eye"},
+    {"垂直视场角；正交投影下不参与投影，仅影响切回透视后的取景", "Vertical field of view; ignored under orthographic projection, only affects framing after switching back to perspective"},
+    {"恢复默认朝向并按当前场景包围球重新取景", "Restore the default orientation and reframe to the current scene bounding sphere"},
+    {"开启后 3D 视口用自研 CPU 光线追踪渲染（低分辨率预览，相机/场景变化时重渲；导出面板另有高分辨率 RT 导出）", "When on, the 3D viewport renders with the in-house CPU ray tracer (low-resolution preview, re-rendered on camera/scene changes; the export panel offers high-resolution RT export)"},
+    {"半球环境光：天顶亮/地面暗的渐变 + 均匀环境光补光；强度越大天顶地面差异越明显", "Hemisphere ambient: sky-bright/ground-dark gradient + uniform ambient fill; higher intensity makes the sky/ground difference more visible"},
+    {"方向光阴影：光源视角深度图 + 3×3 PCF 软阴影。仅球/柱类表示投影（表面/卡通/QuickSurf 不投影）", "Directional-light shadows: light-view depth map + 3x3 PCF soft shadows. Only sphere/cylinder representations cast shadows (Surface/Cartoon/QuickSurf do not)"},
+    {"下次启动自动恢复；存的是稳定键名而非枚举序号。", "and restored on next launch; it stores stable key names, not enum indices."},
+    {"3D 视口未初始化（先打开文件）", "3D viewport not initialized (open a file first)"},
+    {"视口纹理不可用", "Viewport texture unavailable"},
+    {"RT 预览纹理不可用", "RT preview texture unavailable"},
+    {"RT 预览不可用", "RT preview unavailable"},
+    {"表面生成中…", "Generating surface…"},
+    {" —— 请降低分辨率或超采样倍数", " - lower the resolution or the supersampling factor"},
+
+    // —— 追加词条（含 \n 的串：行式条目文件无法表达，直接写入）——
+    {"在「白天」与「暗黑」两套主题间切换；\n", "Switches between the Light and Dark themes;\n"},
+    {"23 套材质（名字对齐 VMD 的 Material 下拉）。\n", "23 materials (named after VMD's Material dropdown).\n"},
+    {"数值是按本引擎 Phong/PBR 管线观感调校的近似值，非 VMD 原表；\n", "Values are approximations tuned for this engine's Phong/PBR pipeline look, not VMD's original table;\n"},
+    {"选择作用对象。本引擎的表示是全局的（对所有体系生效），\n", "Choose what to act on. Representations are global in this engine (they apply to all systems),\n"},
+    {"因此这里选择分子只影响 Create Rep 时生成的原子选择表达式；\n", "so the molecule chosen here only affects the atom selection expression generated by Create Rep;\n"},
+    {"原子球半径的整体缩放（球棍/CPK/空间填充生效；\n", "Overall scale of atom sphere radii (applies to Licorice/CPK/Spacefill;\n"},
+    {"Resolution / Grid Spacing 是同一个参数（本引擎两种表面共用一套网格）：\n", "Resolution / Grid Spacing is the same parameter (both surface types share one grid here):\n"},
+    {"越小越精细、计算越慢。Surface Quality 是它的档位快捷方式，\n", "smaller is finer and slower to compute. Surface Quality is a preset shortcut for it,\n"},
+    {"整个体系生成一个表面，而非每个分子一个。\n", "Generate one surface for the whole system instead of one per molecule.\n"},
+    {"溶剂化体系差异极大（实测 md.gro：QuickSurf 846 -> 170 ms，\n", "The difference is large for solvated systems (measured md.gro: QuickSurf 846 -> 170 ms,\n"},
+    {"关键字列表直接来自解析器（selectionKeywords），\n", "The keyword list comes straight from the parser (selectionKeywords),\n"},
+    {"故列出的每一项都真的能解析。当前支持：\n", "so every entry listed really parses. Currently supported:\n"},
+    {"Update Style（VMD 的逐帧更新方式）在本引擎是内建的：\n", "Update Style (VMD's per-frame update mode) is built in here:\n"},
+    {"帧切走坐标重放（只重写坐标载荷，不重建命令流）。\n", "frame changes replay coordinates (only the coordinate payload is rewritten; the command stream is not rebuilt).\n"},
+    {"23 套材质（名字对齐 VMD 的 Material 下拉）。\n数值是按本引擎 Phong/PBR 管线观感调校的近似值，非 VMD 原表；\nEdgy*/AO* 在 VMD 里依赖描边与环境光遮蔽通道，本引擎以高光/环境光近似。", "23 materials (named after VMD's Material dropdown).\nValues are approximations tuned for this engine's Phong/PBR pipeline look, not VMD's original table;\nVMD's Edgy*/AO* rely on its outline and ambient-occlusion passes, approximated here with specular/ambient."},
+    {"选择作用对象。本引擎的表示是全局的（对所有体系生效），\n因此这里选择分子只影响 Create Rep 时生成的原子选择表达式；\n要限制某条表示作用于部分原子，请用 Selected Atoms / Selections。", "Choose what to act on. Representations are global in this engine (they apply to all systems),\nso the molecule chosen here only affects the atom selection expression generated by Create Rep;\nto limit a representation to some atoms, use Selected Atoms / Selections."},
+    {"原子球半径的整体缩放（球棍/CPK/空间填充生效；\nVDW 样式按定义使用全范德华半径，不受此项影响）。", "Overall scale of atom sphere radii (applies to Licorice/CPK/Spacefill;\nVDW by definition uses full van der Waals radii and is unaffected)."},
+    {"Resolution / Grid Spacing 是同一个参数（本引擎两种表面共用一套网格）：\n越小越精细、计算越慢。Surface Quality 是它的档位快捷方式，\n不等于任何档位时显示「自定义」。", "Resolution / Grid Spacing is the same parameter (both surface types share one grid here):\nsmaller is finer and slower to compute. Surface Quality is a preset shortcut for it,\nshowing Custom when it matches no preset."},
+    {"整个体系生成一个表面，而非每个分子一个。\n溶剂化体系差异极大（实测 md.gro：QuickSurf 846 -> 170 ms，\n命令流 316 MB -> 19.8 MB）。", "Generate one surface for the whole system instead of one per molecule.\nThe difference is large for solvated systems (measured md.gro: QuickSurf 846 -> 170 ms,\ncommand stream 316 MB -> 19.8 MB)."},
+    {"关键字列表直接来自解析器（selectionKeywords），\n故列出的每一项都真的能解析。当前支持：\nname / resid / chain / element / occupancy / bfactor；\n另有 within <距离> of <条件> 与 same residue as <条件>。", "The keyword list comes straight from the parser (selectionKeywords),\nso every entry listed really parses. Currently supported:\nname / resid / chain / element / occupancy / bfactor;\nplus within <distance> of <condition> and same residue as <condition>."},
+    {"Update Style（VMD 的逐帧更新方式）在本引擎是内建的：\n帧切走坐标重放（只重写坐标载荷，不重建命令流）。\n含表面的表示无法重放（顶点数随坐标变化），会退回整条重建。", "Update Style (VMD's per-frame update mode) is built in here:\nframe changes replay coordinates (only the coordinate payload is rewritten; the command stream is not rebuilt).\nRepresentations with surfaces cannot replay (vertex count varies with coordinates) and fall back to a full rebuild."},
+
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"表面参数", "Surface parameters"},
+    {"不等于任何档位时显示「自定义」。", "showing Custom when it matches no preset."},
+    {"主题偏好即时写入 settings.json（key: theme），", "The theme preference is written to settings.json (key: theme) immediately,"},
+    {"选择作用对象。本引擎的表示是全局的（对所有体系生效），因此这里选择分子只影响 Create Rep 时生成的原子选择表达式；要限制某条表示作用于部分原子，请用 Selected Atoms / Selections。", "Choose what to act on. Representations are global in this engine (they apply to all systems), so the molecule chosen here only affects the atom selection expression generated by Create Rep; to limit a representation to some atoms, use Selected Atoms / Selections."},
+    {"原子球半径的整体缩放（球棍/CPK/空间填充生效；VDW 样式按定义使用全范德华半径，不受此项影响）。", "Overall scale of atom sphere radii (applies to Licorice/CPK/Spacefill; VDW by definition uses full van der Waals radii and is unaffected)."},
+    {"Resolution / Grid Spacing 是同一个参数（本引擎两种表面共用一套网格）：越小越精细、计算越慢。Surface Quality 是它的档位快捷方式，不等于任何档位时显示「自定义」。", "Resolution / Grid Spacing is the same parameter (both surface types share one grid here): smaller is finer and slower to compute. Surface Quality is a preset shortcut for it, showing Custom when it matches no preset."},
+    {"整个体系生成一个表面，而非每个分子一个。溶剂化体系差异极大（实测 md.gro：QuickSurf 846 -> 170 ms，命令流 316 MB -> 19.8 MB）。", "Generate one surface for the whole system instead of one per molecule. The difference is large for solvated systems (measured md.gro: QuickSurf 846 -> 170 ms, command stream 316 MB -> 19.8 MB)."},
+    {"关键字列表直接来自解析器（selectionKeywords），故列出的每一项都真的能解析。当前支持：name / resid / chain / element / occupancy / bfactor；另有 within <距离> of <条件> 与 same residue as <条件>。", "The keyword list comes straight from the parser (selectionKeywords), so every entry listed really parses. Currently supported: name / resid / chain / element / occupancy / bfactor; plus within <distance> of <condition> and same residue as <condition>."},
+    {"Update Style（VMD 的逐帧更新方式）在本引擎是内建的：帧切走坐标重放（只重写坐标载荷，不重建命令流）。含表面的表示无法重放（顶点数随坐标变化），会退回整条重建。", "Update Style (VMD's per-frame update mode) is built in here: frame changes replay coordinates (only the coordinate payload is rewritten; the command stream is not rebuilt). Representations with surfaces cannot replay (vertex count varies with coordinates) and fall back to a full rebuild."},
+    {"在「白天」与「暗黑」两套主题间切换；各自记住你最近选用的那一套（不是固定的一对）。", "Switches between the Light and Dark themes; each remembers the last preset you used (not a fixed pair)."},
+    {"在「白天」与「暗黑」两套主题间切换；", "Switches between the Light and Dark themes;"},
+    {"23 套材质（名字对齐 VMD 的 Material 下拉）。", "23 materials (named after VMD's Material dropdown)."},
+    {"数值是按本引擎 Phong/PBR 管线观感调校的近似值，非 VMD 原表；", "Values are approximations tuned for this engine's Phong/PBR pipeline look, not VMD's original table;"},
+    {"选择作用对象。本引擎的表示是全局的（对所有体系生效），", "Choose what to act on. Representations are global in this engine (they apply to all systems),"},
+    {"因此这里选择分子只影响 Create Rep 时生成的原子选择表达式；", "so the molecule chosen here only affects the atom selection expression generated by Create Rep;"},
+    {"原子球半径的整体缩放（球棍/CPK/空间填充生效；", "Overall scale of atom sphere radii (applies to Licorice/CPK/Spacefill;"},
+    {"Resolution / Grid Spacing 是同一个参数（本引擎两种表面共用一套网格）：", "Resolution / Grid Spacing is the same parameter (both surface types share one grid here):"},
+    {"越小越精细、计算越慢。Surface Quality 是它的档位快捷方式，", "smaller is finer and slower to compute. Surface Quality is a preset shortcut for it,"},
+    {"整个体系生成一个表面，而非每个分子一个。", "Generate one surface for the whole system instead of one per molecule."},
+    {"溶剂化体系差异极大（实测 md.gro：QuickSurf 846 -> 170 ms，", "The difference is large for solvated systems (measured md.gro: QuickSurf 846 -> 170 ms,"},
+    {"关键字列表直接来自解析器（selectionKeywords），", "The keyword list comes straight from the parser (selectionKeywords),"},
+    {"故列出的每一项都真的能解析。当前支持：", "so every entry listed really parses. Currently supported:"},
+    {"Update Style（VMD 的逐帧更新方式）在本引擎是内建的：", "Update Style (VMD's per-frame update mode) is built in here:"},
+    {"帧切走坐标重放（只重写坐标载荷，不重建命令流）。", "frame changes replay coordinates (only the coordinate payload is rewritten; the command stream is not rebuilt)."},
+
+    // —— 追加词条（tools/add_i18n_entries.py）——
+    {"光栅化 (Vulkan)", "Rasterization (Vulkan)"},
+    {"视口倍数", "Viewport scale"},
+    {"当前背景", "Current background"},
+    {"轨迹播放", "Trajectory playback"},
+    {"PNG 序列", "PNG sequence"},
+
+    // —— 追加词条：ESP 映射表面（表示面板参数 / 视口色标 / PNG 叠加）——
+    {"ESP 参数", "ESP Parameters"},
+    {"密度 cube（几何）", "Density cube (geometry)"},
+    {"静电势 cube（颜色）", "Potential cube (color)"},
+    {"（默认：当前加载的 cube 文件）", "(default: currently loaded cube file)"},
+    {"（点击「浏览...」选择密度 cube 文件）",
+     "(click Browse to choose the density cube file)"},
+    {"（必填：选择静电势 cube 文件）", "(required: choose the potential cube file)"},
+    {"浏览...", "Browse..."},
+    {"Gaussian cube 文件 (*.cube;*.cub)", "Gaussian cube file (*.cube;*.cub)"},
+    {"未选择静电势 cube：本表示不会绘制表面",
+     "No potential cube selected: this representation draws no surface"},
+    {"未确定密度 cube：本表示不会绘制表面",
+     "Density cube not determined: this representation draws no surface"},
+    {"等值面阈值 iso (a.u.)", "Isosurface iso (a.u.)"},
+    {"常用值", "Common values"},
+    {"电子密度等值面阈值（a.u.）：越小表面越外扩（0.001 约等于 vdW 表面，0.0005 更外扩、0.005 更贴近原子核）。",
+     "Electron-density isosurface threshold (a.u.): smaller values expand the surface (0.001 is roughly the vdW surface; 0.0005 is larger; 0.005 hugs the nuclei)."},
+    {"自动范围", "Auto range"},
+    {"按 ESP 数据自动定色标范围（发散型取 ±max|v| 的 99.5 分位）；关闭后用下面的固定上下限。",
+     "Automatically derives the color range from the ESP data (diverging: 99.5th percentile of max|v|); when off, the fixed min/max below are used."},
+    {"色标范围 (kcal/mol)", "Color range (kcal/mol)"},
+    {"色标方案", "Color map"},
+    {"翻转色标", "Invert colors"},
+    {"翻转配色方向（默认低值红=富电子/负电势、高值蓝=缺电子/正电势；翻转后红蓝互换）。",
+     "Flips the color direction (default: low red = electron-rich/negative potential, high blue = electron-poor/positive; flipped, red and blue swap)."},
+    {"翻转配色方向（默认参考配色「黄->绿->青->蓝->紫」：负电势黄、正电势紫；首次选中 ESP 表示时自动套用参考图观感，用户仍可改）。",
+     "Flips the color direction (default reference map 'yellow->green->cyan->blue->purple': negative potential yellow, positive purple; applied automatically the first time an ESP representation is selected; still editable)."},
+    {"显示极值标注", "Show extrema labels"},
+    {"引擎层无逐表示开关：色标条与极值数值在视口和导出的 PNG 中固定显示（最多 8 个极大 + 8 个极小）。",
+     "No per-representation switch at the engine layer: the color bar and extrema values always show in the viewport and exported PNG (up to 8 maxima + 8 minima)."},
+    {"不透明度：用下方「材质参数」的透明度 (opacity) 滑杆；首次选中 ESP 时会自动设为 0.85（半透明，便于看见内部球棍，同时保持 ESP 颜色饱和度），可随时改。",
+     "Opacity: use the Opacity slider under Material Parameters below; the first time an ESP representation is selected it is set to 0.85 (semi-transparent so the ball-and-stick inside stays visible while keeping the ESP colors saturated) and can be changed anytime."},
+    {"ESP 色标/极值标注：导出 PNG 自动叠加（透明背景与 16-bit HDR 路径除外）。",
+     "ESP color bar / extrema labels are overlaid into exported PNGs (except transparent background and the 16-bit HDR path)."},
+    {"红-白-蓝（化学惯例）", "Red-White-Blue (chemistry convention)"},
+    {"蓝-白-红", "Blue-White-Red"},
+    {"冷暖", "Coolwarm"},
+    {"参考配色（黄->绿->青->蓝->紫）", "Reference (yellow->green->cyan->blue->purple)"},
+    // —— 场景保存：链接式 / 嵌入式轨迹（v2.1）——
+    {"场景未就绪，无法保存", "Scene not ready; cannot save"},
+    {"选择轨迹的存储方式", "Choose how trajectory frames are stored"},
+    {"链接式（推荐）", "Linked (recommended)"},
+    {"只记录轨迹文件路径与指纹，场景文件很小；轨迹文件移动或改名后需要重新指定。",
+     "Stores only the trajectory file path and fingerprint, so the scene stays small; if the trajectory file is moved or renamed it must be re-selected."},
+    {"嵌入式（单文件）", "Embedded (single file)"},
+    {"把轨迹帧一起写进 .mlscene，可单文件分发；体积随帧数×原子数增长。",
+     "Writes trajectory frames into the .mlscene so it can be shared as one file; size grows with frames × atoms."},
+    {"当前场景没有轨迹，两种模式保存结果相同（只存结构与表示）。",
+     "The scene has no trajectory; both modes save the same content (structure and representations only)."},
+    {"当前场景：%llu 条轨迹 / 最多 %llu 帧 / 合计 %llu 原子",
+     "Scene: %llu trajectories / up to %llu frames / %llu atoms total"},
+    {"内嵌预计：%.1f MB", "Estimated embedded size: %.1f MB"},
+    {"体积较大（>200 MB），建议改用链接式。",
+     "Large file (>200 MB); the linked mode is recommended."},
+    {"保存…", "Save…"},
+    {"场景已保存（嵌入式）：", "Scene saved (embedded): "},
+    {"场景已保存（链接式）：", "Scene saved (linked): "},
+    // ---- v2.12：播放帧率 / 视图叠加 / 新增表示 ----
+    {"播放帧率", "Playback rate"},
+    {"实时动画每秒推进多少轨迹帧（与轨迹 dt 无关）",
+     "Trajectory frames advanced per second in real time (independent of the trajectory dt)"},
+    {"实际推进", "Effective"},
+    {"视图叠加", "View overlays"},
+    {"可分别关闭", "each can be turned off"},
+    {"坐标轴方向 (X/Y/Z)", "Axis orientation (X/Y/Z)"},
+    {"比例尺与尺寸 (Å)", "Scale bar and dimensions (Å)"},
+    {"左下角显示世界坐标轴朝向", "Show world axis orientation at bottom-left"},
+    {"右下角比例尺 + 右上角场景包围盒尺寸",
+     "Scale bar at bottom-right + bounding-box size at top-right"},
+    {"分子显示视图", "Molecular view"},
+    {"坐标轴方向 / 比例尺 / 场景尺寸（可分别关闭）",
+     "Axis orientation / scale bar / scene size (each can be turned off)"},
+    {"全部关闭", "Turn all off"},
+    {"全部打开", "Turn all on"},
+    {"叠加 · 开", "Overlays · on"},
+    {"叠加 · 关", "Overlays · off"},
+    {"尺寸", "Size"},
+    {"方向", "Orientation"},
+    {"菱形（宝石）", "Diamond (gem)"},
+    {"点云", "Dot cloud"},
+    {"需要蛋白质骨架（含 CA 原子的链）；当前结构没有骨架，选了会是空白",
+     "Requires a protein backbone (a chain with CA atoms); the current structure has none, so the view would be empty"},
+    {"该样式只适用于蛋白质骨架；当前结构没有 CA 骨架，视口会是空白。",
+     "This style applies to protein backbones only; the current structure has no CA backbone, so the viewport will be empty."},
+    {"改回球棍", "Back to ball-and-stick"},
+};
+
+// 查表：静态 unordered_map（string_view 键指向字面量，静态存储期安全）。
+const std::unordered_map<std::string_view, const char*>& table() {
+    static const std::unordered_map<std::string_view, const char*> map = [] {
+        std::unordered_map<std::string_view, const char*> m;
+        m.reserve(sizeof(kTable) / sizeof(kTable[0]) * 2);
+        for (const Entry& e : kTable) {
+            m.emplace(std::string_view(e.zh), e.en);
+        }
+        return m;
+    }();
+    return map;
+}
+
+Language g_language = Language::Zh;
+
+} // namespace
+
+Language current() { return g_language; }
+
+void setLanguage(Language lang) {
+    if (lang >= Language::Zh && lang < Language::Count) {
+        g_language = lang;
+    }
+}
+
+const char* languageKey(Language lang) {
+    switch (lang) {
+        case Language::En: return "en";
+        case Language::Zh:
+        default:           return "zh";
+    }
+}
+
+bool languageFromKey(const char* key, Language* out) {
+    if (key == nullptr) {
+        return false;
+    }
+    for (int i = 0; i < static_cast<int>(Language::Count); ++i) {
+        const auto lang = static_cast<Language>(i);
+        const char* a = languageKey(lang);
+        const char* b = key;
+        while (*a != '\0' && *a == *b) {
+            ++a;
+            ++b;
+        }
+        if (*a == '\0' && *b == '\0') {
+            if (out != nullptr) {
+                *out = lang;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+const char* languageNativeName(Language lang) {
+    // 各自语言书写：切换语言后用户仍能认出自己的语言
+    switch (lang) {
+        case Language::En: return "English";
+        case Language::Zh:
+        default:           return "中文";
+    }
+}
+
+const char* tr(const char* zhSource) {
+    if (zhSource == nullptr) {
+        return "";
+    }
+    if (g_language == Language::Zh) {
+        return zhSource;   // 中文即源串，无需查表
+    }
+    const auto& map = table();
+    const auto it = map.find(std::string_view(zhSource));
+    return it != map.end() ? it->second : zhSource;   // 未收录 -> 原样返回
+}
+
+} // namespace moleculens::app::i18n

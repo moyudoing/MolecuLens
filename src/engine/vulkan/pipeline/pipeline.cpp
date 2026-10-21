@@ -134,8 +134,9 @@ bool PipelineBuilder::build(VulkanDevice& device, Pipeline* out) {
 
     VkPipelineColorBlendStateCreateInfo colorBlend{};
     colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlend.attachmentCount = 1;
-    colorBlend.pAttachments = &blendAttachment;
+    // 深度-only pass（阴影贴图）附件数为 0 → pAttachments 必须为 nullptr
+    colorBlend.attachmentCount = colorAttachments_;
+    colorBlend.pAttachments = colorAttachments_ > 0 ? &blendAttachment : nullptr;
 
     VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT,
                                       VK_DYNAMIC_STATE_SCISSOR};
@@ -188,6 +189,8 @@ struct PipeSpec {
     bool depthWrite = true;
     VkPolygonMode polygon = VK_POLYGON_MODE_FILL;
     const char* name = "pipeline";
+    // 剔除模式：默认双面不剔除；透明网格改用 BACK（见 mesh-blend 注释）。
+    VkCullModeFlags cull = VK_CULL_MODE_NONE;
 };
 
 } // namespace
@@ -221,7 +224,7 @@ bool PipelineSet::create(VulkanDevice& device, VkRenderPass renderPass,
             .descriptorLayouts({globalLayout})
             .pushConstants(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(MaterialBlock))
             .depthTest(true).depthWrite(s.depthWrite).blend(s.blend)
-            .polygonMode(s.polygon).cullMode(VK_CULL_MODE_NONE);
+            .polygonMode(s.polygon).cullMode(s.cull);
         if (!pb.build(device, out)) {
             if (outError) *outError = std::string(s.name) + " pipeline build failed";
             return false;
@@ -319,12 +322,18 @@ bool PipelineSet::create(VulkanDevice& device, VkRenderPass renderPass,
         };
         const std::vector<VkVertexInputBindingDescription> b(bindings, bindings + 1);
         const std::vector<VkVertexInputAttributeDescription> a(attrs, attrs + 3);
+        // 透明网格：只画**正面**（BACK 剔除）。原因：混合管线不写深度、且旧的
+        // cull=NONE 会把背面也画一遍 —— 闭合等值面（ESP 表面/QuickSurf）的前后
+        // 两层三角形按命令流顺序交错混合，出现沿网格排列的细亮线/方块伪影
+        // （半透明表面上尤其明显）。只画正面后，透过表面看到的是不透明通道里
+        // 已画好的球棍/背景，视觉效果正确且无排序伪影。
         if (!buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
                         VK_POLYGON_MODE_FILL, "mesh"}, &meshSolid_) ||
             !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, false, true,
                         VK_POLYGON_MODE_LINE, "mesh-wire"}, &meshWire_) ||
             !buildPipe({stages, b, a, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true, false,
-                        VK_POLYGON_MODE_FILL, "mesh-blend"}, &meshBlend_)) {
+                        VK_POLYGON_MODE_FILL, "mesh-blend", VK_CULL_MODE_BACK_BIT},
+                       &meshBlend_)) {
             return false;
         }
     }

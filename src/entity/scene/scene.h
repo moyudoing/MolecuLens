@@ -7,6 +7,8 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
+#include <cmath>   // std::round（minimumImageDelta）
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -25,10 +27,18 @@ namespace moleculens::entity {
 enum class Units : uint8_t { Angstrom, Nanometer };
 
 // —— 脏位域（主方案 §4.4）——
+// 脏位语义（与 Renderer::update 的重建粒度一一对应，主方案 §5.4/§5.8.2）：
+//   DIRTY_COORDS         命令序列不变、只有坐标变 → 只重发坐标类命令段（坐标重放）
+//   DIRTY_STRUCTURE/     命令序列本身会变（原子/键/实例/表示） → 整条命令流重建
+//   DIRTY_INSTANCE/
+//   DIRTY_REPRESENTATION
+//   DIRTY_PROPERTIES     只进 GlobalUBO（背景/光照/雾/缩放）→ 命令流无需重建
+// 注意：实例/体系的**位姿**变更只改坐标、不改拓扑，故归 DIRTY_COORDS；
+//       实例的增删与显隐才改拓扑，归 DIRTY_INSTANCE。
 enum DirtyBits : uint32_t {
-    DIRTY_COORDS         = 1u << 0,      // 帧切 / 坐标编辑
+    DIRTY_COORDS         = 1u << 0,      // 帧切 / 坐标编辑 / 位姿变更
     DIRTY_STRUCTURE      = 1u << 1,      // 拓扑增删
-    DIRTY_INSTANCE       = 1u << 2,      // 实例增删 / 位姿
+    DIRTY_INSTANCE       = 1u << 2,      // 实例增删 / 显隐（拓扑变更）
     DIRTY_PROPERTIES     = 1u << 3,      // 背景/光照/单位
     DIRTY_REPRESENTATION = 1u << 4,      // 表示 / 配色变更
     DIRTY_ALL            = 0xFFFFFFFFu,
@@ -42,6 +52,11 @@ struct SceneProperties {
     float fogDensity = 0.05f;
     float ambient = 0.45f;                   // 半球光强度（0 纯平 / 越大天顶地面差异越大）
     float scale = 1.0f;                      // 全局缩放
+    // —— 剖切面（v2.3，运行期；本轮不写入 .mlscene）——
+    // 世界空间平面 dot(p, n) + d = 0；保留 <=0 一侧，另一侧在片元着色器 discard。
+    // 与 ChimeraX 的 clip 语义一致：法线指向"被切掉"的一侧。
+    bool clipEnabled = false;
+    float clipPlane[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     Units units = Units::Angstrom;
     // —— 全局光（环境光/全局光照，无方向光/点光源）——
     // 全局 UBO 语义：ambient=基础环境色+强度；skyColor/groundColor 构成半球环境光
@@ -49,6 +64,14 @@ struct SceneProperties {
     float skyColor[3] = {1.0f, 1.0f, 1.0f};       // 天顶（半球上方）色
     float groundColor[3] = {0.35f, 0.4f, 0.5f};   // 地面（半球下方）色
     float ambientColor[3] = {0.55f, 0.6f, 0.75f}; // 均匀环境光基础色
+    // —— 方向光（主方案 §6.6.4；与 LightParams 默认值保持一致）——
+    float dirLightDir[3] = {0.40f, 0.80f, 0.60f}; // 方向（指向光源）
+    float dirLightColor[3] = {1.0f, 0.98f, 0.95f};
+    float dirLightIntensity = 0.35f;              // 0 = 关
+    bool  dirLightEnabled = true;
+    // 方向光阴影（深度 pass + PCF）
+    bool  shadowsEnabled = true;
+    float shadowStrength = 0.65f;   // 0 = 无阴影，1 = 全黑本影
 };
 
 // —— 单帧（SoA 扁平；主方案 §4.3）——
@@ -58,11 +81,51 @@ struct Timestep {
     std::array<float, 9>   box{};        // 周期盒子（可选）
 };
 
+// =============================================================================
+// 周期边界（PBC）坐标处理 —— 显示前必须"补齐分子"
+// =============================================================================
+// 问题：结构/轨迹文件里的坐标常是**跨盒子边界被拆开**的（wrapped）。一个分子的
+//   一部分在盒子这端、另一部分在另一端：两者在化学上相邻（最小镜像距离 ~1 Å），
+//   但**原始坐标差**接近一个盒长。判键（BondSearch）用的是最小镜像，判定是对的；
+//   而渲染按原始坐标连键 → 画出一根 ~38 Å 的长棍。实测 data/md.gro 有 20 根
+//   （盒长 40.28 Å），画面上是几根莫名其妙的细棍，很难归因。
+// 做法：以某个锚原子为基准，把其余原子按最小镜像位移拉回锚所在的那个镜像。
+//   分子被"补齐"成连续几何 → 键自然变回正常长度。
+// 范围：仅正交盒子（取 box[0]/box[4]/box[8] 三个对角元）。GRO/XTC 的常见输出即
+//   正交盒；三斜盒需完整矩阵求逆，当前不做（盒子非正交时本函数退化为恒等变换，
+//   即维持原行为，不会引入错误）。
+inline glm::vec3 minimumImageDelta(const glm::vec3& d, const float boxLen[3]) {
+    glm::vec3 r = d;
+    for (int i = 0; i < 3; ++i) {
+        if (boxLen[i] > 1e-3f) {
+            r[i] -= boxLen[i] * std::round(d[i] / boxLen[i]);
+        }
+    }
+    return r;
+}
+
+// 以 pts[0] 为锚补齐整段坐标（原地）。count == 0 时无操作。
+inline void unwrapAroundFirst(glm::vec3* pts, size_t count,
+                             const std::array<float, 9>& box) {
+    if (pts == nullptr || count == 0) {
+        return;
+    }
+    const float L[3] = {box[0], box[4], box[8]};
+    if (L[0] <= 1e-3f && L[1] <= 1e-3f && L[2] <= 1e-3f) {
+        return;   // 非正交/无盒子 → 不动（保持原行为）
+    }
+    const glm::vec3 anchor = pts[0];
+    for (size_t i = 1; i < count; ++i) {
+        pts[i] = anchor + minimumImageDelta(pts[i] - anchor, L);
+    }
+}
+
 // —— 轨迹（主方案 §4.3 / §8.1）——
 struct Trajectory {
     std::vector<Timestep> frames;        // 各帧坐标（共享拓扑）
     float dt = 2.0f;                     // 帧间隔（ps）
     bool  periodic = false;              // 周期盒子
+    std::string source;                  // 来源文件名（导入时写入；轨迹列表显示用）
 };
 
 // —— 分子实例（主方案 §4.3）——
@@ -72,6 +135,13 @@ struct MoleculeInstance {
     std::string name;                    // 显示名
     bool visible = true;
     std::shared_ptr<Trajectory> trajectory;  // 静态文件则 frames.size()==1
+    // 本实例第 0 个原子在 trajectory 帧坐标里的下标。
+    // 0 = 该轨迹是"实例私有"的（每帧长度 == 本实例原子数，历史行为，不变）。
+    // >0 或与同体系其他实例**共享同一个 Trajectory 对象**时，帧坐标是**体系级**
+    // 的（长度 == 体系总原子数），本实例取 [trajAtomOffset, +原子数) 这一段。
+    // 之所以让多实例共享同一个 Trajectory 对象（而非各切一份），是为了让
+    // "同一体系必须同步播放"成为**结构上的必然**：见 applyTrajectoryFrame。
+    uint32_t trajAtomOffset = 0;
     std::vector<uint32_t> globalAtomIds;     // 实例内原子 → 全局原子 ID（拾取回查）
     uint32_t systemId = UINT32_MAX;      // 所属体系（SystemGroup.id）；无 = 未归组
     bool isSolvent = false;              // 溶剂分子（水等，可整体显隐）；默认否
@@ -163,6 +233,13 @@ public:
     // 设置实例轨迹（导入轨迹文件后调用）。帧坐标常驻内存；置 DIRTY_COORDS 并
     // 用首帧刷新坐标段。传 nullptr 清除轨迹（退回静态单帧）。
     bool setInstanceTrajectory(uint32_t instanceIndex, std::shared_ptr<Trajectory> traj);
+    // 体系级轨迹：把一条**整体系**的轨迹挂到该体系全部实例上（同一 Trajectory
+    // 对象共享，各实例按几何顺序得到自己的 trajAtomOffset）。
+    // 为什么需要它：GRO 解析器按残基把体系拆成多个分子实例（实测 data/md.gro →
+    // 2042 实例 / 6452 原子），而 DCD/XTC 的每帧包含**整个体系**的坐标 ——
+    // 用 setInstanceTrajectory 只能把 6452 个坐标挂到某一个 30 原子的分子上。
+    // 校验：体系总原子数必须等于轨迹每帧坐标数，否则拒绝（不做部分挂载）。
+    bool setSystemTrajectory(uint32_t systemId, std::shared_ptr<Trajectory> traj);
     void setInstanceTransform(uint32_t instanceIndex, const Transform&);
     // 溶剂整体显隐：按实例 isSolvent 标记置 visible（溶剂分子可在分子列表折叠，
     // 见 io/gro 溶剂读取；置 DIRTY_INSTANCE 触发重渲染）
@@ -170,6 +247,18 @@ public:
 
     // 写入当前帧坐标 → CoordsSoA（帧切路径，P4）
     void writeFramePositions(uint32_t instanceIndex, const std::vector<glm::vec3>& worldPositions);
+
+    // 把第 frame 帧写进坐标段：帧坐标是结构局部坐标，需乘实例位姿才是世界坐标。
+    // **唯一实现**——时间轴播放（TimelineController::publishFrame）与动画导出
+    // （逐帧导出 PNG 序列）都调这里，避免同一变换在两处各自实现。
+    //
+    // 作用范围是"该实例 + 所有与它**共享同一 Trajectory 对象**的实例"（体系级
+    // 轨迹时即整个体系）。这使"同体系必须同步播放"成为结构上的必然：若只推进
+    // 当前实例，多实例体系会出现"只有一个分子在动、其余静止"的静默错误，而
+    // 逐实例挂载的模型无法从数据上区分这种情况。
+    // 返回 false：无轨迹 / 实例越界 / 帧越界 / 帧坐标长度与本实例原子数不符
+    //（坐标段保持不变）。
+    bool applyTrajectoryFrame(uint32_t instanceIndex, uint64_t frame);
     // 重建 CoordsSoA（实例位姿/结构变更后）
     void rebuildCoordsSoA();
 

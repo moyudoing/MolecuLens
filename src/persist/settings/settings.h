@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <array>
+#include <filesystem>   // settingsPath() 返回 std::filesystem::path
 #include <string>
 #include <vector>
 
@@ -16,10 +18,22 @@
 namespace moleculens::persist {
 
 struct Settings {
-    std::string theme = "dark";
+    // UI 主题预设的**稳定键**（app::UITheme::themeKey()，如 "tokyo-night"）。
+    // 存键不存序号：预设增删/重排后旧配置仍然指向同一个主题。
+    std::string theme = "tokyo-night";
+    // 界面语言：稳定键 "zh" / "en"（与主题同一取舍：存字符串不存枚举序号）。
+    // 默认中文 —— 与历史行为一致，旧配置缺该键时也走这里。
+    std::string language = "zh";
     std::string accent = "teal";
+    // 场景保存的轨迹模式：稳定键 "linked" / "embedded"（UI 记忆上次选择）。
+    // 存字符串不存枚举序号 —— 与 theme/language 同一取舍，枚举增删不漂移。
+    // 缺键（旧配置）→ "linked"，与历史行为一致。
+    std::string sceneSaveMode = "linked";
     std::string layout;                          // base64(imgui_dock_serialized)
     int msaa = 4;
+    // 垂直同步：true = FIFO（帧率跟显示器刷新率，画面最稳）；false = IMMEDIATE（不受限，
+    // 交互更跟手但可能撕裂）。交换链在启动时创建，改动**下次启动生效**。
+    bool vsync = true;
     std::string colorScheme = "ElementCPK";
     float fov = 45.0f;
     float ambient = 0.3f;

@@ -76,6 +76,20 @@ public:
     VkFormat depthFormat() const { return VK_FORMAT_D32_SFLOAT; }
     VkSampleCountFlagBits msaaSamples() const { return msaaSamples_; }
 
+    // —— 显存占用（VK_EXT_memory_budget）——
+    // 汇总全部 DEVICE_LOCAL 堆的"已用/预算"。这是 Vulkan 里唯一能拿到真实显存
+    // 占用的途径（VMA 不暴露分配器，堆总量也无法反映"当前用了多少"）。
+    // 扩展是可选启用的（见 device.cpp 的 kOptionalDeviceExtensions）：
+    // 未启用时返回 false，调用方应显示"不可用"而不是报 0 —— 0 会被误读成"没占用"。
+    struct VramUsage {
+        uint64_t usedBytes = 0;
+        uint64_t budgetBytes = 0;
+        uint32_t heapCount = 0;
+    };
+    [[nodiscard]] bool queryVramUsage(VramUsage* out) const;
+    // 扩展是否已启用（未启用时 queryVramUsage 恒返回 false）
+    [[nodiscard]] bool hasMemoryBudget() const { return memoryBudgetEnabled_; }
+
     VkCommandPool commandPool() const { return commandPool_; }
     // 每帧命令缓冲
     VkCommandBuffer beginFrameCommands();
@@ -135,6 +149,7 @@ private:
     uint32_t graphicsFamily_ = 0;
     uint32_t presentFamily_ = 0;
     VkSampleCountFlagBits msaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
+    bool memoryBudgetEnabled_ = false;   // VK_EXT_memory_budget 是否已启用
 
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     std::vector<VkImage> swapchainImages_;

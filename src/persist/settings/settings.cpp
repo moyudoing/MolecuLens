@@ -17,9 +17,13 @@ namespace moleculens::persist {
 nlohmann::json Settings::toJson() const {
     nlohmann::json j;
     j["theme"] = theme;
+    j["language"] = language;
     j["accent"] = accent;
+    // 顶层键（与 theme 同级）：设置面板记住上次的"链接式/嵌入式"选择
+    j["sceneSaveMode"] = sceneSaveMode;
     j["layout"] = layout;
     j["render"] = {{"msaa", msaa},
+                   {"vsync", vsync},
                    {"colorScheme", colorScheme},
                    {"fov", fov},
                    {"ambient", ambient}};
@@ -36,11 +40,20 @@ nlohmann::json Settings::toJson() const {
 
 void Settings::fromJson(const nlohmann::json& j) {
     if (j.contains("theme")) theme = j["theme"].get<std::string>();
+    if (j.contains("language")) language = j["language"].get<std::string>();
     if (j.contains("accent")) accent = j["accent"].get<std::string>();
+    if (j.contains("sceneSaveMode")) {
+        // 只接受两个稳定键；其他值忽略（保留默认 "linked"），避免坏配置让保存失败
+        const auto v = j["sceneSaveMode"].get<std::string>();
+        if (v == "linked" || v == "embedded") {
+            sceneSaveMode = v;
+        }
+    }
     if (j.contains("layout")) layout = j["layout"].get<std::string>();
     if (j.contains("render")) {
         const auto& r = j["render"];
         if (r.contains("msaa")) msaa = r["msaa"].get<int>();
+        if (r.contains("vsync")) vsync = r["vsync"].get<bool>();
         if (r.contains("colorScheme")) colorScheme = r["colorScheme"].get<std::string>();
         if (r.contains("fov")) fov = r["fov"].get<float>();
         if (r.contains("ambient")) ambient = r["ambient"].get<float>();

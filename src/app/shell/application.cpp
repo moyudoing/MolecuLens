@@ -110,7 +110,9 @@ bool Application::init() {
     // 日志（主方案 §14.5：spdlog 滚动文件；分类前缀 [core]/[io]/[engine]…）
     // Debug 构建：附加控制台 + stdout 彩色 sink，日志同时输出到终端方便调试。
     // （Win32 GUI 子系统默认无控制台，不 AllocConsole 则 stdout 无处可写）
-    bool consoleAttached = false;
+#ifndef NDEBUG
+    bool consoleAttached = false;   // 仅 Debug 使用（Release 不挂控制台，避免 C4189）
+#endif
 #ifdef _WIN32
 #ifndef NDEBUG
     // 仅交互会话挂接控制台：服务/隐藏窗口站下 AllocConsole 可能阻塞，跳过
@@ -265,11 +267,23 @@ engine::VulkanRenderer* Application::vkRenderer() {
 }
 
 int Application::run(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
     if (!init()) {
         spdlog::critical("[app] initialization failed");
         return 1;
+    }
+    // 命令行文件参数：moleculens_app [结构文件] [轨迹文件]
+    // - 结构文件：走与"打开"完全相同的异步解析路径（不另开一条同步快路，
+    //   避免两条路径行为漂移）；
+    // - 轨迹文件：因解析是异步的，此处只登记，等结构合并进场景后再导入
+    //   （ViewControl::setPendingTrajectory 的时序说明）。
+    // 这同时是"打开方式"支持，也是无人工介入跑应用级性能测试的入口。
+    if (argc > 1 && argv[1] != nullptr && argv[1][0] != '\0') {
+        spdlog::info("[app] 命令行结构文件: {}", argv[1]);
+        ioCtl_->openFile(argv[1]);
+    }
+    if (argc > 2 && argv[2] != nullptr && argv[2][0] != '\0') {
+        spdlog::info("[app] 命令行轨迹文件: {}", argv[2]);
+        view_->setPendingTrajectory(argv[2]);
     }
     view_->runLoop();
     shutdown();

@@ -3,6 +3,7 @@
 // 规格来源：主方案 §5.8.1（加载 → 显示 静态全流程 ①②③）
 // =============================================================================
 
+#include "app/i18n/language.h"
 #include "app/controller/io/io_controller.h"
 
 #include <algorithm>
@@ -11,6 +12,8 @@
 #include <unordered_map>
 
 #include "entity/trajectory/dcd_reader.h"
+#include "entity/trajectory/trr/trr_reader.h"
+#include "entity/trajectory/xtc/xtc_reader.h"
 
 #include "app/controller/rep/representation_controller.h"
 #include "engine/camera/camera.h"
@@ -104,6 +107,41 @@ void mergeParsedScene(const entity::SceneStructure& src,
     }
     if (pointCount > 0) {
         center /= static_cast<float>(pointCount);
+    }    // 不同文件导入的体系并排摆放：新体系放到已有场景的右侧，避免坐标重叠。
+    // （各自仍以自己的几何中心对齐体系原点，只是整体沿 +X 平移一段。）
+    glm::vec3 half(0.0f);
+    {
+        glm::vec3 bmin(1e30f), bmax(-1e30f);
+        for (const auto& inst : src.instances()) {
+            if (!inst.trajectory || inst.trajectory->frames.empty()) {
+                continue;
+            }
+            for (const auto& p : inst.trajectory->frames[0].positions) {
+                bmin = glm::min(bmin, p);
+                bmax = glm::max(bmax, p);
+            }
+        }
+        if (bmin.x <= bmax.x) {
+            half = (bmax - bmin) * 0.5f;
+        }
+    }
+    float offsetX = 0.0f;
+    {
+        bool hasExisting = false;
+        glm::vec3 existMax(-1e30f, -1e30f, -1e30f);
+        for (const auto& inst : dst.instances()) {
+            if (!inst.trajectory || inst.trajectory->frames.empty()) {
+                continue;
+            }
+            for (const auto& p : inst.trajectory->frames[0].positions) {
+                existMax = glm::max(existMax, p + inst.transform.translation);
+                hasExisting = true;
+            }
+        }
+        if (hasExisting) {
+            const float gap = std::max(5.0f, half.x * 0.5f);
+            offsetX = existMax.x + gap + half.x;
+        }
     }
 
     for (const entity::MoleculeInstance& inst : src.instances()) {
@@ -112,6 +150,7 @@ void mergeParsedScene(const entity::SceneStructure& src,
         }
         entity::Transform tm = inst.transform;
         tm.translation -= center;   // 体系中心 → 原点（体系内分子相对排布保留）
+        tm.translation.x += offsetX;   // 与其他体系并排（不重叠）
         // 保留实例名与溶剂标记（gro 按残基拆分子：名 = 残基名#序号、isSolvent 标记）
         dst.addTrajectoryInstance(structMap[inst.structureIndex], tm, inst.trajectory,
                                   sysId, inst.name, inst.isSolvent);
@@ -245,8 +284,16 @@ void IoController::mergeParsed(std::shared_ptr<entity::SceneStructure> parsed,
     }
 }
 
-bool IoController::saveScene(const std::filesystem::path& path) {
-    (void)path;
+const char* IoController::modeKey(SceneSaveMode mode) {
+    return mode == SceneSaveMode::Embedded ? "embedded" : "linked";
+}
+
+SceneSaveMode IoController::modeFromKey(const std::string& key) {
+    // 未知/空串回退 Linked：旧配置或手写坏的 settings.json 不应让保存失败
+    return key == "embedded" ? SceneSaveMode::Embedded : SceneSaveMode::Linked;
+}
+
+bool IoController::saveScene(const std::filesystem::path& path, SceneSaveMode mode) {
     if (svc_.scene == nullptr) {
         spdlog::error("[io] saveScene: 场景未就绪");
         return false;
@@ -261,15 +308,28 @@ bool IoController::saveScene(const std::filesystem::path& path) {
     in.trajectorySourcePath = currentSourcePath_;
     in.trajectorySourceSize = currentSourceSize_;
     in.trajectorySourceMtime = currentSourceMtime_;
+    in.embedTrajectories = (mode == SceneSaveMode::Embedded);
+    // 场景标注（v2.3）：由 Workbench 通过桥回调提供；没有桥 = 不写（旧行为）
+    persist::mlscene::Annotations annotations;
+    if (annotationGet_) {
+        annotations = annotationGet_();
+    }
+    in.annotations = &annotations;
 
     const auto snap = engine::makeSnapshot(in);
-    auto result = persist::mlscene::MlSceneSerializer::save(snap, path);
+    // 两个开关必须同时为 true：桥接层据此收集帧坐标，序列化器据此写二进制段。
+    // 只打开其中一个会得到"JSON 说有内嵌/文件里却没有"的半截文件。
+    persist::mlscene::SaveOptions opts;
+    opts.embedTrajectories = in.embedTrajectories;
+    auto result = persist::mlscene::MlSceneSerializer::save(snap, path, opts);
     if (!result) {
         spdlog::error("[io] saveScene 失败: {}", result.errorMessage());
         return false;
     }
-    spdlog::info("[io] 场景已保存: {} ({} 结构 / {} 体系 / {} 实例)", path.string(),
-                 snap.structures.size(), snap.systems.size(), snap.instances.size());
+    spdlog::info("[io] 场景已保存: {} ({} 结构 / {} 体系 / {} 实例 / 轨迹{}，内嵌 {} 条)",
+                 path.string(), snap.structures.size(), snap.systems.size(),
+                 snap.instances.size(), modeKey(mode),
+                 snap.embeddedTrajectories.size());
     return true;
 }
 
@@ -278,16 +338,35 @@ bool IoController::importTrajectory(const std::filesystem::path& path) {
     if (svc_.scene == nullptr) {
         return false;
     }
-    // 读取器分派（按扩展名；当前内建 DCD）
+    // 读取器分派：每个候选读取器各自判定 canOpen（扩展名 + magic 双重校验），
+    // 命中即用。新增格式只需在此追加一个候选 —— 判定逻辑留在读取器内部，
+    // 避免这里再抄一份"某格式长什么样"的知识。
     std::unique_ptr<entity::ITrajectoryReader> reader;
     {
-        entity::DcdReader probe;
-        if (probe.canOpen(path)) {
+        entity::DcdReader dcd;
+        entity::XtcReader xtc;
+        entity::TrrReader trr;
+        if (dcd.canOpen(path)) {
             reader = std::make_unique<entity::DcdReader>();
+        } else if (xtc.canOpen(path)) {
+            reader = std::make_unique<entity::XtcReader>();
+        } else if (trr.canOpen(path)) {
+            reader = std::make_unique<entity::TrrReader>();
         }
     }
     if (!reader) {
-        spdlog::error("[io] 不支持的轨迹格式（当前支持 .dcd）: {}", path.string());
+        // 扩展名对得上、magic 校验却失败：多半是文件损坏或被改名。
+        // 仍给一句 .trr 的替代方案，避免用户拿 TRR 硬撞（旧版本只支持 DCD/XTC）。
+        if (path.extension() == ".trr") {
+            spdlog::error(
+                "[io] 无法识别该 .trr 轨迹（文件损坏，或不是 GROMACS 经典/2023+ 布局）。"
+                "可尝试用 gmx trjconv 转成 .xtc: gmx trjconv -f {} -o {} -s topol.tpr",
+                path.string(), path.string().substr(0, path.string().find_last_of('.')) +
+                                   ".xtc");
+        } else {
+            spdlog::error("[io] 不支持的轨迹格式（当前支持 .dcd / .xtc / .trr）: {}",
+                          path.string());
+        }
         return false;
     }
     auto opened = reader->open(path);
@@ -310,18 +389,47 @@ bool IoController::importTrajectory(const std::filesystem::path& path) {
             break;
         }
     }
-    const auto& st = svc_.scene->structures()[insts[target].structureIndex];
-    if (reader->atomCount() != st.elements.size()) {
-        spdlog::error("[io] 轨迹原子数({}) 与目标结构原子数({}) 不一致 —— "
-                      "DCD 不含拓扑，须与同源结构文件（PDB/GRO）配对导入",
-                      reader->atomCount(), st.elements.size());
+
+    // 校验粒度必须是**体系总原子数**，不是单个实例的原子数：
+    // 轨迹文件（DCD/XTC/TRR）的每帧包含整个体系的全部原子坐标，而一个体系在场景里
+    // 可能由多个实例组成 —— GRO 解析器按残基拆分子（实测 data/md.gro → 2042 个
+    // 实例 / 7 种结构 / 合计 6452 原子）。此前拿"体系首个实例的原子数"去比，
+    // 对 md.gro 是 30 vs 6452，导入**必然失败**，且报错信息把原因指向"结构文件不
+    // 同源"，与真实原因（多实例体系）无关，排查方向完全被带偏。
+    uint32_t systemAtoms = 0;
+    uint32_t systemInstances = 0;
+    for (const auto& in : insts) {
+        if (in.systemId != cur) {
+            continue;
+        }
+        ++systemInstances;
+        systemAtoms += static_cast<uint32_t>(
+            svc_.scene->structures()[in.structureIndex].elements.size());
+    }
+    if (systemInstances == 0) {   // 无体系归属：退化为整场景原子数
+        systemInstances = static_cast<uint32_t>(insts.size());
+        for (const auto& in : insts) {
+            systemAtoms += static_cast<uint32_t>(
+                svc_.scene->structures()[in.structureIndex].elements.size());
+        }
+    }
+    if (reader->atomCount() != systemAtoms) {
+        spdlog::error("[io] 轨迹原子数({}) 与体系总原子数({}) 不一致 —— "
+                      "DCD/XTC/TRR 均不含拓扑，须与同源结构文件（PDB/GRO）配对导入",
+                      reader->atomCount(), systemAtoms);
         return false;
     }
+    // 挂载方式按实例数分流：
+    //   单实例体系 → 实例私有轨迹（历史路径，帧坐标即本实例坐标）
+    //   多实例体系 → 体系级轨迹（同一 Trajectory 共享给全部成员，各实例持
+    //                trajAtomOffset 取自己的切片）—— 见 setSystemTrajectory
+    const bool systemWide = systemInstances > 1;
 
     // 逐帧读入内存。轨迹文件通常数十 MB（1000 帧 × 6000 原子 ≈ 72 MB），
     // 常驻内存换取实现简单；后续若需超长轨迹可改为按需读取（见 ITrajectoryReader）。
     auto traj = std::make_shared<entity::Trajectory>();
     traj->dt = reader->dt();
+    traj->source = path.filename().string();
     traj->frames.reserve(static_cast<size_t>(reader->frameCount()));
     for (uint64_t f = 0; f < reader->frameCount(); ++f) {
         auto fr = reader->readFrame(f);
@@ -335,7 +443,15 @@ bool IoController::importTrajectory(const std::filesystem::path& path) {
         return false;
     }
 
-    if (!svc_.scene->setInstanceTrajectory(target, traj)) {
+    const bool attached =
+        systemWide ? svc_.scene->setSystemTrajectory(cur, traj)
+                   : svc_.scene->setInstanceTrajectory(target, traj);
+    if (!attached) {
+        spdlog::error("[io] 轨迹挂载失败（{}）：体系总原子数 {} / 轨迹每帧坐标数 {}",
+                      systemWide ? tr("体系级") : tr("实例级"), systemAtoms,
+                      traj->frames.empty() ? 0u
+                                           : static_cast<uint32_t>(
+                                                 traj->frames[0].positions.size()));
         return false;
     }
     // 广播 SceneOpened：时间轴据此重新激活并发布首帧（帧坐标 → 世界坐标的
@@ -343,8 +459,10 @@ bool IoController::importTrajectory(const std::filesystem::path& path) {
     if (svc_.bus) {
         svc_.bus->publish({EventType::SceneOpened, 0});
     }
-    spdlog::info("[io] 轨迹已导入: {} → 实例 {} ({} 帧, dt={} ps)", path.string(),
-                 target, traj->frames.size(), traj->dt);
+    const std::string where =
+        systemWide ? std::string(tr("体系")) : (tr("实例 ") + std::to_string(target));
+    spdlog::info("[io] 轨迹已导入: {} -> {} ({} 实例, {} 帧, dt={} ps)", path.string(),
+                 where, systemInstances, traj->frames.size(), traj->dt);
     return true;
 }
 
@@ -373,7 +491,14 @@ bool IoController::openSceneFile(const std::filesystem::path& path) {
         repCtl_->replaceAll(std::move(reps));   // 表示的唯一持有者：由它换入并重新绑定
     }
 
-    // 轨迹源引用（帧数据未内嵌，重放需按需加载 —— 见 P4 轨迹导入）
+    // 场景标注（v2.3）：把文件里的视图叠加层回填给 Workbench（没有桥则跳过）
+    if (annotationSet_) {
+        annotationSet_(snap.annotations);
+    }
+
+    // 轨迹源引用（链接式：帧数据未内嵌，重放需按需加载；嵌入式：帧坐标已由
+    // applySnapshot 从内嵌表重建，这里仍按 ref.sourcePath 回填——保持现逻辑，
+    // 因为嵌入保存时也会写入当前打开文件的路径用于溯源）。
     if (!snap.instances.empty()) {
         currentSourcePath_ = snap.instances[0].trajectory.sourcePath;
         currentSourceSize_ = snap.instances[0].trajectory.sourceSize;
@@ -382,6 +507,10 @@ bool IoController::openSceneFile(const std::filesystem::path& path) {
         currentSourcePath_.clear();
         currentSourceSize_ = 0;
         currentSourceMtime_ = 0;
+    }
+    if (!snap.embeddedTrajectories.empty()) {
+        spdlog::info("[io] 场景含内嵌轨迹 {} 条（单文件，无需外部轨迹文件）",
+                     snap.embeddedTrajectories.size());
     }
 
     if (svc_.renderer) {

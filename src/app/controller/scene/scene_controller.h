@@ -38,6 +38,8 @@ public:
     uint32_t addSystem(const std::string& name);
     bool removeSystem(uint32_t systemId);
     bool setSystemVisible(uint32_t systemId, bool visible);
+    // 卸载该体系的轨迹（成员实例的 trajectory 置空，退回静态单帧）
+    bool clearSystemTrajectory(uint32_t systemId);
     bool setSystemTransform(uint32_t systemId, const entity::Transform& tm);
     bool renameSystem(uint32_t systemId, const std::string& name);
     bool moveInstanceToSystem(uint32_t instanceIndex, uint32_t systemId);

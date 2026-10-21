@@ -4,6 +4,7 @@
 // 新增：多主题支持
 // =============================================================================
 
+#include "app/i18n/language.h"
 #include "app/view/theme/ui_theme.h"
 
 #include <cmath>
@@ -37,6 +38,8 @@ ImVec4 C_TEXT_MUTED(0.337f, 0.373f, 0.537f, 1.0f);
 
 bool UITheme::fontsLoaded_ = false;
 UIThemePreset UITheme::currentTheme_ = UIThemePreset::TokyoNight;
+UIThemePreset UITheme::lastDarkTheme_ = UIThemePreset::TokyoNight;
+UIThemePreset UITheme::lastLightTheme_ = UIThemePreset::Light;
 ImFont* UITheme::fontDefault_ = nullptr;
 ImFont* UITheme::fontTitle_ = nullptr;
 ImFont* UITheme::fontSmall_ = nullptr;
@@ -53,8 +56,17 @@ void UITheme::advanceTime(float dt) {
     }
 }
 
-void UITheme::setTheme(UIThemePreset preset) {
+bool UITheme::setTheme(UIThemePreset preset) {
+    if (preset == currentTheme_) {
+        return false;   // 幂等：调用点无需自行判重（启动加载/UI 每帧回读都会调用）
+    }
     currentTheme_ = preset;
+    // 记住该模式的最近选择，供"白天/暗黑"切换回到用户真正用过的那套
+    if (themePresetIsDark(preset)) {
+        lastDarkTheme_ = preset;
+    } else {
+        lastLightTheme_ = preset;
+    }
     ThemeColors colors = getThemeColors(preset);
 
     // 更新全局配色
@@ -72,11 +84,37 @@ void UITheme::setTheme(UIThemePreset preset) {
     // 重新应用主题到 ImGui
     applyTheme();
 
-    spdlog::info("[ui] 主题切换: {}", getThemeNameZh(preset));
+    spdlog::info("[ui] 主题切换: {} ({})", themePresetNameZh(preset),
+                 themePresetKey(preset));
+    return true;
 }
 
 UIThemePreset UITheme::currentTheme() {
     return currentTheme_;
+}
+
+const char* UITheme::themeKey() {
+    return themePresetKey(currentTheme_);
+}
+
+bool UITheme::isDarkTheme() {
+    return themePresetIsDark(currentTheme_);
+}
+
+void UITheme::toggleDarkLight() {
+    // 切到"另一模式"里最近用过的那套（不是固定的某一对）
+    setTheme(isDarkTheme() ? lastLightTheme_ : lastDarkTheme_);
+}
+
+bool UITheme::setThemeByKey(const std::string& key) {
+    UIThemePreset preset = currentTheme_;
+    if (!themePresetFromKey(key, &preset)) {
+        spdlog::warn("[ui] 未知主题键 '{}'（配置可能来自旧版本）—— 保持当前主题 {}", key,
+                     themePresetKey(currentTheme_));
+        return false;
+    }
+    setTheme(preset);
+    return true;
 }
 
 void UITheme::applyTheme() {
@@ -188,7 +226,23 @@ bool UITheme::loadFont(const char* fontPath) {
         // 界面文案里落在"常用简体 2500 字"之外的汉字——该表是 imgui 内置的
         // 固定子集，下列字不在其中，不补就会渲染成方块（"渲染设置"的"渲"）。
         // 新增界面文案后如有方块字，按同样办法补在这里。
-        builder.AddText("屏帧徽栅渲溶糙轴辑逻钮阈");
+        //
+        // 这份清单不再靠肉眼发现：tools/check_glyph_coverage.py 扫全部界面字符串
+        // 字面量，与 imgui 实际加载的范围表求差，报出未覆盖的码点（本轮据此补入
+        // 「拓枚耦」——"拓扑"/"枚举"/"解耦"此前一直在渲染成方块）。
+        // ⚠ 这串字是**字体字形数据**，不是界面文案 —— 绝不能过 tr()。
+        //   过 tr() 后若该串被收进翻译表，英文模式下 AddText 收到的是英文，
+        //   中文字形根本不会被加载（切回中文或日志/文件名里的汉字全变方块）。
+        //   i18n 批量工具已把 *.h 与字形清单列入跳过项，此处手写还原以正视听。
+        // 「擎」「氢」来自本轮新增文案（"本引擎…" / "需要氢键判定"）—— 同样不在
+        // 常用字表内。补字前务必用 tools/check_font_glyphs.py 确认字体确有该字形，
+        // 否则补进范围只会得到空槽、仍旧是方块。
+        builder.AddText("屏帧徽栅渲溶糙轴辑逻钮阈拓枚耦擎氢廓离嵌拟棱浏锚菱叠");
+        // ⚠ 补字**只对字体真有字形的码点有效**。OPPO_B.ttf 只有 7251 个码点，
+        // 几何符号/箭头/希腊字母基本没有（Δ ← → 都不在 cmap 里）→ 补进范围只会
+        // 让 imgui 记一个空槽，仍旧渲染成方块。这类字符必须**改文案**：
+        // 界面里一律用 ASCII "->" 而不是 "→"，"dt" 而不是 "Δt"。
+        // 判定某字符该"补范围"还是"改文案"：tools/check_font_glyphs.py。
         builder.BuildRanges(&ranges);
     }
 
@@ -236,19 +290,26 @@ bool UITheme::loadFont(const char* fontPath) {
         return false;
     }
 
-    ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), 16.0f, nullptr, ranges.Data);
+    // 字号：16/20/13 → 18/22/14。1920×1080 下 16 px 中文偏小，密集面板上
+    // "看着不清晰"主要来自字号而非抗锯齿；18 px 在同样布局里仍放得下。
+    // RasterizerMultiply 略微加粗笔画，改善浅色主题下细字发虚的问题。
+    ImFontConfig cfg;
+    cfg.RasterizerMultiply = 1.06f;
+    ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), 18.0f, &cfg, ranges.Data);
     if (!font) {
         return false;
     }
-    // 三档字号（主方案 §7.6：16/20/13）
+    // 三档字号（主方案 §7.6：正文 / 标题 / 辅助）
     io.FontDefault = font;
     fontDefault_ = font;
-    fontTitle_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 20.0f, nullptr,
+    ImFontConfig cfgTitle = cfg;
+    fontTitle_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 22.0f, &cfgTitle,
                                              ranges.Data);
-    fontSmall_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 13.0f, nullptr,
+    ImFontConfig cfgSmall = cfg;
+    fontSmall_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 14.0f, &cfgSmall,
                                              ranges.Data);
     fontsLoaded_ = true;
-    spdlog::info("[ui] font loaded: {}", path);
+    spdlog::info("[ui] font loaded: {} (18/22/14 px)", path);
     return true;
 }
 

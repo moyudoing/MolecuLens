@@ -6,6 +6,7 @@
 #include "engine/vulkan/offscreen/offscreen_renderer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "spdlog/spdlog.h"
@@ -15,6 +16,12 @@
 #include "engine/vulkan/geometry/geometry.h"   // 共享几何/投影（唯一实现）
 
 namespace moleculens::engine {
+
+namespace {
+// 阴影贴图边长：与实时后端共用 engine::kDefaultShadowMapSize（离屏实例各持一张）
+constexpr uint32_t kShadowMapSize =
+    static_cast<uint32_t>(kDefaultShadowMapSize);
+} // namespace
 
 // —— 生命周期 ——
 
@@ -64,14 +71,27 @@ bool OffscreenRenderer::initCommon(std::string* outError) {
         return false;
     }
 
-    // 全局描述符集（UBO：相机 / 光照 / 雾，主方案 §6.6.4）
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    if (!globalLayout_.create(*device_, {binding}) ||
-        !globalUbo_.create(*device_, globalLayout_.layout(), sizeof(GlobalUBO))) {
+    // 全局描述符集：binding 0 = UBO（相机/光照/雾/光矩阵），binding 1 = 阴影深度图。
+    // 顺序：布局 → 阴影贴图（管线要用布局）→ UBO 描述符集（要写阴影 view/sampler）。
+    VkDescriptorSetLayoutBinding bindings[2]{};
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (!globalLayout_.create(*device_, {bindings[0], bindings[1]})) {
+        if (outError) *outError = "global descriptor layout failed";
+        return false;
+    }
+    std::string shadowErr;
+    if (!shadow_.create(*device_, kShadowMapSize, globalLayout_.layout(), &shadowErr)) {
+        spdlog::warn("[backend] shadow map unavailable: {}", shadowErr);
+    }
+    if (!globalUbo_.create(*device_, globalLayout_.layout(), sizeof(GlobalUBO),
+                           shadow_.view(), shadow_.sampler())) {
         return false;
     }
 
@@ -86,7 +106,8 @@ bool OffscreenRenderer::initCommon(std::string* outError) {
         return false;
     }
 
-    meshes_.create(*device_);   // 球/柱单位网格（每个离屏实例一份）
+    meshes_.create(*device_, meshDetail_, meshSegments_);   // 球/柱单位网格（离屏一份，档位可调）
+    meshesLow_.create(*device_, 2, 12);                      // 播放档：320 面 / 12 段
     initialized_ = true;
     spdlog::info("[backend] OffscreenRenderer initialized ({}x{})", width_, height_);
     return true;
@@ -97,8 +118,10 @@ void OffscreenRenderer::shutdown() {
         return;
     }
     vkDeviceWaitIdle(device_->device());
+    shadow_.destroy();
     gpu_.destroy();
     meshes_.destroy();
+    meshesLow_.destroy();
     pipelines_.destroy(*device_);   // 管线引用渲染通道，须先于 renderPass_.destroy()
     globalUbo_.destroy();
     globalLayout_.destroy();
@@ -117,6 +140,9 @@ void OffscreenRenderer::shutdown() {
     initialized_ = false;
     ownedDevice_.reset();   // 仅 headless 自建设备；共享模式为空（主设备外部持有）
     device_ = nullptr;
+    // 解码缓存失效（下次 execute 必重解码；gpu_ 已销毁 → 上传修订号亦复位）
+    decodedList_ = nullptr;
+    decodedRevision_ = UINT64_MAX;
 }
 
 void OffscreenRenderer::setBackground(const float* rgb, float alpha) {
@@ -143,7 +169,12 @@ bool OffscreenRenderer::createFramebuffer() {
     }
     // 无 MSAA（主方案 §12.5：导出 MSAA 可配，M1 先 1x；M4 支持 msaa 参数）
     const VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
-    const VkFormat colorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+    // 颜色附件用 **_SRGB**：主交换链是 B8G8R8A8_SRGB（硬件写时做 linear→sRGB 编码），
+    // 而离屏此前是 R8G8B8A8_**UNORM**（不编码）→ 着色器输出的线性值被原样写进 PNG，
+    // **导出图比视口暗一档**（同一场景两处 gamma 不一致）。改用 SRGB 附件后，
+    // 硬件编码与主交换链一致 → 视口/离屏导出/CPU 光追（ray_tracer 自带 pow(1/2.2)）
+    // 三者观感统一（主方案 §6.6 统一 gamma 处理）。
+    const VkFormat colorFormat = colorFormat_;
     const VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
 
     if (!colorImage_.create(*device_, colorFormat, width_, height_, samples,
@@ -203,14 +234,91 @@ void OffscreenRenderer::resize(uint32_t width, uint32_t height) {
     createFramebuffer();
 }
 
+void OffscreenRenderer::setMeshQuality(int detail, int segments) {
+    const int d = detail < 1 ? 1 : (detail > 4 ? 4 : detail);
+    const int s = segments < 3 ? 3 : segments;
+    if (d == meshDetail_ && s == meshSegments_) {
+        return;
+    }
+    meshDetail_ = d;
+    meshSegments_ = s;
+    if (!initialized_ || device_ == nullptr) {
+        return;   // 尚未初始化：initCommon 会按新档位创建
+    }
+    vkDeviceWaitIdle(device_->device());
+    meshes_.destroy();
+    meshes_.create(*device_, meshDetail_, meshSegments_);
+}
+
+bool OffscreenRenderer::setColorAttachment(ColorAttachment fmt) {
+    if (fmt == attachment_) {
+        return true;
+    }
+    if (!initialized_ || device_ == nullptr) {
+        return false;
+    }
+    const VkFormat want = (fmt == ColorAttachment::Rgba16Float)
+                              ? VK_FORMAT_R16G16B16A16_SFLOAT
+                              : VK_FORMAT_R8G8B8A8_SRGB;
+
+    // 设备能力检查：既要能当颜色附件，也要支持混合（透明管线需要）。
+    // 缺失时**保持原格式**并返回 false —— 绝不半途改成不可用的格式。
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(device_->physicalDevice(), want, &props);
+    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+    if ((props.optimalTilingFeatures & need) != need) {
+        spdlog::error("[backend] 颜色附件格式 {} 不受支持（optimalTilingFeatures=0x{:x}，"
+                      "需 COLOR_ATTACHMENT|COLOR_ATTACHMENT_BLEND）",
+                      fmt == ColorAttachment::Rgba16Float
+                          ? "R16G16B16A16_SFLOAT"
+                          : "R8G8B8A8_SRGB",
+                      props.optimalTilingFeatures);
+        return false;
+    }
+
+    vkDeviceWaitIdle(device_->device());
+    // 顺序要紧：管线引用渲染通道，必须先销毁管线，再销毁渲染通道；随后按新格式
+    // 重建渲染通道（createFramebuffer 在 renderPass_ 为空时创建），最后重建管线。
+    pipelines_.destroy(*device_);
+    renderPass_.destroy();
+    destroyFramebuffer();
+    attachment_ = fmt;
+    colorFormat_ = want;
+    // 附件格式变了 → 上一份回读数据与内容修订都失效
+    readbackSize_ = 0;
+    pixels_.clear();
+
+    if (!createFramebuffer()) {
+        spdlog::error("[backend] 切换颜色附件格式失败（FBO 重建）");
+        return false;
+    }
+    std::string err;
+    if (!pipelines_.create(*device_, renderPass_.renderPass(), VK_SAMPLE_COUNT_1_BIT,
+                           globalLayout_.layout(), &err)) {
+        spdlog::error("[backend] 切换颜色附件格式失败（管线重建）: {}", err);
+        return false;
+    }
+    spdlog::info("[backend] 离屏颜色附件: {}", fmt == ColorAttachment::Rgba16Float
+                                                   ? "R16G16B16A16_SFLOAT"
+                                                   : "R8G8B8A8_SRGB");
+    return true;
+}
+
 // —— 渲染 ——
 
 void OffscreenRenderer::execute(const SceneCommandList& list, const RenderView& view) {
 
     // 队列提交互斥：后台导出线程与主线程视口共用同一 graphics 队列 → 串行提交
     std::unique_lock<std::mutex> qlock = device_->lockQueue();
-    // 命令流 → CPU 绘制列表（唯一解码实现：vulkan/backend/decode.cpp）
-    decodeCommandList(list, drawList_);
+    // 命令流 → CPU 绘制列表（唯一解码实现：vulkan/backend/decode.cpp）。
+    // 缓存键 = (同一命令流对象, serial)：serial 未变即内容未变，跳过整条重解码。
+    const uint64_t revision = list.serial();
+    if (decodedList_ != &list || decodedRevision_ != revision) {
+        decodeCommandList(list, drawList_);
+        decodedList_ = &list;
+        decodedRevision_ = revision;
+    }
 
     // UBO
     GlobalUBO ubo{};
@@ -220,14 +328,26 @@ void OffscreenRenderer::execute(const SceneCommandList& list, const RenderView& 
         static_cast<float>(width_) / static_cast<float>(height_))) *
                    view.camera.viewMatrix();
     ubo.cameraPos = glm::vec4(view.camera.position(), 1.0f);
-    // 全局光照从 RenderView 读取（天顶/地面半球色 + 环境光；无方向光/点光源，
-    // 见 moleculens-fixes —— 光照可调 + 更新机制经 DIRTY_PROPERTIES 重渲染）
-    ubo.lightDir = glm::vec4(view.light.skyColor, 0.0f);
-    ubo.lightColor = glm::vec4(view.light.groundColor, 0.0f);
-    ubo.ambient = glm::vec4(view.light.ambientColor, view.light.ambientIntensity);
+    // 光照（半球环境光 + 方向光）：与实时后端共用同一填装实现，避免布局漂移
+    fillGlobalLighting(ubo, view.light);
+    // 背景以**实际清屏色**为准（CLI --bg white/transparent、GUI 取色器都走
+    // setBackground），而不是场景属性里的默认色 —— 否则雾会淡向另一个颜色。
+    fillRenderStyle(ubo, view.style,
+                    glm::vec3(clearColor_[0], clearColor_[1], clearColor_[2]));
+    // 剖切面（仅进 UBO；不重建命令流/管线）
+    fillClipPlane(ubo, view.clipPlane, view.clipEnabled);
     ubo.fog = view.fog;
-    ubo.sceneProps = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+    // x = 全局缩放, y = 视口高度(px), z = 2·tan(fov/2)（点模式按距离算点大小）
+    ubo.sceneProps = glm::vec4(std::max(view.scale, 1e-3f),
+                               static_cast<float>(height_),
+                               2.0f * std::tan(glm::radians(view.camera.fov) * 0.5f),
+                               0.0f);
     globalUbo_.update(0, ubo);
+
+    // 动态帧（播放/拖时间轴）：低细节网格 + 跳过阴影 pass。阴影 pass 会让每帧
+    // 的顶点工作量翻倍，而播放时用户关注的是"动起来顺不顺"，不是阴影精度。
+    const bool lowDetail = view.lowDetail && meshesLow_.icosphereIndices > 0;
+    const SharedMeshes& activeMeshes = lowDetail ? meshesLow_ : meshes_;
 
     // 诊断（几何数量变化时）：确认离屏渲染确实执行且带几何
     {
@@ -245,6 +365,16 @@ void OffscreenRenderer::execute(const SceneCommandList& list, const RenderView& 
     }
 
     VkCommandBuffer cmd = device_->beginSingleTimeCommands();
+
+    // —— 方向光阴影：光源视角的深度 pass（在主渲染通道**之外**，同一命令缓冲）——
+    // 光源 UBO 只把 viewProj 换成光矩阵，其余字段与主 UBO 一致（见实时后端注释）。
+    if (shadow_.valid() && !lowDetail) {
+        GlobalUBO lightUbo = ubo;
+        lightUbo.viewProj = view.light.lightViewProj;
+        shadow_.record(cmd, *device_, drawList_, meshes_, lightUbo, /*frameIndex=*/0,
+                       revision);
+    }
+
     VkViewport viewport{0, 0, static_cast<float>(width_), static_cast<float>(height_),
                         0.0f, 1.0f};
     VkRect2D scissor{{0, 0}, {width_, height_}};
@@ -266,13 +396,27 @@ void OffscreenRenderer::execute(const SceneCommandList& list, const RenderView& 
 
     const VkDescriptorSet globalSet = globalUbo_.set(0);
     // 几何绘制（唯一实现：vulkan/draw/draw_geometry.cpp）
-    drawGeometry(cmd, *device_, pipelines_, drawList_, gpu_, meshes_, globalSet);
+    drawGeometry(cmd, *device_, pipelines_, drawList_, gpu_, activeMeshes, globalSet, revision,
+                 &view);
 
     vkCmdEndRenderPass(cmd);
     device_->endSingleTimeCommands(cmd);
 }
 
 bool OffscreenRenderer::readbackPixels(std::vector<uint8_t>& out, PixelFormat fmt) {
+    // 回读格式必须与颜色附件**严格一致**：不一致时会按错误的每像素字节数从图像
+    // 里拷贝（例如按 8 B/px 读一个 8-bit 图像）→ 结果"看似成功、内容不可用"。
+    // 宁可显式失败，也不返回能解码但没意义的像素。
+    const bool want16 = (fmt == PixelFormat::Rgba16F);
+    const bool is16 = (colorFormat_ == VK_FORMAT_R16G16B16A16_SFLOAT);
+    if (want16 != is16) {
+        spdlog::error("[backend] readbackPixels 格式不匹配：请求 {}，附件为 {}"
+                      "（先用 setColorAttachment 切换附件）",
+                      want16 ? "Rgba16F" : "Rgba8",
+                      is16 ? "Rgba16Float(R16G16B16A16_SFLOAT)"
+                           : "Rgba8Srgb(R8G8B8A8_SRGB)");
+        return false;
+    }
     // 队列提交互斥（与 execute 一致，见 QS.4）
     std::unique_lock<std::mutex> qlock = device_->lockQueue();
     const VkDeviceSize bytes = static_cast<VkDeviceSize>(width_) * height_ *

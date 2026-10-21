@@ -69,4 +69,57 @@ enum class DrawMode : uint8_t {
     Count
 };
 
+// 一次实例化绘制：材质与渲染模式相同的**连续**实例段
+struct DrawRun {
+    uint32_t start = 0;    // 实例数组起始下标
+    uint32_t count = 0;    // 实例数
+    uint32_t mat   = 0;    // materials[] 下标
+    uint8_t  mode  = 0;    // DrawMode
+};
+
+// 把"材质下标与渲染模式相同的连续实例"合并为一次绘制。
+//
+// **单一事实来源**：后端按它提交绘制（drawModeRuns），绘制调用数就由它决定。
+// 段在某处断开 → 那里就是一次额外的 `vkCmdDrawIndexed`。因此本函数是
+// "批处理是否生效"的唯一可断言对象（纯函数，无 GPU 也能测）。
+//
+// 历史缺陷（本函数被抽出来的原因）：`Representer::generate` 曾**每个实例**发一条
+// `MaterialBlock`，而解码端每条都新增材质槽 → 2042 个内容相同的材质 → 2042 个
+// 不同下标 → 段在每个实例边界断开，实测 md.gro 单帧 ~4084 次绘制、平均每次仅
+// 3.2 个实例。材质改为每表示发一条后，同表示的实例共用一个下标，段自然合并。
+//
+// count 显式传入：调用方的实例数与 mats/modes 长度理论上一致，但越界时按
+// 下标的默认值 (mat 0 / mode 0) 处理（与重构前的 `mats.empty() ? 0 : mats[i]`
+// 行为一致），不因数组长度不齐而少画或多画。
+inline std::vector<DrawRun> computeDrawRuns(const std::vector<uint32_t>& mats,
+                                            const std::vector<uint8_t>& modes,
+                                            size_t count) {
+    std::vector<DrawRun> runs;
+    if (count == 0) {
+        return runs;
+    }
+    const auto matAt = [&mats](size_t i) -> uint32_t {
+        return i < mats.size() ? mats[i] : 0u;
+    };
+    const auto modeAt = [&modes](size_t i) -> uint8_t {
+        return i < modes.size() ? modes[i] : uint8_t{0};
+    };
+    uint32_t start = 0;
+    uint32_t curMat = matAt(0);
+    uint8_t curMode = modeAt(0);
+    for (size_t i = 1; i < count; ++i) {
+        const uint32_t m = matAt(i);
+        const uint8_t md = modeAt(i);
+        if (m != curMat || md != curMode) {
+            runs.push_back(DrawRun{start, static_cast<uint32_t>(i - start), curMat, curMode});
+            start = static_cast<uint32_t>(i);
+            curMat = m;
+            curMode = md;
+        }
+    }
+    runs.push_back(
+        DrawRun{start, static_cast<uint32_t>(count - start), curMat, curMode});
+    return runs;
+}
+
 } // namespace moleculens::engine

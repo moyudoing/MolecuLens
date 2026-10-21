@@ -44,7 +44,8 @@ void subdivideOnce(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices
 
 } // namespace
 
-void generateIcosphere(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices) {
+void generateIcosphere(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices,
+                       int detail) {
     // 正二十面体
     const float t = (1.0f + std::sqrt(5.0f)) * 0.5f;
     const glm::vec3 base[] = {
@@ -74,11 +75,16 @@ void generateIcosphere(std::vector<glm::vec3>& verts, std::vector<uint32_t>& ind
         verts.push_back(m20);
         indices.insert(indices.end(), {i0, j0, j2, j0, i1, j1, j2, j1, i2, j0, j1, j2});
     }
-    subdivideOnce(verts, indices);   // 2 级：80 → 320 三角形
+    // 基础二十面体已是 80 面（detail=1）；每多一级 ×4。
+    const int extra = (detail < 1 ? 1 : detail) - 1;
+    for (int i = 0; i < extra; ++i) {
+        subdivideOnce(verts, indices);
+    }
 }
 
-void generateCylinder(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices) {
-    constexpr int kSegments = 8;
+void generateCylinder(std::vector<glm::vec3>& verts, std::vector<uint32_t>& indices,
+                      int segments) {
+    const int kSegments = segments < 3 ? 3 : segments;
     const uint32_t base = static_cast<uint32_t>(verts.size());
     for (int i = 0; i < kSegments; ++i) {
         const float a = 6.2831853f * i / kSegments;

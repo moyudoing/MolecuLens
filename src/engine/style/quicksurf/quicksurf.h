@@ -40,6 +40,15 @@ void drawQuickSurf(const RepContext& ctx, SceneCommandList& out);
 // 体系级 QuickSurf（G5）：聚合全部可见实例原子（含溶剂）为一个整体高斯密度表面
 void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out);
 
+// —— 异步生成开关（GUI 主线程专用；默认关闭 = 同步生成）——
+// 开启后：整体系 QuickSurf 在网格缓存未命中时**提交后台任务并立即返回**（本次不发射
+// 该表面），由 Renderer 在任务完成后自动重建 —— 于是生成期间旧命令流继续显示
+// （旧画面不消失），主线程不再阻塞约 197 ms。
+// 关闭时保持原行为（同步生成后再发射），CLI / 导出线程 / 单元测试都走这条路径。
+// 注意：开关是进程级全局量，由 Renderer 在每次重建前按自身异步模式设置。
+void quickSurfSetAsyncEnabled(bool enabled);
+bool quickSurfAsyncEnabled();
+
 // —— 计算后端（QS.2：CUDA → AVX2 → 标量多线程；运行时自动选择或强制指定）——
 
 // 后端类型（Auto = 运行时自动选择；其它强制指定，便于测试/调优）

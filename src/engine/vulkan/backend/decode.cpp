@@ -54,8 +54,31 @@ void decodeCommandList(const SceneCommandList& list, DrawList& out) {
                 if (size >= sizeof(MaterialBlock)) {
                     MaterialBlock mat{};
                     std::memcpy(&mat, payload, sizeof(MaterialBlock));
-                    out.materials.push_back(mat);
-                    currentMat = static_cast<uint32_t>(out.materials.size()) - 1;
+                    // **去重**：内容与已有槽相同则复用下标。
+                    // 为什么关键：绘制按 (材质下标, 模式) 的连续段分批
+                    // （computeDrawRuns，见 draw_list.h）。发射端是**每实例**一条
+                    // MaterialBlock（Representer::generate 按 (表示×实例) 调用），
+                    // 若每条都占一个新槽，则段在每个实例边界断开 —— 实测 md.gro
+                    // 单帧 ~4084 次绘制、每次平均仅 3.2 个实例。去重后同表示的实例
+                    // 共用一个下标，段自然合并为"每 (表示, 模式) 一次"。
+                    // 逐字段比较（不用 memcmp）：结构体虽无填充，但逐字段更明确，
+                    // 也不会被未来新增字段时的填充字节影响。
+                    uint32_t idx = UINT32_MAX;
+                    for (uint32_t k = 0; k < out.materials.size(); ++k) {
+                        const MaterialBlock& e = out.materials[k];
+                        if (e.ambient == mat.ambient && e.diffuse == mat.diffuse &&
+                            e.specular == mat.specular && e.shininess == mat.shininess &&
+                            e.metallic == mat.metallic && e.roughness == mat.roughness &&
+                            e.opacity == mat.opacity) {
+                            idx = k;
+                            break;
+                        }
+                    }
+                    if (idx == UINT32_MAX) {
+                        out.materials.push_back(mat);
+                        idx = static_cast<uint32_t>(out.materials.size()) - 1;
+                    }
+                    currentMat = idx;
                 }
                 break;
             }
@@ -132,7 +155,7 @@ void decodeCommandList(const SceneCommandList& list, DrawList& out) {
                 }
                 break;
             }
-            // 变换栈 / 裁剪面 / 渲染状态 / 标签：当前无后端消费（主方案 §6.4 记为
+            // 变换栈 / 裁剪面 / 渲染状态：当前无后端消费（主方案 §6.4 记为
             // 渲染状态，待接入）。显式列出以免 default 掩盖新增命令类型。
             case Cmd::Transform:
             case Cmd::PushMatrix:
@@ -140,6 +163,8 @@ void decodeCommandList(const SceneCommandList& list, DrawList& out) {
             case Cmd::ClipPlane:
             case Cmd::SetBlend:
             case Cmd::SetDepthWrite:
+            // 已移除的 Label 表示，保留协议槽位：旧 .mlscene 命令流可能仍含该命令，
+            // 解码时显式忽略（不参与绘制），保证旧文件可读。
             case Cmd::Label:
             case Cmd::Count:
                 break;

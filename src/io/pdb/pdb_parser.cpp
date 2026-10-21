@@ -15,8 +15,10 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #include "entity/search/bond_search.h"
 #include "spdlog/spdlog.h"
@@ -105,9 +107,33 @@ Result<ParseResult> PdbParser::parse(const std::filesystem::path& path,
     std::vector<Bond> explicitBonds;
     bool anyCoords = false;
 
-    // 残基/链索引表（重名复用）
+    // 残基/链索引表。
+    // 链：按链名复用（PDB 中链名即身份）。
+    // 残基：**必须按“链 + 残基序号 + 插入码”复用，不能用残基名**。
+    //   残基名只有 20 种左右，若拿它当键，所有 GLY / ALA / SOL 会共用同一个
+    //   residueId。卡通/管状/丝带/新卡通按 (chainId, residueId) 分组提取骨架，
+    //   于是每类残基只剩“最后一个原子”，整条链被拆成十几个相距很远的点，
+    //   再被断链阈值过滤 → 蛋白质骨架几乎完全不可见（实测 1UBQ 的卡通只有
+    //   1 个网格对象、管状只有 2 段圆柱）。
     std::unordered_map<std::string, int32_t> chainMap;
-    std::unordered_map<std::string, int32_t> residueMap;
+    struct ResidueKey {
+        std::string chain;
+        std::string iCode;
+        int32_t seq = 0;
+        bool operator==(const ResidueKey& o) const {
+            return chain == o.chain && iCode == o.iCode && seq == o.seq;
+        }
+    };
+    struct ResidueKeyHash {
+        size_t operator()(const ResidueKey& k) const {
+            size_t h = std::hash<std::string>{}(k.chain);
+            h ^= std::hash<std::string>{}(k.iCode) + 0x9e3779b97f4a7c15ull +
+                 (h << 6) + (h >> 2);
+            h ^= std::hash<int32_t>{}(k.seq) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    std::unordered_map<ResidueKey, int32_t, ResidueKeyHash> residueMap;
     auto chainIdFor = [&](const std::string& name) -> int32_t {
         auto it = chainMap.find(name);
         if (it != chainMap.end()) {
@@ -117,13 +143,16 @@ Result<ParseResult> PdbParser::parse(const std::filesystem::path& path,
         chainMap.emplace(name, id);
         return id;
     };
-    auto residueIdFor = [&](const std::string& name) -> int32_t {
-        auto it = residueMap.find(name);
+    auto residueIdFor = [&](const std::string& chain, int32_t seq,
+                            const std::string& iCode,
+                            const std::string& resName) -> int32_t {
+        const ResidueKey key{chain, iCode, seq};
+        auto it = residueMap.find(key);
         if (it != residueMap.end()) {
             return it->second;
         }
-        const int32_t id = scene->addResidue(name);
-        residueMap.emplace(name, id);
+        const int32_t id = scene->addResidue(resName);
+        residueMap.emplace(key, id);
         return id;
     };
 
@@ -153,6 +182,13 @@ Result<ParseResult> PdbParser::parse(const std::filesystem::path& path,
     };
     ensureFrame();   // MODEL 缺失时单帧
 
+    // 拓扑只在**第一个 model** 采集。多 model（NMR/轨迹）文件里每个 model 都会
+    // 重复一遍相同的 ATOM 记录；若把它们也追加进拓扑，structure 会变成
+    // "models × atoms" 个原子（实测 3 model × 4 原子 = 12），而每帧坐标仍只有
+    // 4 个 → SceneStructure::writeFramePositions 的尺寸校验失败 → **帧切换静默
+    // 不生效**。拓扑与坐标必须严格分开：拓扑来自 model 1，坐标来自各 model。
+    auto firstModelOnly = [&]() { return frames.size() <= 1; };
+
     while (std::getline(in, line)) {
         ++lineNo;
         if (line.size() < 6) {
@@ -173,6 +209,7 @@ Result<ParseResult> PdbParser::parse(const std::filesystem::path& path,
             const std::string resName = field(line, 18, 20);
             const std::string chainID = field(line, 22, 22);
             const int32_t resSeq = static_cast<int32_t>(parseFloat(field(line, 23, 26), 0));
+            const std::string iCode = field(line, 27, 27);
             const float x = parseFloat(field(line, 31, 38), 0.0f);
             const float y = parseFloat(field(line, 39, 46), 0.0f);
             const float z = parseFloat(field(line, 47, 54), 0.0f);
@@ -201,17 +238,23 @@ Result<ParseResult> PdbParser::parse(const std::filesystem::path& path,
 
             // 分层索引
             const int32_t cid = chainIdFor(chainID);
-            const int32_t rid = residueIdFor(resName);
+            const int32_t rid = residueIdFor(chainID, resSeq, iCode, resName);
 
-            elements.push_back(el);
-            Atom a;
-            a.element = el;
-            a.occupancy = static_cast<uint8_t>(std::clamp(occupancy, 0.0f, 1.0f) * 100.0f);
-            a.bfactor = static_cast<int16_t>(std::clamp(bfactor, 0.0f, 327.67f) * 100.0f);
-            a.residueId = rid;
-            a.chainId = cid;
-            atoms.push_back(a);
-            atomNameIds.push_back(scene->strings().intern(nameStr));
+            // 拓扑仅采集自首个 model（见上方说明）——后续 model 只贡献坐标
+            const bool recordTopology = firstModelOnly();
+            if (recordTopology) {
+                elements.push_back(el);
+                Atom a;
+                a.element = el;
+                a.occupancy =
+                    static_cast<uint8_t>(std::clamp(occupancy, 0.0f, 1.0f) * 100.0f);
+                a.bfactor =
+                    static_cast<int16_t>(std::clamp(bfactor, 0.0f, 327.67f) * 100.0f);
+                a.residueId = rid;
+                a.chainId = cid;
+                atoms.push_back(a);
+                atomNameIds.push_back(scene->strings().intern(nameStr));
+            }
 
             if (currentFrame) {
                 currentFrame->push_back(glm::vec3(x, y, z));
@@ -274,6 +317,19 @@ Result<ParseResult> PdbParser::parse(const std::filesystem::path& path,
         return Result<ParseResult>::error(
             ErrorCode::ParseError,
             "PDB contains no ATOM/HETATM records: " + path.string());
+    }
+
+    // 帧长度必须与拓扑一致：不一致时 SceneStructure::writeFramePositions 会因尺寸
+    // 校验**静默拒绝**写入 → 帧切换看起来"没反应"。此处显式报错，把问题摆在导入时。
+    for (size_t fi = 0; fi < frames.size(); ++fi) {
+        if (frames[fi].size() != elements.size()) {
+            return Result<ParseResult>::error(
+                ErrorCode::ParseError,
+                "PDB model " + std::to_string(fi + 1) + " has " +
+                    std::to_string(frames[fi].size()) + " atoms but the topology has " +
+                    std::to_string(elements.size()) +
+                    " (multi-model files must repeat the same atoms in every model)");
+        }
     }
 
     // 建键：CONECT 优先；缺失 → 启发式（§4.7）

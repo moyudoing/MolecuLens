@@ -7,9 +7,19 @@
 #include "engine/render/renderer.h"
 
 #include <algorithm>
+#include <cassert>
+#include <chrono>
+#include <cmath>
 
+#include <glm/gtc/matrix_transform.hpp>   // lookAt / ortho（光源正交矩阵）
+
+#include "spdlog/spdlog.h"
+
+#include "engine/async/surface_jobs.h"
 #include "engine/rep/representer.h"
+#include "engine/style/espsurface/esp_surface.h"   // espOverlayReset（视口色标/极值标注）
 #include "engine/style/quicksurf/quicksurf.h"
+#include "engine/style/style_registry.h"   // styleFor（坐标重放直接调样式）
 #include "engine/style/surface/surface.h"
 #include "engine/vulkan/realtime/vulkan_renderer.h"
 #include "entity/element/element.h"
@@ -18,7 +28,57 @@
 
 namespace moleculens::engine {
 
-Renderer::~Renderer() = default;
+namespace {
+// 网格拓扑是否随坐标恒定（可参与坐标重放）。Diamond/Plate/卡通类网格的
+// 顶点数只由原子/残基拓扑决定；Surface/QuickSurf/ESP 的 MC 拓扑随每帧密度变化，
+// 不能重放（尺寸不符会回退全量重建，但会白做一次）。
+bool meshReplayAllowedFor(RepresentationType type) {
+    switch (type) {
+        case RepresentationType::Plate:
+        case RepresentationType::Diamond:
+        case RepresentationType::Cartoon:
+        case RepresentationType::NewCartoon:
+        case RepresentationType::Ribbon:
+        case RepresentationType::Tube:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 当前可见表示是否全部允许网格重放（含系统表面时一律拒绝）。
+bool sceneMeshReplaySafe(const std::vector<Representation>& reps) {
+    for (const auto& rep : reps) {
+        if (!rep.visible) {
+            continue;
+        }
+        if (rep.systemSurface &&
+            (rep.type == RepresentationType::Surface ||
+             rep.type == RepresentationType::QuickSurf)) {
+            return false;
+        }
+        if (rep.type == RepresentationType::Surface ||
+            rep.type == RepresentationType::QuickSurf ||
+            rep.type == RepresentationType::EspSurface) {
+            return false;
+        }
+        if (!meshReplayAllowedFor(rep.type)) {
+            // 球/棍/线/点云不含 TriMesh，天然可重放；只有未知网格类才拒绝。
+            continue;
+        }
+    }
+    return true;
+}
+} // namespace
+
+Renderer::~Renderer() {
+    // 恢复样式层默认（同步生成），再停止后台工作线程：否则进程退出/下一个
+    // Renderer 实例可能继承"异步已开"的全局开关（CLI/测试需要同步路径）。
+    quickSurfSetAsyncEnabled(false);
+    // 等待/停止后台表面工作线程：否则进程退出时工作线程可能正在写已析构的样式层
+    // 缓存（quicksurf 的静态网格缓存）。
+    async::shutdownSurfaceJobs();
+}
 
 void Renderer::bindRepresentations(const std::vector<Representation>* reps,
                                    uint64_t revision) {
@@ -52,27 +112,190 @@ void Renderer::update(float dt) {
     if (scene_ == nullptr) {
         return;
     }
-    // 脏位域 → 需要重建
-    if (scene_->dirtyBits() != 0) {
-        needsRebuild_ = true;
+    // 与 prepare 共用锁：导出线程可能同时调用 update/prepare（见 header）；
+    // 串行化后两条路径不会交错改写 needsRebuild_/commandList_。
+    std::lock_guard<std::mutex> prepareLock(prepareMutex_);
+    const uint32_t dirty = scene_->dirtyBits();
+    // 诊断（仅在脏位**取值变化**时打印，避免拖拽相机时逐帧刷屏）：
+    // 本行不出现 = MolScene 的门控从未打开（它看到的 sceneDirty 恒为假）；
+    // 出现且 dirty 非 0 = 门控打开了且脏位已传到渲染器 —— 那问题就在 prepare。
+    {
+        static uint32_t sLastDirty = UINT32_MAX;
+        if (dirty != sLastDirty) {
+            sLastDirty = dirty;
+            spdlog::debug("[render] update: dirty=0x{:x} atoms={}", dirty,
+                          scene_->coordsSoA().positions.size());
+        }
     }
+    if (dirty == 0) {
+        return;
+    }
+    // 结构/实例/表示变更 → 拓扑可能变了，必须整条重建（坐标重放不适用）
+    constexpr uint32_t kStructural =
+        entity::DIRTY_STRUCTURE | entity::DIRTY_INSTANCE | entity::DIRTY_REPRESENTATION;
+    if ((dirty & kStructural) != 0) {
+        needsRebuild_ = true;
+        needsCoords_ = false;
+    } else if ((dirty & entity::DIRTY_COORDS) != 0) {
+        // 仅帧切：命令序列不变，坐标变了 → 走重放（失败则回退整条重建）
+        needsCoords_ = true;
+    } else {
+        // 只落到这里才是"仅 DIRTY_PROPERTIES"（背景/光照/雾/全局缩放）：只进
+        // GlobalUBO，命令流无需重建 —— 没有任何下游会消费该脏位，故在此清除，
+        // 否则门控会永久打开、视口逐帧空转重绘。
+        scene_->clearDirty();
+    }
+    // ⚠ 结构/坐标脏位**不在此清除**：MolScene 的重绘门控读的就是 dirtyBits()
+    //（见 MolScene::render），在这里提前清掉会让"打开文件后的首帧"看到
+    // sceneDirty=false → 门控全假 → 视口永不重绘（表现为界面正常但视口空白，
+    // 且命令流 serial 不再增长）。清脏统一由真正完成重建的 rebuildCommandList()
+    // 末尾负责 —— 即"谁消费，谁清除"。
 }
 
 void Renderer::prepare() {
     if (scene_ == nullptr) {
         return;
     }
-    if (!needsRebuild_) {
+    std::lock_guard<std::mutex> prepareLock(prepareMutex_);
+    lastWasReplay_ = false;
+
+    // 后台表面任务完成 → 需要重建一次把新网格换入（重建时命中样式层缓存，不再阻塞）。
+    // 若仍在等待：直接返回（旧命令流保留，旧画面继续显示），不再逐帧尝试重建。
+    if (waitingForSurface_.load(std::memory_order_relaxed)) {
+        if (!async::consumeSurfaceJobCompletion() && async::surfaceJobsBusy()) {
+            return;
+        }
+        waitingForSurface_.store(false, std::memory_order_relaxed);
+        needsRebuild_ = true;
+        // 可观测性：异步表面从提交到就绪的墙钟时间（含等待期 UI 保持响应的时长）
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - surfaceWaitStart_)
+                              .count();
+        spdlog::debug("[render] 异步表面就绪：后台生成 {:.0f} ms（主线程期间未被阻塞），"
+                      "重建命令流换入新表面",
+                      ms);
+    } else if (asyncSurface_.load(std::memory_order_relaxed) &&
+               async::consumeSurfaceJobCompletion()) {
+        // 异步模式下的任务在别处完成（极少见：刚打开异步模式）→ 重建换入
+        needsRebuild_ = true;
+    }
+
+    if (needsRebuild_) {
+        const bool updated = rebuildCommandList(/*replay=*/false);
+        needsRebuild_ = !updated;
+        needsCoords_ = false;
+        if (!updated) {
+            // 有表面在后台生成：保留旧命令流，等完成通知后再次重建
+            waitingForSurface_.store(true, std::memory_order_relaxed);
+            surfaceWaitStart_ = std::chrono::steady_clock::now();
+        }
         return;
     }
-    rebuildCommandList();
-    needsRebuild_ = false;
+    if (!needsCoords_) {
+        return;
+    }
+    needsCoords_ = false;
+    // 帧切快速路径：只把坐标类命令的载荷写回原偏移（不重建命令序列）。
+    // 计划不可用（含 TriMesh / 尚未生成）或重放中途失配 → 回退整条重建。
+    const bool allowMeshReplay = sceneMeshReplaySafe(representations());
+    if (commandList_.beginReplay(allowMeshReplay)) {
+        rebuildCommandList(/*replay=*/true);
+        if (commandList_.endReplay()) {
+            lastWasReplay_ = true;
+            // 重放路径在 rebuildCommandList 里提前 return，不会走到那里的 clearDirty；
+            // 而本次重放已消费了坐标脏位 → 在此清除，否则门控永久打开、逐帧空转重放。
+            scene_->clearDirty();
+            return;
+        }
+        spdlog::debug("[render] coord replay mismatch -> full rebuild");
+    }
+    const bool updated = rebuildCommandList(/*replay=*/false);
+    if (!updated) {
+        needsRebuild_ = true;
+        waitingForSurface_.store(true, std::memory_order_relaxed);
+    }
 }
 
-void Renderer::rebuildCommandList() {
+void Renderer::setAsyncSurfaceEnabled(bool enabled) {
+    asyncSurface_.store(enabled, std::memory_order_relaxed);
+    if (!enabled) {
+        // 关闭异步：进行中的任务保留（结果仍会写进缓存），但不再"等结果再重建"。
+        // 下一轮 prepare 走同步路径，本次最多阻塞一次生成。
+        waitingForSurface_.store(false, std::memory_order_relaxed);
+    }
+}
+
+bool Renderer::surfaceGenerationPending() const {
+    return waitingForSurface_.load(std::memory_order_relaxed) ||
+           async::surfaceJobsBusy();
+}
+
+void Renderer::prepareBlocking() {
+    if (scene_ == nullptr) {
+        return;
+    }
+    // 导出线程专用：先等后台表面任务把网格写进缓存（不持锁等，工作线程无需 prepare 锁），
+    // 再强制同步重建一次 —— 导出图不会出现"生成中"的旧画面。
+    const bool surfacePending = waitingForSurface_.load(std::memory_order_relaxed) ||
+                                async::surfaceJobsBusy();
+    if (surfacePending) {
+        async::waitForSurfaceJobs();
+    }
+    std::lock_guard<std::mutex> prepareLock(prepareMutex_);
+    async::consumeSurfaceJobCompletion();
+    if (surfacePending) {
+        waitingForSurface_.store(false, std::memory_order_relaxed);
+        needsRebuild_ = true;
+    }
+    forceSyncRebuild_ = true;
+    lastWasReplay_ = false;
+    if (needsRebuild_) {
+        rebuildCommandList(/*replay=*/false);
+        needsRebuild_ = false;
+        needsCoords_ = false;
+    } else if (needsCoords_) {
+        needsCoords_ = false;
+        if (commandList_.beginReplay(sceneMeshReplaySafe(representations()))) {
+            rebuildCommandList(/*replay=*/true);
+            if (commandList_.endReplay()) {
+                lastWasReplay_ = true;
+                scene_->clearDirty();
+                forceSyncRebuild_ = false;
+                return;
+            }
+        }
+        rebuildCommandList(/*replay=*/false);
+        needsRebuild_ = false;
+        needsCoords_ = false;
+    }
+    forceSyncRebuild_ = false;
+}
+
+bool Renderer::rebuildCommandList(bool replay) {
     refreshFrameData();
 
-    SceneCommandList fresh;
+    // 样式层异步开关：只有"GUI 异步模式 + 非强制同步 + 非重放"才允许整体系表面
+    // 提交后台任务；其余路径（CLI/导出/测试/重放）全部同步生成，行为与既有一致。
+    quickSurfSetAsyncEnabled(asyncSurface_.load(std::memory_order_relaxed) &&
+                             !forceSyncRebuild_ && !replay);
+
+    // 全量重建：清空上一轮的 ESP 视口叠加信息（色标条/极值标注），
+    // 由本次重建中的 drawEspSurface 重新写入；坐标重放路径不重建样式，故不清。
+    if (!replay) {
+        espOverlayReset();
+    }
+
+    // 全量重建：生成到临时列表，成功后再整体换入（生成中途失败不留半个命令流），
+    // 同时边生成边记录坐标命令偏移（供后续帧切重放）。
+    // 重放：直接写回现列表的坐标载荷，不增长池、不重发状态命令。
+    SceneCommandList local;
+    SceneCommandList& fresh = replay ? commandList_ : local;
+    if (!replay) {
+        fresh.recordReplay(true);
+    }
+    // 本轮是否提交过后台表面任务：提交则本轮命令流不完整（缺该表面），不换入。
+    const uint64_t submittedBefore = async::submittedSurfaceJobCount();
+
     // 每 (表示, 实例) 生成段（P10 并行；此处串行实现，M2 接入 TaskPool）——
     // Selection 掩码对整个场景求值一次（与实例无关），本表示全部实例复用。
     for (const auto& rep : representations()) {
@@ -96,9 +319,12 @@ void Renderer::rebuildCommandList() {
 
         // 体系级表面（G5）：整体系（含溶剂分子）一个整体表面，只发射一次（而非
         // 每分子一个独立小表面）。surface/quicksurf 表示设置 rep.systemSurface 时生效。
+        // 该分支发射 TriMesh（顶点数随坐标变化）→ 记录期即置 hasMesh_，重放被拒，
+        // 故重放模式下不会走到这里（断言以防将来改动破坏该前提）。
         if (rep.systemSurface &&
             (rep.type == RepresentationType::Surface ||
              rep.type == RepresentationType::QuickSurf)) {
+            assert(!replay && "TriMesh 分支不得进入重放路径");
             // 整体表面是单一 TriMesh，恒以体系渲染模式「实心」(mode0) 绘制；
             // 必须先重置 RenderMode 与材质：若此前其它表示的最后一条 RenderMode/
             // MaterialBlock 命令残留，表面网格会继承错误的管线（线框/透明）或全零
@@ -149,15 +375,63 @@ void Renderer::rebuildCommandList() {
                 }
             }
 
-            Representer representer;
-            representer.generate(rep, *scene_, inst, instIdx, frameData_, 0,
-                                 mask, fresh);
+            if (replay) {
+                // 重放：跳过 Representer::generate（它会重发 RenderMode/Material
+                // 状态命令，而重放计划里只有坐标命令），直接调样式的坐标数学。
+                // 命令序列与全量重建逐条对应，append 由游标改道写回原偏移。
+                RepContext ctx;
+                ctx.scene = scene_;
+                ctx.instance = &inst;
+                ctx.frame = &frameData_;
+                ctx.rep = &rep;
+                ctx.mask = &mask;
+                ctx.instanceIndex = instIdx;
+                ctx.globalAtomBase = scene_->globalAtomBase(instIdx);
+                ctx.frameIndex = 0;
+                ctx.replay = true;
+                ctx.renderMode = 0;
+                if (inst.systemId != UINT32_MAX) {
+                    const uint32_t si = scene_->systemIndexById(inst.systemId);
+                    if (si != UINT32_MAX) {
+                        ctx.renderMode =
+                            static_cast<uint8_t>(scene_->systems()[si].renderMode);
+                    }
+                }
+                if (StyleDrawFn drawStyle = styleFor(rep.type); drawStyle != nullptr) {
+                    drawStyle(ctx, fresh);
+                }
+            } else {
+                Representer representer;
+                representer.generate(rep, *scene_, inst, instIdx, frameData_, 0,
+                                     mask, fresh);
+            }
         }
     }
 
+    if (replay) {
+        return true;   // 重放不换入列表、不 bumpSerial（由 endReplay 统一处理）
+    }
+    fresh.recordReplay(false);
+    // 异步表面：本轮有后台任务在跑（新提交或仍在生成）→ 新命令流缺表面，
+    // **丢弃它、保留旧命令流**（旧画面继续显示），等任务完成后由 prepare 再重建。
+    // 注意不 clearDirty：让 MolScene 的重绘门控保持打开，任务完成即可重建。
+    if (!forceSyncRebuild_ && async::surfaceJobsBusy()) {
+        return false;
+    }
+    if (async::submittedSurfaceJobCount() != submittedBefore) {
+        return false;   // 极快完成的情况：结果已进缓存，下一轮重建直接命中
+    }
+    // ⚠ 先把旧 serial 搬到新列表再换入：fresh 是**新建的空列表**（serial_ = 0），
+    // 直接 move 会把 serial 复位成 0，其后 bumpSerial 恒得 1 —— 于是每次全量重建
+    // 的 serial 都是 1，而后端解码缓存以 (列表对象, serial) 为键 → 误判缓存命中，
+    // 继续使用上一次（往往还是空场景的）绘制列表。症状：**打开文件后界面一切正常、
+    // 视口却始终空白**，且重建日志里 serial 一直是 1（很难联想到缓存键碰撞）。
+    // 单调递增是这条链路的硬不变量，显式搬运以免再被 move 语义破坏。
+    fresh.setSerial(commandList_.serial());
     commandList_ = std::move(fresh);
     commandList_.bumpSerial();   // serial 递增：视图层用其检测命令流重建（缓存键 P5）
     scene_->clearDirty();
+    return true;
 }
 
 void Renderer::draw(const RenderView& view) {
@@ -172,7 +446,7 @@ LightParams Renderer::sceneLighting() const {
     if (!scene_) {
         return light;
     }
-    // 全局光：天顶/地面半球色 + 均匀环境光（无方向光/点光源）
+    // 半球环境光（天顶/地面色 + 均匀环境光）+ 方向光（主方案 §6.6.4）
     const auto& props = scene_->properties();
     light.skyColor = glm::vec3(props.skyColor[0], props.skyColor[1], props.skyColor[2]);
     light.groundColor =
@@ -180,6 +454,37 @@ LightParams Renderer::sceneLighting() const {
     light.ambientColor =
         glm::vec3(props.ambientColor[0], props.ambientColor[1], props.ambientColor[2]);
     light.ambientIntensity = props.ambient;
+    light.dirLightDir =
+        glm::vec3(props.dirLightDir[0], props.dirLightDir[1], props.dirLightDir[2]);
+    light.dirLightColor =
+        glm::vec3(props.dirLightColor[0], props.dirLightColor[1], props.dirLightColor[2]);
+    light.dirLightIntensity = props.dirLightIntensity;
+    light.dirLightEnabled = props.dirLightEnabled;
+    light.shadowsEnabled = props.shadowsEnabled;
+    light.shadowStrength = props.shadowStrength;
+
+    // 方向光阴影的光源正交矩阵：按场景包围球拟合，使整场景都落在光源视锥内。
+    // 用包围【球】而非包围盒的轴对齐结果：光源方向任意，球是方向无关的保守包围，
+    // 不会出现"某些朝向被裁掉一半"。
+    if (light.dirLightEnabled && light.dirLightIntensity > 0.0f) {
+        glm::vec3 center(0.0f);
+        float radius = 1.0f;
+        if (sceneBounds(&center, &radius)) {
+            const glm::vec3 l = glm::normalize(light.dirLightDir);
+            // 光源"眼睛"放在球外（沿光线方向退开 2 倍半径），看向球心
+            const glm::vec3 eye = center + l * (radius * 2.0f);
+            // up 不能与视线平行：视线接近 ±Y 时改用 X 轴
+            const glm::vec3 up =
+                std::abs(l.y) > 0.99f ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+            const glm::mat4 view = glm::lookAt(eye, center, up);
+            // 正交半宽 = 半径 ×1.1（留边）；近远覆盖 eye 到球心的距离 ± 半径
+            const float half = radius * 1.1f;
+            const float dist = radius * 2.0f;
+            const glm::mat4 proj =
+                glm::ortho(-half, half, -half, half, 0.01f, dist + radius * 2.0f);
+            light.lightViewProj = proj * view;
+        }
+    }
     return light;
 }
 
@@ -198,7 +503,17 @@ RenderView Renderer::viewFor(const OrbitCamera& camera, uint32_t width,
     view.width = std::max(1u, width);
     view.height = std::max(1u, height);
     view.light = sceneLighting();
+    view.style = style_;
+    if (scene_ != nullptr) {
+        const auto& bg = scene_->properties().bgColor;
+        view.backgroundColor = glm::vec3(bg[0], bg[1], bg[2]);
+        const auto& props = scene_->properties();
+        view.clipEnabled = props.clipEnabled;
+        view.clipPlane = glm::vec4(props.clipPlane[0], props.clipPlane[1],
+                                   props.clipPlane[2], props.clipPlane[3]);
+    }
     view.fog = sceneFog();
+    view.scale = scene_ != nullptr ? scene_->properties().scale : 1.0f;
     return view;
 }
 

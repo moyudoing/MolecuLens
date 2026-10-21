@@ -9,6 +9,8 @@
 
 #include "app/controller/selection/selection_controller.h"
 #include "app/data/data_manager.h"
+#include "app/i18n/language.h"
+#include "app/view/dock/dock_layout.h"   // windowLabel / panel:: 稳定 ID
 #include "app/view/theme/ui_theme.h"
 #include "app/view/timeline/time_axis.h"
 #include "app/view/viewport/mol_scene.h"
@@ -32,11 +34,13 @@ void MainView::renderAll(RenderContext& ctx) {
 
 void MainView::renderViewport(RenderContext& ctx) {
 
-    // "##" 前缀隐藏窗口显示名（ID 仍为 "3D 视口"，Dock 布局/设置兼容），
-    // 主视图标签不显示名称，视觉更简洁（主方案 §7.7 视口交互接缝不变）。
-    // NoTitleBar：隐藏主视图上方 Dock 标签栏（"工具栏/控制面板"），
-    // 视口区域顶部不再有标签条（主方案 §7.4 主视图沉浸式）。
-    ImGui::Begin("##3D 视口", nullptr,
+    // 窗口标签 = 可翻译的显示名 + 稳定 ID（###）；ID 参与 Dock 布局持久化，
+    // 不能随语言变化（见 dock_layout.h）。
+    // NoTitleBar：隐藏主视图上方 Dock 标签栏，视口区域顶部不再有标签条
+    //（主方案 §7.4 主视图沉浸式）—— 显示名因此不呈现，仅 ID 生效。
+    const std::string viewportLabel =
+        dock::windowLabel(i18n::tr("3D 视口"), dock::panel::kViewport);
+    ImGui::Begin(viewportLabel.c_str(), nullptr,
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
                      ImGuiWindowFlags_NoTitleBar);
     // 取可用区 → molScene_->resizeViewport() 同步 FBO → render()（主方案 §7.7）
@@ -82,26 +86,31 @@ void MainView::renderViewport(RenderContext& ctx) {
 }
 
 void MainView::renderTimeline(RenderContext& ctx) {
-    ImGui::Begin("时间轴", ctx.showTimeline, ImGuiWindowFlags_NoCollapse);
+    const std::string label = dock::windowLabel(i18n::tr("时间轴"), dock::panel::kTimeline);
+    ImGui::Begin(label.c_str(), ctx.showTimeline, ImGuiWindowFlags_NoCollapse);
     ctx.timeAxis->render();
     ImGui::End();
 }
 
 void MainView::renderStatusBar(RenderContext& ctx) {
-    ImGui::Begin("状态栏", ctx.showStatusBar, ImGuiWindowFlags_NoCollapse);
+    const std::string label =
+        dock::windowLabel(i18n::tr("状态栏"), dock::panel::kStatusBar);
+    ImGui::Begin(label.c_str(), ctx.showStatusBar, ImGuiWindowFlags_NoCollapse);
     char buf[256];
     const size_t count = ctx.dm ? ctx.dm->moleculeCount() : 0;
     const std::string cur =
-        count > 0 && ctx.dm ? ctx.dm->moleculeName(0) : "（无）";
-    std::snprintf(buf, sizeof(buf), "FPS %.1f   分子 %zu   当前分子 %s", ctx.fps, count,
-                  cur.c_str());
+        count > 0 && ctx.dm ? ctx.dm->moleculeName(0) : tr("（无）");
+    // snprintf 被脚本的"日志行"规则跳过了（它按 printf 判定），但这是状态栏文案，
+    // 必须翻译 —— 手动补上
+    std::snprintf(buf, sizeof(buf), tr("FPS %.1f   分子 %zu   当前分子 %s"), ctx.fps,
+                  count, cur.c_str());
     ImGui::TextUnformatted(buf);
 
     // 选择状态：SelectionController 的选择语言求值结果（SelectionChanged 的消费者）。
     // 未选择时不占位，避免状态栏常驻空行。
     if (ctx.selection && !ctx.selection->expression().empty()) {
         ImGui::SameLine();
-        ImGui::TextDisabled("|  选择 \"%s\" → %zu 个原子",
+        ImGui::TextDisabled(tr("|  选择 \"%s\" -> %zu 个原子"),
                             ctx.selection->expression().c_str(),
                             ctx.selection->selectedCount());
     }

@@ -10,7 +10,8 @@
 //   v1 的元数据只存"元素符号 + 键表 + 实例位姿 + 表示基础字段 + 背景/环境光"，
 //   导致原子名/残基/链/BFactor、体系分组（位姿+渲染模式+溶剂标记）、完整光照与雾、
 //   表示的全部参数都无法还原 —— 存出来的场景重新打开会掉色、掉分组。
-//   v2 补齐上述字段；轨迹帧**不内嵌**，改为记录源文件路径 + 指纹（大小/mtime）。
+//   v2 补齐上述字段。轨迹支持两种模式：**链接式**（默认，只记源文件路径 + 指纹）
+//   与**嵌入式**（帧坐标写进 CRC 之前的可选二进制段），二者共用同一版本号。
 //
 // ⚠️ 本模块**不依赖 engine**：命令流段按"已序列化的字节"原样读写，序列化/反序列化
 //   由 app 层调用 engine::SceneCommandList::writeTo/readFrom 完成。
@@ -50,8 +51,21 @@ static_assert(sizeof(Header) == 16);
 //            u8 cmd[cmdSize]           SceneCommandList 序列化（见 engine/cmd/cmd.h 附录 F）
 //            u64 coordsSize            坐标 SoA 段字节数
 //            u8 coords[coordsSize]     坐标 SoA 段
+//            [u64 trajSize]            **可选**内嵌轨迹段字节数（仅嵌入式保存时存在）
+//            [u8  traj[trajSize]]
 //            u32 crc32                 CRC32(0 .. filesize-4)
 // 写入：临时文件 + fsync + rename（原子性）；读取按 lenient 容错。
+//
+// —— 内嵌轨迹段（traj[]；可选，链接式保存时不写，字节布局与旧版完全一致）——
+// u32 trajCount
+// for each trajectory:
+//   u64 frameCount
+//   u32 atomCount
+//   u32 flags                bit0 = hasBoxes
+//   u8  positions[frameCount * atomCount * 12]   float32 × [f][atom][xyz]，帧优先
+//   [u8 boxes[frameCount * 36]]                  float32 × [f][9]（仅 hasBoxes）
+// 读侧判据：坐标段之后若剩余字节 ≥ 8 + 4(CRC)，先视作 trajSize；越界 strict 报错、
+// lenient 跳过（旧文件在坐标段后直接就是 CRC，因此不会误读）。
 
 // —— 坐标 SoA 段（coords[]）——
 // [0]  u64 posCount
@@ -78,8 +92,13 @@ static_assert(sizeof(Header) == 16);
 //       "isSolvent":false,
 //       "transform": { "translation":[3], "rotation":[4], "scale":1.0 },
 //       "trajectory": { "sourcePath":"…/run.xtc", "sourceSize":123, "sourceMtime":456,
-//                       "frameCount":100, "dt":2.0, "periodic":false } }
-//   ],
+//                       "frameCount":100, "dt":2.0, "periodic":false,
+//                       // 可选键（旧文件缺省 → 链接式）：
+//                       "mode":"linked"|"embedded", "embeddedIndex":0,
+//                       "trajAtomOffset":0 } } ],
+//   "embeddedTrajectories": [   // 可选；仅嵌入式保存时出现，顺序即 embeddedIndex
+//     { "frameCount":100, "atomCount":6452, "dt":2.0, "periodic":true,
+//       "hasBoxes":true } ],    // 帧坐标本体在二进制 traj 段，JSON 只存形状
 //   "representations": [
 //     { "name":"rep0", "type":"ballstick", "selection":"*", "colorScheme":"element",
 //       "radiusScale":1.0, "bondScale":1.0, "visible":true, "systemSurface":false,
@@ -89,7 +108,10 @@ static_assert(sizeof(Header) == 16);
 //   ],
 //   "scene":  { "bgColor":[3], "fog":[2], "fogMode":0, "fogDensity":0.05,
 //               "ambient":0.45, "scale":1.0,
-//               "skyColor":[3], "groundColor":[3], "ambientColor":[3] },
+//               "skyColor":[3], "groundColor":[3], "ambientColor":[3],
+//               // P6 新增（可选键）：方向光
+//               "dirLightDir":[3], "dirLightColor":[3],
+//               "dirLightIntensity":0.35, "dirLightEnabled":true },
 //   "camera": { "target":[3], "distance":40.0, "yaw":0.0, "pitch":0.5,
 //               "roll":0.0, "fov":45.0, "ortho":false }
 // }
@@ -109,6 +131,58 @@ struct TransformData {
                scale == o.scale;
     }
     bool operator!=(const TransformData& o) const { return !(*this == o); }
+};
+
+// —— 场景标注（v2.3，可选段）——
+// 视图叠加层（水盒 / 文字标签 / 箭头 / 水印）随场景一起保存：重开 .mlscene 就能
+// 直接复现做好的示意图，不必重新摆一遍。它是**表现层数据**，但不依赖 ImGui/engine
+// 类型，故放在 persist（纯数据）里，由 app 层做转换。
+// 缺省键 → 空标注：旧文件完全不受影响。
+struct AnnotationBox {
+    bool visible = false;
+    std::array<float, 3> origin{0.0f, 0.0f, 0.0f};
+    std::array<float, 9> axes{};   // a1(3) + a2(3) + a3(3)：支持三斜盒
+    std::array<float, 4> color{0.45f, 0.62f, 0.85f, 0.9f};
+    float lineWidth = 1.4f;
+};
+
+struct AnnotationLabel {
+    std::string text;
+    std::array<float, 3> pos{0.0f, 0.0f, 0.0f};
+    std::array<float, 4> color{1.0f, 0.92f, 0.55f, 1.0f};
+    float pixelSize = 18.0f;
+    bool leader = true;
+    bool visible = true;
+};
+
+struct AnnotationArrow {
+    std::array<float, 3> from{0.0f, 0.0f, 0.0f};
+    std::array<float, 3> to{0.0f, 0.0f, 0.0f};
+    std::array<float, 4> color{1.0f, 0.85f, 0.30f, 1.0f};
+    float width = 2.2f;
+    float headScale = 1.0f;
+    bool doubleHead = false;
+    int32_t style = 0;   // 0 普通 / 1 波浪（光）
+    bool visible = true;
+};
+
+struct AnnotationWatermark {
+    bool visible = false;
+    std::string text;
+    std::array<float, 4> color{1.0f, 1.0f, 1.0f, 0.16f};
+    float scale = 0.10f;
+    int32_t anchor = 0;   // 0 右下 / 1 左下 / 2 居中 / 3 右上
+};
+
+struct Annotations {
+    AnnotationBox box;
+    std::vector<AnnotationLabel> labels;
+    std::vector<AnnotationArrow> arrows;
+    AnnotationWatermark watermark;
+
+    [[nodiscard]] bool empty() const {
+        return !box.visible && labels.empty() && arrows.empty() && !watermark.visible;
+    }
 };
 
 // —— 场景快照（load 的产物 / save 的输入；无渲染依赖的纯数据）——
@@ -131,15 +205,39 @@ struct SceneSnapshot {
         std::vector<std::array<uint32_t, 3>> bonds;   // [a, b, order]
     };
 
-    // 轨迹引用：**不内嵌帧坐标**（多帧大体系会让文件膨胀到数百 MB）。
-    // 只记录源文件路径 + 指纹；文件缺失或被替换时提示重新加载。
+    // 轨迹引用。两种存储模式：
+    //   "linked"   —— 只记录源文件路径 + 指纹（默认；多帧大体系文件小，但源文件
+    //                 被移动/替换后需重新加载）。
+    //   "embedded" —— 帧坐标写进同文件的二进制 traj 段（单文件可分发），
+    //                 embeddedIndex 指向 SceneSnapshot::embeddedTrajectories。
+    // 旧文件没有 mode 键 → 读侧取默认值 "linked"，行为与之前完全一致。
     struct TrajectoryRef {
+        std::string mode = "linked";      // "linked" / "embedded"
+        int32_t     embeddedIndex = -1;   // → embeddedTrajectories 下标；-1 = 无
+        // 体系级共享轨迹时，本实例第 0 个原子在该轨迹整体系帧坐标里的偏移。
+        // 单实例私有轨迹恒为 0（与历史行为一致）。
+        uint32_t    trajAtomOffset = 0;
         std::string sourcePath;
         uint64_t    sourceSize = 0;
         int64_t     sourceMtime = 0;
         uint64_t    frameCount = 1;
         float       dt = 2.0f;
         bool        periodic = false;
+    };
+
+    // 内嵌轨迹的**形状 + 帧坐标本体**。
+    // 为什么单独一张表：多实例体系（md.gro 是 2042 个实例共享一条整体系轨迹）
+    // 若逐实例存一份帧坐标，文件体积会按实例数翻倍；表 + 实例 ref 的
+    // embeddedIndex 使"只内嵌一次"成为格式上的必然。
+    // positions 布局：帧优先 [f][atom][xyz]，长度 = frameCount*atomCount*3。
+    // boxes 可为空；非空时长度 = frameCount*9。
+    struct EmbeddedTrajectory {
+        uint64_t frameCount = 0;
+        uint32_t atomCount = 0;
+        float    dt = 2.0f;
+        bool     periodic = false;
+        std::vector<float> positions;
+        std::vector<float> boxes;
     };
 
     struct System {
@@ -170,6 +268,21 @@ struct SceneSnapshot {
         bool  systemSurface = false;
         float surfIsovalue = 0.5f;
         float surfGridSpacing = 0.5f;
+        // ESP 映射表面（type == "espsurface"）：cube 数据源 + 色标参数（v3 新增，
+        // 旧文件缺键 → 默认值，不影响载入）。
+        std::string espDensityCubePath;
+        std::string espPotentialCubePath;
+        float espIsovalue = 0.001f;
+        float espVminKcal = -45.0f;
+        float espVmaxKcal = 45.0f;
+        bool  espAutoRange = true;
+        bool  espInvert = false;
+        int32_t espColormap = 0;
+        // 材质名（kMaterialPresets 里的名字），空串 = 自定义/未指定。
+        // 存**名字**而非下标：材质表日后增删/重排时，旧文件的下标会静默指向
+        // 另一个材质 —— 名字是稳定键（与 UITheme 的 theme 键同一取舍）。
+        // v2 可选键：旧文件缺键 → 空串 → 载入时按数值走"自定义"或容差匹配。
+        std::string materialName;
         std::array<float, 4> ambient{0.60f, 0.60f, 0.60f, 1.0f};
         std::array<float, 4> diffuse{0.90f, 0.90f, 0.90f, 1.0f};
         std::array<float, 4> specular{0.30f, 0.30f, 0.30f, 1.0f};
@@ -186,6 +299,9 @@ struct SceneSnapshot {
     std::vector<std::string> residueNames;
     std::vector<System> systems;
     std::vector<Instance> instances;
+    // 内嵌轨迹表（索引即 Instance::trajectory.embeddedIndex）。
+    // 链接式保存时为空 → 文件不写 traj 段，字节布局与旧版一致。
+    std::vector<EmbeddedTrajectory> embeddedTrajectories;
     std::vector<Representation> representations;
 
     // 场景属性（v2 补齐雾与全局光三色）
@@ -198,6 +314,14 @@ struct SceneSnapshot {
     std::array<float, 3> skyColor{1.0f, 1.0f, 1.0f};
     std::array<float, 3> groundColor{0.35f, 0.4f, 0.5f};
     std::array<float, 3> ambientColor{0.55f, 0.6f, 0.75f};
+    // 方向光（P6 新增）。以**可选键**加入 v2 的 "scene" 对象：旧 v2 文件缺这些键时
+    // 读侧取默认值 → 仍可正常加载（纯增量，不构成破坏性变更，故版本号保持 2）。
+    std::array<float, 3> dirLightDir{0.40f, 0.80f, 0.60f};
+    std::array<float, 3> dirLightColor{1.0f, 0.98f, 0.95f};
+    float dirLightIntensity = 0.35f;
+    bool  dirLightEnabled = true;
+    bool  shadowsEnabled = true;
+    float shadowStrength = 0.65f;
     std::string units = "angstrom";
 
     // 相机（v2 补齐 roll/fov/ortho）
@@ -214,6 +338,9 @@ struct SceneSnapshot {
     std::vector<float> coordsPositions;    // vec3 × n
     std::vector<float> coordsColors;       // vec4 × n
     std::vector<uint32_t> coordsAtomIds;
+
+    // 场景标注（v2.3，可选 JSON 键 "annotations"；旧文件缺键 → 空）
+    Annotations annotations;
 };
 
 // —— 读写接口 ——
@@ -224,6 +351,9 @@ struct LoadOptions {
 struct SaveOptions {
     bool writeCoords = true;   // false=仅结构+命令流（坐标留空）
     int  jsonIndent  = 2;
+    // true 且 snapshot.embeddedTrajectories 非空时，在 CRC 前追加内嵌轨迹段
+    // （链接式保存保持 false → 与旧版文件字节布局一致）。
+    bool embedTrajectories = false;
 };
 
 class MlSceneSerializer {

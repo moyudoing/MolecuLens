@@ -5,9 +5,13 @@
 
 #pragma once
 
+#include <algorithm>
 #include <functional>
+#include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "entity/scene/scene.h"
 
@@ -34,8 +38,33 @@ public:
             setters_.emplace(std::string(name), std::move(setter));
         }
     }
-    void addSingleWord(std::string_view name, WordFn fn) {
+    // implemented = false：该字已注册但**尚未实现**（占位，见 selection.cpp 的
+    // protein/backbone/sidechain/waters）。UI 必须据此把该项置灰 ——
+    // 列成可点会让用户选中它，而占位宏不产生任何掩码 → 表示直接消失，
+    // 且没有任何报错（"看起来能用实则清空选择"是最难排查的一类失效）。
+    void addSingleWord(std::string_view name, WordFn fn, bool implemented = true) {
         words_.emplace(std::string(name), std::move(fn));
+        if (!implemented) {
+            unimplementedWords_.emplace(std::string(name));
+        }
+    }
+
+    // 单字宏是否已实现（未实现 = 占位，UI 应禁用）
+    bool isWordImplemented(std::string_view name) const {
+        return words_.count(std::string(name)) != 0 &&
+               unimplementedWords_.count(std::string(name)) == 0;
+    }
+
+    // 全部单字宏名（按字典序，保证 UI 列表稳定）。
+    // **UI 的 Singlewords 列表必须用它**，不要另抄一份 —— 手写列表会与解析器脱节。
+    std::vector<std::string> singleWordNames() const {
+        std::vector<std::string> out;
+        out.reserve(words_.size());
+        for (const auto& kv : words_) {
+            out.push_back(kv.first);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
     }
     void addStringFunction(std::string_view name, StringFn fn) {
         stringFns_.emplace(std::string(name), std::move(fn));
@@ -86,6 +115,7 @@ private:
     std::unordered_map<std::string, GetterFn> keywords_;
     std::unordered_map<std::string, SetterFn> setters_;
     std::unordered_map<std::string, WordFn> words_;
+    std::unordered_set<std::string> unimplementedWords_;   // 占位字（UI 置灰）
     std::unordered_map<std::string, StringFn> stringFns_;
     std::unordered_map<std::string, MathFn> mathFns_;
 };

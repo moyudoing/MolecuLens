@@ -40,6 +40,7 @@ const char* colorSchemeZhImpl(ColorScheme scheme) noexcept {
         case ColorScheme::Residue:     return "按残基";
         case ColorScheme::BFactor:     return "按 BFactor";
         case ColorScheme::Uniform:     return "统一色";
+        case ColorScheme::AtomName:    return "按原子名 (VMD)";
         default:                       return "未知";
     }
 }
@@ -112,7 +113,28 @@ size_t Representer::globalAtomCount(const RepContext& ctx) {
     return ctx.frame && ctx.frame->positions ? ctx.frame->positions->size() : 0;
 }
 
+bool Representer::lightBackground_ = false;
+
+void Representer::setLightBackground(bool on) {
+    lightBackground_ = on;
+}
+
+namespace {
+// sRGB(0..1) → 线性(0..1)。调色板与 IP 配色都按 sRGB 书写，而颜色附件是 *_SRGB
+// （硬件在写入时做 linear→sRGB 编码），所以必须先转线性，否则颜色会被二次编码、整体偏淡。
+inline glm::vec4 srgbToLinear(const glm::vec4& c) {
+    auto f = [](float v) -> float {
+        return v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+    };
+    return glm::vec4(f(c.r), f(c.g), f(c.b), c.a);
+}
+} // namespace
+
 glm::vec4 Representer::colorForAtom(const RepContext& ctx, uint32_t globalAtomIndex) {
+    return srgbToLinear(colorForAtomSrgb(ctx, globalAtomIndex));
+}
+
+glm::vec4 Representer::colorForAtomSrgb(const RepContext& ctx, uint32_t globalAtomIndex) {
     const auto& st = ctx.scene->structures()[ctx.instance->structureIndex];
     const size_t localIdx = globalAtomIndex - ctx.globalAtomBase;
     if (localIdx >= st.elements.size()) {
@@ -125,15 +147,26 @@ glm::vec4 Representer::colorForAtom(const RepContext& ctx, uint32_t globalAtomIn
         }
         case ColorScheme::Chain: {
             const int32_t cid = st.atoms[localIdx].chainId;
-            const float h = static_cast<float>(hash32(static_cast<uint32_t>(cid + 1)) %
-                                               3600) / 3600.0f;
-            const glm::vec3 rgb = hslToRgb(h, 0.65f, 0.55f);
+            const int32_t rid = st.atoms[localIdx].residueId;
+            // 结构是共享的（md.gro：7 个结构 / 2042 个实例），所以链内差异必须靠
+            // 实例序号 + 残基号混合，否则同种分子全部同色。
+            const uint32_t mix = static_cast<uint32_t>(cid + 1);
+            const float h = static_cast<float>(hash32(mix) % 3600) / 3600.0f;
+            const float jitter =
+                (static_cast<float>(hash32(static_cast<uint32_t>(rid) ^
+                                           (static_cast<uint32_t>(ctx.instanceIndex) * 2654435761u)) %
+                                    1000) /
+                     1000.0f - 0.5f) * 0.20f;
+            const float lightness = std::clamp(0.55f + jitter, 0.15f, 0.9f);
+            const glm::vec3 rgb = hslToRgb(h, 0.65f, lightness);
             return glm::vec4(rgb, 1.0f);
         }
         case ColorScheme::Residue: {
             const int32_t rid = st.atoms[localIdx].residueId;
-            const float h = static_cast<float>(hash32(static_cast<uint32_t>(rid + 1)) %
-                                               3600) / 3600.0f;
+            // 同上：结构共享时，残基差异靠 实例序号 + 残基号 共同决定。
+            const uint32_t key = static_cast<uint32_t>(rid) ^
+                                 (static_cast<uint32_t>(ctx.instanceIndex) * 2246822519u);
+            const float h = static_cast<float>(hash32(key) % 3600) / 3600.0f;
             const glm::vec3 rgb = hslToRgb(h, 0.35f, 0.62f);
             return glm::vec4(rgb, 1.0f);
         }
@@ -142,10 +175,37 @@ glm::vec4 Representer::colorForAtom(const RepContext& ctx, uint32_t globalAtomIn
                                            20000.0f, 0.0f, 1.0f);
             return glm::vec4(bfactorColor(b), 1.0f);
         }
+        case ColorScheme::AtomName: {
+            // VMD「Name」观感：碳青、氮蓝、氧红、氢白、硫黄、磷橙；其余回落元素色。
+            const auto& info = elementInfo(st.elements[localIdx]);
+            const char* sym = info.symbol != nullptr ? info.symbol : "";
+            if (sym[0] == 'C') {
+                return glm::vec4(0.55f, 0.85f, 0.88f, 1.0f);
+            }
+            if (sym[0] == 'N') {
+                return glm::vec4(0.25f, 0.35f, 0.95f, 1.0f);
+            }
+            if (sym[0] == 'O') {
+                return glm::vec4(0.95f, 0.20f, 0.20f, 1.0f);
+            }
+            if (sym[0] == 'H') {
+                // 浅色背景（白底导出）时纯白等于隐形，压成中灰
+                const float h = lightBackground_ ? 0.45f : 0.95f;
+                return glm::vec4(h, h, h, 1.0f);
+            }
+            if (sym[0] == 'S') {
+                return glm::vec4(0.95f, 0.85f, 0.25f, 1.0f);
+            }
+            if (sym[0] == 'P') {
+                return glm::vec4(0.95f, 0.60f, 0.25f, 1.0f);
+            }
+            return glm::vec4(info.color[0], info.color[1], info.color[2], 1.0f);
+        }
         case ColorScheme::Uniform:
         default:
-            return glm::vec4(ctx.rep->diffuse[0], ctx.rep->diffuse[1],
-                             ctx.rep->diffuse[2], ctx.rep->opacity);
+            // 顶点色返回白：统一色由材质 diffuse 决定（着色器 base = diffuse × vColor）。
+            // 此前返回 diffuse 会被再乘一次 diffuse，导致选的颜色偏暗（v2.3 修正）。
+            return glm::vec4(1.0f, 1.0f, 1.0f, ctx.rep->opacity);
     }
 }
 
@@ -201,8 +261,5 @@ void Representer::generate(const Representation& rep,
         draw(ctx, out);
     }
 }
-
-// —— 预留风格占位（M2 落地）——
-void drawLabelPlaceholder(const RepContext&, SceneCommandList&) {}
 
 } // namespace moleculens::engine

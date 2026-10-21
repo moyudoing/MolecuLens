@@ -12,8 +12,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+
+#include <nlohmann/json.hpp>
 
 #include "entity/molecule/molecule.h"
 #include "persist/mlscene/mlscene.h"
@@ -126,6 +129,46 @@ moleculens::persist::mlscene::SceneSnapshot makeSnapshot() {
     snap.coordsAtomIds = {0, 1, 2};
     // 命令流：persist 按不透明字节处理（序列化由 app 层负责），此处填入可辨识的样本
     snap.commandStream = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+    return snap;
+}
+
+// 读回文件的元数据 JSON（测试"旧文件缺 mode 键"这类格式事实）
+nlohmann::json readMetaJson(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    std::vector<uint8_t> all((std::istreambuf_iterator<char>(in)),
+                             std::istreambuf_iterator<char>());
+    Header h;
+    std::memcpy(&h, all.data(), sizeof(Header));
+    const std::string meta(reinterpret_cast<const char*>(all.data() + sizeof(Header)),
+                           static_cast<size_t>(h.metaSize));
+    return nlohmann::json::parse(meta);
+}
+
+// 造一个含内嵌轨迹的样本：2 帧 × 3 原子 + 逐帧盒子
+SceneSnapshot makeEmbeddedSnapshot() {
+    SceneSnapshot snap = makeSnapshot();
+    auto& tr = snap.instances[0].trajectory;
+    tr.mode = "embedded";
+    tr.embeddedIndex = 0;
+    tr.trajAtomOffset = 2;
+    tr.frameCount = 2;
+    tr.dt = 1.0f;
+    tr.periodic = true;
+
+    SceneSnapshot::EmbeddedTrajectory e;
+    e.frameCount = 2;
+    e.atomCount = 3;
+    e.dt = 1.0f;
+    e.periodic = true;
+    e.positions = {
+        // 帧 0
+        0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+        // 帧 1
+        0.5f, 0.25f, -1.0f, 1.5f, 0.25f, -1.0f, 0.5f, 1.25f, -1.0f};
+    // 2 帧 × 9（只填对角元，验证逐值往返）
+    e.boxes = {40.0f, 0, 0, 0, 41.0f, 0, 0, 0, 42.0f,
+               43.0f, 0, 0, 0, 44.0f, 0, 0, 0, 45.0f};
+    snap.embeddedTrajectories.push_back(std::move(e));
     return snap;
 }
 
@@ -329,4 +372,175 @@ TEST_CASE("mlscene empty scene round-trips", "[serializer]") {
     REQUIRE(result->structures.empty());
     REQUIRE(result->instances.empty());
     std::filesystem::remove(path);
+}
+
+// =============================================================================
+// 轨迹存储双模式（链接式 / 嵌入式）
+// =============================================================================
+
+TEST_CASE("mlscene linked mode round-trips the trajectory reference", "[serializer]") {
+    const auto path = std::filesystem::temp_directory_path() / "moleculens_linked.mlscene";
+    const auto snap = makeSnapshot();
+    // 默认即链接式
+    REQUIRE(snap.instances[0].trajectory.mode == "linked");
+    REQUIRE(MlSceneSerializer::save(snap, path).has_value());
+
+    auto loaded = MlSceneSerializer::load(path);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->embeddedTrajectories.empty());
+    const auto& tr = loaded->instances[0].trajectory;
+    REQUIRE(tr.mode == "linked");
+    REQUIRE(tr.embeddedIndex == -1);
+    REQUIRE(tr.trajAtomOffset == 0u);
+    REQUIRE(tr.sourcePath == snap.instances[0].trajectory.sourcePath);
+    REQUIRE(tr.sourceSize == snap.instances[0].trajectory.sourceSize);
+    REQUIRE(tr.sourceMtime == snap.instances[0].trajectory.sourceMtime);
+    REQUIRE(tr.frameCount == snap.instances[0].trajectory.frameCount);
+    REQUIRE(tr.dt == Catch::Approx(snap.instances[0].trajectory.dt));
+    REQUIRE(tr.periodic == snap.instances[0].trajectory.periodic);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("mlscene old file without mode key loads as linked", "[serializer]") {
+    // 链接式保存不写可选键 → 产出的 JSON 就是"旧文件"形态（无 mode /
+    // embeddedIndex / trajAtomOffset / embeddedTrajectories）。
+    const auto path = std::filesystem::temp_directory_path() / "moleculens_oldfmt.mlscene";
+    REQUIRE(MlSceneSerializer::save(makeSnapshot(), path).has_value());
+
+    const auto meta = readMetaJson(path);
+    REQUIRE(meta["version"].get<int>() == kVersion);   // 仍是 v2，不升版本
+    REQUIRE_FALSE(meta.contains("embeddedTrajectories"));
+    REQUIRE(meta["instances"][0]["trajectory"].contains("mode") == false);
+    REQUIRE(meta["instances"][0]["trajectory"].contains("embeddedIndex") == false);
+    REQUIRE(meta["instances"][0]["trajectory"].contains("trajAtomOffset") == false);
+
+    auto loaded = MlSceneSerializer::load(path);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->instances[0].trajectory.mode == "linked");
+    REQUIRE(loaded->instances[0].trajectory.embeddedIndex == -1);
+    REQUIRE(loaded->instances[0].trajectory.trajAtomOffset == 0u);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("mlscene embedded trajectories round-trip", "[serializer]") {
+    const auto path = std::filesystem::temp_directory_path() / "moleculens_embedded.mlscene";
+    const auto snap = makeEmbeddedSnapshot();
+
+    SaveOptions opts;
+    opts.embedTrajectories = true;
+    REQUIRE(MlSceneSerializer::save(snap, path, opts).has_value());
+
+    auto loaded = MlSceneSerializer::load(path);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->embeddedTrajectories.size() == 1);
+    const auto& e = loaded->embeddedTrajectories[0];
+    REQUIRE(e.frameCount == 2ull);
+    REQUIRE(e.atomCount == 3u);
+    REQUIRE(e.dt == Catch::Approx(1.0f));
+    REQUIRE(e.periodic);
+    REQUIRE(e.positions.size() == 2u * 3u * 3u);
+    for (size_t i = 0; i < e.positions.size(); ++i) {
+        REQUIRE(e.positions[i] == snap.embeddedTrajectories[0].positions[i]);
+    }
+    REQUIRE(e.boxes.size() == 2u * 9u);
+    for (size_t i = 0; i < e.boxes.size(); ++i) {
+        REQUIRE(e.boxes[i] == snap.embeddedTrajectories[0].boxes[i]);
+    }
+    // 实例 ref：mode/embeddedIndex/trajAtomOffset 一并往返
+    const auto& tr = loaded->instances[0].trajectory;
+    REQUIRE(tr.mode == "embedded");
+    REQUIRE(tr.embeddedIndex == 0);
+    REQUIRE(tr.trajAtomOffset == 2u);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("mlscene embedded segment keeps CRC valid", "[serializer]") {
+    const auto linkedPath = std::filesystem::temp_directory_path() / "moleculens_crc_linked.mlscene";
+    const auto embedPath = std::filesystem::temp_directory_path() / "moleculens_crc_embed.mlscene";
+    REQUIRE(MlSceneSerializer::save(makeSnapshot(), linkedPath).has_value());
+
+    SaveOptions opts;
+    opts.embedTrajectories = true;
+    REQUIRE(MlSceneSerializer::save(makeEmbeddedSnapshot(), embedPath, opts).has_value());
+
+    // 内嵌段写在 CRC 之前：CRC 覆盖整段 → load 能通过的本身就证明 CRC 校验通过
+    auto loaded = MlSceneSerializer::load(embedPath);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->embeddedTrajectories.size() == 1);
+    // 文件确实比链接式大（内嵌段真的写进去了）
+    REQUIRE(std::filesystem::file_size(embedPath) >
+            std::filesystem::file_size(linkedPath));
+
+    // 篡改内嵌段 1 字节（末尾 4B 是 CRC，取 -8 落在段内）→ CRC 必须拒绝
+    {
+        std::fstream fs(embedPath, std::ios::in | std::ios::out | std::ios::binary);
+        fs.seekp(-8, std::ios::end);
+        char c = 0x7F;
+        fs.write(&c, 1);
+    }
+    auto tampered = MlSceneSerializer::load(embedPath);
+    REQUIRE_FALSE(tampered.has_value());
+    REQUIRE(tampered.error().code == ErrorCode::CrcError);
+    std::filesystem::remove(linkedPath);
+    std::filesystem::remove(embedPath);
+}
+
+// 标注随场景保存（v2.3）：水盒/标签/箭头/水印往返；空标注不写键。
+TEST_CASE("mlscene annotations round-trip", "[serializer][annotation]") {
+    const auto path = std::filesystem::temp_directory_path() / "moleculens_annot.mlscene";
+    auto snap = makeSnapshot();
+    snap.annotations.box.visible = true;
+    snap.annotations.box.origin = {1.0f, 2.0f, 3.0f};
+    snap.annotations.box.axes = {10.0f, 0.0f, 0.0f, 0.0f, 11.0f, 0.0f, 0.0f, 0.0f, 12.0f};
+    snap.annotations.box.lineWidth = 2.0f;
+    AnnotationLabel label;
+    label.text = "LH-I";
+    label.pos = {4.0f, 5.0f, 6.0f};
+    label.pixelSize = 22.0f;
+    label.leader = false;
+    snap.annotations.labels.push_back(label);
+    AnnotationArrow arrow;
+    arrow.from = {0.0f, 0.0f, 0.0f};
+    arrow.to = {1.0f, 1.0f, 1.0f};
+    arrow.style = 1;
+    arrow.doubleHead = true;
+    snap.annotations.arrows.push_back(arrow);
+    snap.annotations.watermark.visible = true;
+    snap.annotations.watermark.text = "TCBG";
+    snap.annotations.watermark.anchor = 2;
+
+    REQUIRE(MlSceneSerializer::save(snap, path).has_value());
+    auto loaded = MlSceneSerializer::load(path);
+    REQUIRE(loaded.has_value());
+    const auto& an = loaded->annotations;
+    REQUIRE(an.box.visible);
+    REQUIRE(an.box.origin[0] == 1.0f);
+    REQUIRE(an.box.origin[2] == 3.0f);
+    REQUIRE(an.box.axes[4] == 11.0f);
+    REQUIRE(an.box.axes[8] == 12.0f);
+    REQUIRE(an.box.lineWidth == 2.0f);
+    REQUIRE(an.labels.size() == 1u);
+    REQUIRE(an.labels[0].text == "LH-I");
+    REQUIRE(an.labels[0].pos[1] == 5.0f);
+    REQUIRE(an.labels[0].pixelSize == 22.0f);
+    REQUIRE_FALSE(an.labels[0].leader);
+    REQUIRE(an.arrows.size() == 1u);
+    REQUIRE(an.arrows[0].style == 1);
+    REQUIRE(an.arrows[0].doubleHead);
+    REQUIRE(an.watermark.visible);
+    REQUIRE(an.watermark.text == "TCBG");
+    REQUIRE(an.watermark.anchor == 2);
+
+    // 空标注 → 不写 "annotations" 键；读回为空（旧文件同路径）
+    const auto plainPath =
+        std::filesystem::temp_directory_path() / "moleculens_annot_empty.mlscene";
+    auto plain = makeSnapshot();
+    REQUIRE(plain.annotations.empty());
+    REQUIRE(MlSceneSerializer::save(plain, plainPath).has_value());
+    auto plainLoaded = MlSceneSerializer::load(plainPath);
+    REQUIRE(plainLoaded.has_value());
+    REQUIRE(plainLoaded->annotations.empty());
+
+    std::filesystem::remove(path);
+    std::filesystem::remove(plainPath);
 }

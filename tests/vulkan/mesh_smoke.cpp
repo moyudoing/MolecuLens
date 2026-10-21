@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <vector>
 
 #include "engine/cmd/cmd.h"
@@ -74,9 +75,14 @@ TEST_CASE("OffscreenRenderer renders a TriMesh quad", "[vulkan][smoke][mesh]") {
 
     std::vector<uint8_t> pixels;
     REQUIRE(renderer.readbackPixels(pixels, PixelFormat::Rgba8));
+    // 非背景计数（背景参考 = 左上角像素）。不用绝对阈值：离屏颜色附件自 P6 起
+    // 为 _SRGB（写时编码），背景字节值上移，固定阈值会失去判别力。
+    const uint8_t* bgp = pixels.data();
     uint32_t nonBg = 0;
-    for (size_t i = 0; i < pixels.size(); i += 4) {
-        if (pixels[i] > 30 || pixels[i + 1] > 30 || pixels[i + 2] > 30) {
+    for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        if (std::abs(static_cast<int>(pixels[i]) - bgp[0]) > 24 ||
+            std::abs(static_cast<int>(pixels[i + 1]) - bgp[1]) > 24 ||
+            std::abs(static_cast<int>(pixels[i + 2]) - bgp[2]) > 24) {
             ++nonBg;
         }
     }

@@ -89,6 +89,12 @@ public:
     PipelineBuilder& blend(bool enable) { blendEnable_ = enable; return *this; }
     PipelineBuilder& depthTest(bool enable) { depthTest_ = enable; return *this; }
     PipelineBuilder& depthWrite(bool enable) { depthWrite_ = enable; return *this; }
+    // 颜色附件数（默认 1）。深度-only pass（阴影贴图）必须传 **0**——
+    // 与渲染通道的附件数不一致是管线创建失败/校验错误的直接原因。
+    PipelineBuilder& colorAttachments(uint32_t count) {
+        colorAttachments_ = count;
+        return *this;
+    }
     PipelineBuilder& cullMode(VkCullModeFlags mode) { cullMode_ = mode; return *this; }
     PipelineBuilder& frontFace(VkFrontFace face) { frontFace_ = face; return *this; }
     PipelineBuilder& lineWidth(float w) { lineWidth_ = w; return *this; }
@@ -106,6 +112,7 @@ private:
     std::vector<VkVertexInputAttributeDescription> vertexAttrs_;
     std::vector<VkDescriptorSetLayout> descriptorLayouts_;
     VkPushConstantRange pushRange_{};
+    uint32_t colorAttachments_ = 1;
     bool blendEnable_ = false;
     bool depthTest_ = true;
     bool depthWrite_ = true;
