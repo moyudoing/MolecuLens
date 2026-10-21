@@ -38,12 +38,13 @@ ctest --test-dir build                 # 单元测试
 - **渲染风格（v2.2）**：环绕柔光 + `fwidth` 像素轮廓 + 背景色距离淡出；四套预设（默认/柔和/出版/鲜明），
   出版预设一键白底+关阴影+强轮廓，GUI「设置 → 渲染风格」与 CLI `--style` 共用
 - **时间轴与轨迹**（M3）：时间驱动播放、选区循环、帧增量上传
-- **工程完备**：Catch2 测试（最近记录 177 例 / 193,713 断言，33 文件）、spdlog 分级日志、目录粒度检查、三平台构建
+- **工程完备**：Catch2 测试（最近记录 182 例 / 193,749 断言，34 文件）、spdlog 分级日志、目录粒度检查、三平台构建
 
 ## 项目结构
 
-> 字体：`data/font/OPPO B.ttf`（**注意文件名带空格**）。CMake 构建时自动拷贝到
-> 可执行目录 `font/OPPO_B.ttf`（下划线名）；缺失时运行期回退系统字体（微软雅黑等）。
+> 字体：`data/font/NotoSansSC-Medium-subset.ttf`（Noto Sans SC 子集，SIL OFL 1.1，见
+> `data/font/OFL.txt`；生成脚本 `tools/subset_font.py`）。CMake 构建时自动拷贝到可执行目录
+> `font/`；缺失时运行期回退系统字体（微软雅黑等）。
 
 ```
 CMakeLists.txt / vcpkg.json / cmake/ / shaders/   # 构建与着色器（SPIR-V 内嵌）

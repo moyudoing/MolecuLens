@@ -11,13 +11,16 @@ add_executable(moleculens-cli
 )
 target_link_libraries(moleculens-cli PRIVATE moleculens_engine CLI11::CLI11)
 
-# 字体资源：拷贝到可执行目录 font/OPPO_B.ttf（ESP 导出叠加的 TTF 文字用；缺失时回退位图字体）
+# 字体资源：拷贝到可执行目录 font/NotoSansSC-Medium-subset.ttf（ESP 导出叠加的 TTF 文字用；缺失时回退位图字体）
 if(EXISTS ${MOLECULENS_FONT_SRC})
     add_custom_command(TARGET moleculens-cli POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
             $<TARGET_FILE_DIR:moleculens-cli>/font
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${MOLECULENS_FONT_SRC}
-            $<TARGET_FILE_DIR:moleculens-cli>/font/OPPO_B.ttf
-        COMMENT "Copying OPPO B font for CLI overlay")
+            $<TARGET_FILE_DIR:moleculens-cli>/font/NotoSansSC-Medium-subset.ttf
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/data/font/OFL.txt
+            $<TARGET_FILE_DIR:moleculens-cli>/font/OFL.txt
+        COMMENT "Copying Noto Sans SC subset font + OFL.txt for CLI overlay")
 endif()

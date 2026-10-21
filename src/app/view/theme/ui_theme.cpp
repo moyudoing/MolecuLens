@@ -202,12 +202,12 @@ bool UITheme::loadFont(const char* fontPath) {
         return true;
     }
     ImGuiIO& io = ImGui::GetIO();
-    // 中文 Glyph Ranges（主方案 §7.6：OPPO_B.ttf 中文）
+    // 中文 Glyph Ranges（主方案 §7.6；默认字体 Noto Sans SC 子集，见 data/font/README.txt）
     // 注意：ranges 必须持久——imgui 的字体配置保存 GlyphRanges 指针（不复制），
     // 局部数组销毁后悬垂会导致运行期断言（imgui_draw.cpp "glyph range array
     // persistent"）。static 保证生命周期与进程一致。
     // 范围用"常用简体字"（~3500 字）而非全量（~2.5 万字形）：
-    // 全量构建 atlas 巨大（OPPO B 全量中文可达数十 MB 纹理），启动明显卡顿。
+    // 全量构建 atlas 巨大（全量 CJK 可达数十 MB 纹理），启动明显卡顿。
     static ImVector<ImWchar> ranges;
     if (ranges.empty()) {
         ImFontGlyphRangesBuilder builder;
@@ -219,10 +219,15 @@ bool UITheme::loadFont(const char* fontPath) {
         builder.AddChar(0x00D7);   // × 乘号（关闭按钮）
         builder.AddChar(0x00B7);   // · 间隔号
         builder.AddChar(0x2022);   // • 项目符号
-        // 这里不再 AddChar(0x25A1/0x25B6/0x23F8)：OPPO_B.ttf 在 U+2000..U+2BFF
-        // 区间只有 22 个码点（引号/破折号/• ℃ ™ 之类），**没有**任何几何符号。
-        // 加进范围也拿不到字形，只会让 imgui 记一个空槽仍渲染成方块；窗口按钮
-        // 与体系展开符因此都改为用绘制列表画（见 renderMainMenuBar / mol_list_tool）。
+        // 新默认字体（Noto Sans SC 子集）已含这两个字形（旧 OPPO_B 没有，只能改文案
+        // 或用绘制列表）；module 说明里的 "→" 与折叠三角 "▾" 此前是方块，这里补上。
+        builder.AddChar(0x2192);   // → 箭头
+        builder.AddChar(0x25BE);   // ▾ 折叠指示三角
+        // 这里不再 AddChar(0x25A1/0x25B6/0x23F8)：旧字体 OPPO_B 在 U+2000..U+2BFF
+        // 区间只有 22 个码点，没有任何几何符号——加进范围也拿不到字形，只会让 imgui
+        // 记一个空槽仍渲染成方块；窗口按钮与体系展开符因此都改为用绘制列表画
+        // （见 renderMainMenuBar / mol_list_tool）。新字体（Noto Sans SC 子集）已覆盖
+        // 这些符号，但绘制列表方案更清晰且不增 atlas，保持不变。
         // 界面文案里落在"常用简体 2500 字"之外的汉字——该表是 imgui 内置的
         // 固定子集，下列字不在其中，不补就会渲染成方块（"渲染设置"的"渲"）。
         // 新增界面文案后如有方块字，按同样办法补在这里。
@@ -238,11 +243,12 @@ bool UITheme::loadFont(const char* fontPath) {
         // 常用字表内。补字前务必用 tools/check_font_glyphs.py 确认字体确有该字形，
         // 否则补进范围只会得到空槽、仍旧是方块。
         builder.AddText("屏帧徽栅渲溶糙轴辑逻钮阈拓枚耦擎氢廓离嵌拟棱浏锚菱叠");
-        // ⚠ 补字**只对字体真有字形的码点有效**。OPPO_B.ttf 只有 7251 个码点，
+        // ⚠ 补字**只对字体真有字形的码点有效**。旧字体 OPPO_B 只有 7251 个码点，
         // 几何符号/箭头/希腊字母基本没有（Δ ← → 都不在 cmap 里）→ 补进范围只会
-        // 让 imgui 记一个空槽，仍旧渲染成方块。这类字符必须**改文案**：
-        // 界面里一律用 ASCII "->" 而不是 "→"，"dt" 而不是 "Δt"。
-        // 判定某字符该"补范围"还是"改文案"：tools/check_font_glyphs.py。
+        // 让 imgui 记一个空槽，仍旧渲染成方块。这类字符当时必须**改文案**：
+        // 界面一律用 ASCII "->" 而不是 "→"，"dt" 而不是 "Δt"。
+        // 现在的默认字体（Noto Sans SC 子集）已覆盖箭头/希腊字母/Å，这些规避文案
+        // 仍保留（不改动界面），如需使用可直接 AddChar——判定见 tools/check_font_glyphs.py。
         builder.BuildRanges(&ranges);
     }
 
@@ -262,10 +268,9 @@ bool UITheme::loadFont(const char* fontPath) {
         GetModuleFileNameA(nullptr, exePath, MAX_PATH);
         const std::string exeDir = std::filesystem::path(exePath).parent_path().string();
         const std::string cands[] = {
-            "data/font/OPPO_B.ttf",
-            "data/font/OPPO_B.ttf",
-            "font/OPPO_B.ttf",
-            exeDir + "/font/OPPO_B.ttf",
+            "data/font/NotoSansSC-Medium-subset.ttf",
+            "font/NotoSansSC-Medium-subset.ttf",
+            exeDir + "/font/NotoSansSC-Medium-subset.ttf",
             "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/simhei.ttf",
         };
@@ -293,23 +298,64 @@ bool UITheme::loadFont(const char* fontPath) {
     // 字号：16/20/13 → 18/22/14。1920×1080 下 16 px 中文偏小，密集面板上
     // "看着不清晰"主要来自字号而非抗锯齿；18 px 在同样布局里仍放得下。
     // RasterizerMultiply 略微加粗笔画，改善浅色主题下细字发虚的问题。
-    ImFontConfig cfg;
-    cfg.RasterizerMultiply = 1.06f;
-    ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), 18.0f, &cfg, ranges.Data);
+    //
+    // 缺字回退：把系统字体（微软雅黑）**合并**进同一 ImFont（MergeMode 会并入
+    // "最近一次 AddFont"），只补拉丁补充/希腊/箭头几个小区间，不引入整套 CJK。
+    // 默认字体 Noto Sans SC 子集已含 Å(U+00C5)/希腊字母/箭头，这里保留合并仅作
+    // 兜底（换回旧字体或用户自备缺字字体时仍能显示）。
+    // 因此必须"主字体 + 回退"成对添加，不能先把三档主字体都加完。
+    const char* fallback = nullptr;
+    for (const char* cand : {"C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc",
+                             "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/arial.ttf"}) {
+        if (fileExists(cand)) {
+            fallback = cand;
+            break;
+        }
+    }
+    static ImVector<ImWchar> fallbackRanges;
+    if (fallback != nullptr && fallbackRanges.empty()) {
+        static const ImWchar kFallback[] = {
+            0x00A0, 0x00FF,   // 拉丁补充：Å × · ° ± 等
+            0x0370, 0x03FF,   // 希腊字母：Δ α β γ λ 等
+            0x2190, 0x21FF,   // 箭头：← → ↑ ↓
+            0x2200, 0x22FF,   // 数学算子：≈ ≤ ≥ 等
+            0,
+        };
+        // ImVector 没有 assign：逐项 push（含 0 终止符；ImGui 读的是 Data 指针）
+        for (size_t i = 0; i < sizeof(kFallback) / sizeof(kFallback[0]); ++i) {
+            fallbackRanges.push_back(kFallback[i]);
+        }
+    }
+    const auto addFontWithFallback = [&](float size, ImFont** out) -> ImFont* {
+        ImFontConfig cfg;
+        cfg.RasterizerMultiply = 1.06f;
+        ImFont* f = io.Fonts->AddFontFromFileTTF(path.c_str(), size, &cfg, ranges.Data);
+        if (f != nullptr && fallback != nullptr) {
+            ImFontConfig merge;
+            merge.MergeMode = true;   // 并入上一个 AddFont 的字体
+            merge.RasterizerMultiply = 1.06f;
+            io.Fonts->AddFontFromFileTTF(fallback, size, &merge, fallbackRanges.Data);
+        }
+        if (out != nullptr) {
+            *out = f;
+        }
+        return f;
+    };
+
+    ImFont* font = addFontWithFallback(18.0f, &fontDefault_);
     if (!font) {
         return false;
     }
-    // 三档字号（主方案 §7.6：正文 / 标题 / 辅助）
     io.FontDefault = font;
-    fontDefault_ = font;
-    ImFontConfig cfgTitle = cfg;
-    fontTitle_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 22.0f, &cfgTitle,
-                                             ranges.Data);
-    ImFontConfig cfgSmall = cfg;
-    fontSmall_ = io.Fonts->AddFontFromFileTTF(path.c_str(), 14.0f, &cfgSmall,
-                                             ranges.Data);
+    addFontWithFallback(22.0f, &fontTitle_);
+    addFontWithFallback(14.0f, &fontSmall_);
+
     fontsLoaded_ = true;
-    spdlog::info("[ui] font loaded: {} (18/22/14 px)", path);
+    spdlog::info("[ui] font loaded: {} (18/22/14 px{})", path,
+                 fallback != nullptr ? ", with fallback" : "");
+    if (fallback != nullptr) {
+        spdlog::info("[ui] font fallback merged: {} (Å / Greek / arrows)", fallback);
+    }
     return true;
 }
 

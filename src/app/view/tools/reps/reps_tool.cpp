@@ -571,8 +571,9 @@ void RepsTool::renderDrawStyleTab(int32_t repId) {
         if (ImGui::Checkbox(tr("整体系合并表面"), &edit.systemSurface)) {
             onChange();
         }
-        // 用 ASCII "->" 而非 "->"：OPPO_B.ttf 的 cmap 里没有 U+2192，
-        // 补进 glyph ranges 也拿不到字形，只会渲染成方块（见 tools/check_font_glyphs.py）
+        // 用 ASCII "->" 而非 "→"：旧字体（OPPO_B）的 cmap 里没有 U+2192，
+        // 补进 glyph ranges 也拿不到字形，只会渲染成方块（见 tools/check_font_glyphs.py）；
+        // 现字体已覆盖，文案保持不变。
         UITheme::helpMarker(tr("整个体系生成一个表面，而非每个分子一个。\n" "溶剂化体系差异极大（实测 md.gro：QuickSurf 846 -> 170 ms，\n" "命令流 316 MB -> 19.8 MB）。"));
     }
 

@@ -515,7 +515,7 @@ bool ViewControl::initImGuiBackends() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     // 字体必须先于 Vulkan 后端初始化（CreateFontsTexture 使用 io.Fonts 当前字体，
     // 先加载字体再建纹理，主方案 §7.6）
-    UITheme::loadFont("font/OPPO_B.ttf");
+    UITheme::loadFont("font/NotoSansSC-Medium-subset.ttf");
     // GLFW 后端
     if (!ImGui_ImplGlfw_InitForVulkan(window_, true)) {
         return false;

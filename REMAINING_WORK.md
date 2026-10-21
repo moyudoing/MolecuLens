@@ -68,7 +68,7 @@ $env:PYTHONIOENCODING="utf-8"
   判断依据：日志里出现 `<target>.vcxproj -> ...exe` 产出行。
 - **运行期 DLL**：因上一条，`fmt.dll` / `spdlog.dll` / `glfw3.dll` 不会自动拷贝，缺了就 `0xC0000135`。
   从 `build\vcpkg_installed\x64-windows\bin`（Release）或 `...\debug\bin`（Debug）复制到 exe 旁。
-- **测试**：`build\tests\<Config>\moleculens_tests.exe`，最近记录 **177 例 / 193,713 断言全过**（2026-10-22 01:20）；
+- **测试**：`build\tests\<Config>\moleculens_tests.exe`，最近记录 **182 例 / 193,749 断言全过**（2026-10-22 02:36，字体替换后复跑）；
   本轮文档更新没有重新构建，改代码后必须复跑。
 - **基准**：`pwsh -File tools\run_bench.ps1 -Config Release` → `other\bench_out\bench_report.md`；
   引擎级基准是 `moleculens_bench`（headless GPU，`--rep/--material/--png/--verbose`）。

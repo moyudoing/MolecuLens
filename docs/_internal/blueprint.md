@@ -49,7 +49,7 @@
 - 背景 `#EEF2F7`，面板 `#FFFFFF`，描边 `#DCE3EC`，正文 `#1F2937`，次要 `#64748B`。
 - 主色 `#2563EB`（蓝），辅色 `#0EA5E9`（青），成功 `#10B981`，警告 `#F59E0B`，危险 `#EF4444`。
 - 圆角 10px（卡片）/ 8px（控件）；卡片投影极轻；标题 15px semibold，正文 13px，注 11px。
-- 字体：OPPO_B.ttf（中文），ImGui 三档字号（16/20/13 由 UITheme 管理）。
+- 字体：Noto Sans SC 子集（OFL 1.1，见 `data/font/README.txt`），ImGui 三档字号（16/20/13 由 UITheme 管理）。
 - 风格关键词：Lab / Instrument / Clean / Light-first，参考 Multiwfn 的"参数密度"与
   GXNU-MolStudio 的浅色科技风 QSS（#E4EAF2 背景、白卡片、#1565C0 标题）。
 

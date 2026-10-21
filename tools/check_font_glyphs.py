@@ -5,7 +5,7 @@
     check_glyph_coverage.py 回答"界面文案里哪些码点没被 imgui 的 glyph ranges 覆盖"；
     但"范围里加了字" ≠ "能画出字" —— 字体文件本身没有该字形时，imgui 只会记一个
     空槽，仍然渲染成方块（本工程已在 U+25A1/0x25B6 这类几何符号上踩过：
-    OPPO_B.ttf 在 U+2000..U+2BFF 区间只有引号/破折号/• ℃ ™ 之类，
+    旧默认字体 OPPO_B 在 U+2000..U+2BFF 区间只有引号/破折号/• ℃ ™ 之类，
     没有任何几何符号 —— 窗口按钮因此改为用绘制列表画）。
 
 所以修法有两条，必须先分清走哪条：
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DEFAULT_FONT = REPO / "data/font/OPPO_B.ttf"
+DEFAULT_FONT = REPO / "data/font/NotoSansSC-Medium-subset.ttf"
 
 # 默认待查字符：来自 check_glyph_coverage.py 的输出
 DEFAULT_CHARS = "Δ←→拓枚耦"

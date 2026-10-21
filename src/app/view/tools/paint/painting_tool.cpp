@@ -22,7 +22,7 @@ void PaintingTool::render(DataManager* dm, MolScene* scene) {
     ImGui::Dummy(ImVec2(0, 8));
     ImGui::Text(tr("快捷键："));
     ImGui::BulletText(tr("F 聚焦选中 / R 重置相机 / H 切换 HUD"));
-    // 不用 "←→"：OPPO_B.ttf 无 U+2190/U+2192 字形（补 ranges 无效，只会留空槽）
+    // 不用 "←→"：旧字体（OPPO_B）无 U+2190/U+2192 字形；现字体已覆盖，文案保持不变
     ImGui::BulletText(tr("Space 播放暂停 / Shift+左右方向键 帧步进"));
     ImGui::BulletText(tr("Ctrl+O 打开文件"));
 }

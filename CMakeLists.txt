@@ -39,11 +39,8 @@ if(MOLECULENS_QUICKSURF_CUDA)
 endif()
 set(MOLECULENS_MSAA 4 CACHE STRING "MSAA samples")
 
-# —— 字体资源（主方案 §7.6：OPPO_B.ttf；支持带空格文件名）——
-set(MOLECULENS_FONT_SRC "${CMAKE_SOURCE_DIR}/data/font/OPPO B.ttf")
-if(NOT EXISTS ${MOLECULENS_FONT_SRC})
-    set(MOLECULENS_FONT_SRC "${CMAKE_SOURCE_DIR}/data/font/OPPO_B.ttf")
-endif()
+# —— 字体资源（Noto Sans SC 子集，SIL OFL 1.1；生成方式见 tools/subset_font.py）——
+set(MOLECULENS_FONT_SRC "${CMAKE_SOURCE_DIR}/data/font/NotoSansSC-Medium-subset.ttf")
 
 # —— 警告等级（验收：零警告）——
 if(MSVC)

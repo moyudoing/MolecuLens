@@ -93,6 +93,9 @@ if(EXISTS ${MOLECULENS_FONT_SRC})
             $<TARGET_FILE_DIR:moleculens_app>/font
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${MOLECULENS_FONT_SRC}
-            $<TARGET_FILE_DIR:moleculens_app>/font/OPPO_B.ttf
-        COMMENT "Copying OPPO B font")
+            $<TARGET_FILE_DIR:moleculens_app>/font/NotoSansSC-Medium-subset.ttf
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/data/font/OFL.txt
+            $<TARGET_FILE_DIR:moleculens_app>/font/OFL.txt
+        COMMENT "Copying Noto Sans SC subset font + OFL.txt")
 endif()

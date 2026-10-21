@@ -38,9 +38,10 @@ std::string displayName(const std::string& name, const char* kind, size_t index)
 }
 
 // 展开/收起指示三角（绘制列表绘制）。
-// 不写成 "▶"/"▼" 文本：字体 OPPO_B.ttf 只含 22 个 U+2000..U+2BFF 码点、
+// 不写成 "▶"/"▼" 文本：旧默认字体 OPPO_B 只含 22 个 U+2000..U+2BFF 码点、
 // 其中没有任何几何符号，写字符只会得到方块（加字形范围也没用——范围只管
-// "向字体要哪些码点"，字体没有该字形照样是空的）。
+// "向字体要哪些码点"，字体没有该字形照样是空的）。现字体已覆盖这些符号，
+// 但绘制列表方案更省 atlas，保持不变。
 void drawExpandArrow(ImDrawList* dl, ImVec2 center, float size, bool expanded) {
     const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
     if (expanded) {   // ▼
@@ -103,7 +104,7 @@ void MolListTool::render(DataManager* dm, MolScene* scene) {
         std::string name = displayName(dm->systemName(si), "system", si);
         const bool isCur = (selectedSystem_ == si);
         const bool expanded = (expandedSystem_ == si);
-        // 展开指示三角用绘制列表画，不写字符：字体（OPPO_B.ttf）不含
+        // 展开指示三角用绘制列表画，不写字符：旧字体（OPPO_B）不含
         // ▶/▼ 等几何符号字形，直接写成文本会渲染成方块——与标题栏的
         // 最大化/还原按钮同一处理办法。行首用空格预留出箭头的位置。
         std::string header = "     " + name;

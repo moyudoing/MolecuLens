@@ -181,7 +181,8 @@ void TimeAxis::frameInfoText(char* buf, size_t n) const {
     if (showFps && fps_ > 0.0f) {
         std::snprintf(fps, sizeof(fps), "   %.0f FPS", static_cast<double>(fps_));
     }
-    // 用 "dt" 而非 "Δt"：OPPO_B.ttf 的 cmap 里没有 U+0394（希腊字母 Δ）
+    // 用 "dt" 而非 "Δt"：旧默认字体（OPPO_B）的 cmap 里没有 U+0394（希腊字母 Δ）；
+    // 现字体（Noto Sans SC 子集）已覆盖 Δ，文案保持不变。
     std::snprintf(buf, n, "%s %llu / %llu   T %.1f / %.1f ps   dt %.2f ps   %.0f FPS%s",
                   tr("帧"),
                   static_cast<unsigned long long>(count > 0 ? frame + 1 : 0),

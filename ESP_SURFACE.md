@@ -61,7 +61,7 @@
 | `src/io/cube/cube_parser.{h,cpp}` | Gaussian cube 解析（Bohr→Å，快速扫描），`CubeFileReader` 注册为 `.cube/.cub` |
 | `src/engine/style/espsurface/esp_surface.{h,cpp}` | Marching Cubes 等值面 + ESP 三线性采样 + 7 色标 + 极值点检测 + LRU 缓存 + overlay 数据 |
 | `src/engine/export/overlay/esp_overlay_raster.h` | 色标条/极值标注 CPU 栅格化（CLI 出图与 GUI 导出共用；TTF 文字 + 描边，5x7 位图回退） |
-| `src/engine/export/overlay/text_raster_ttf.{h,cpp}` | TTF 文字光栅化（stb_truetype + OPPO B.ttf，抗锯齿，导出图文字清晰） |
+| `src/engine/export/overlay/text_raster_ttf.{h,cpp}` | TTF 文字光栅化（stb_truetype + Noto Sans SC 子集，抗锯齿，导出图文字清晰） |
 | `src/engine/style/style_registry.*` / `base_style.h` | 新表示 `RepresentationType::EspSurface` 注册 |
 | `src/cli/cmd/render/render_cmd.cpp` | `--esp` 等参数与叠加层调用 |
 | `src/persist/mlscene/*` + `src/engine/serialize/scene_bridge.cpp` | ESP 参数随 `.mlscene` 持久化（v3 可选键，旧文件兼容） |
