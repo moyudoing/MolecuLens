@@ -59,6 +59,7 @@ Thumbs.db
 __pycache__/
 build_agent/
 build_style/
+build_*/
 vcpkg_installed/
 _test/
 .monitor/
