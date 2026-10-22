@@ -924,7 +924,7 @@ bool MolScene::handleMouse(float dx, float dy, int button) {
     //   根因之一。下面直接用 ImGuiMouseButton_* 常量，杜绝同类错位。
     const float sensitivity = 0.006f;
     if (button == ImGuiMouseButton_Left) {
-        // 左键轨道：**抓住分子拖**的手感（VMD/PyMOL 一致）：
+        // 左键轨道：**抓住分子拖**的手感（与主流查看器一致）：
         //   · 水平：拖右 → 相机向左绕（分子右侧转过来），与 v2.13 用户要求一致，
         //     所以 dx 取负；
         //   · 垂直：ImGui 的 dy 向下为正。pitch 增大 = 相机升高（从上方看），
