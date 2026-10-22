@@ -65,6 +65,10 @@ public:
     //   DIRTY_COORDS（仅帧切）                                   → 只重放坐标段
     //   DIRTY_PROPERTIES（背景/光照/雾/缩放）                     → 无需重建（只进 UBO）
     void update(float dt);
+    // 当前轨迹帧号：表示生成/表面预取用（不影响命令流内容，只作缓存键）。
+    // 由 MolScene 每帧从时间轴同步；无轨迹或静态场景可保持 0。
+    void setTrajectoryFrame(uint64_t frame) { frameIndex_ = frame; }
+    [[nodiscard]] uint64_t trajectoryFrame() const { return frameIndex_; }
     void prepare();                       // ★ Stage1: 生成命令流（按脏位选重建粒度）
     void draw(const RenderView& view);    // ★ Stage2: 命令流 → 后端执行
 
@@ -79,6 +83,15 @@ public:
     }
     // 是否正在等待后台表面生成（视口显示"生成中…"、面板提示用）。
     [[nodiscard]] bool surfaceGenerationPending() const;
+
+    // —— 运动中冻结坐标相关的表面几何（轨迹播放/拖时间轴）——
+    // 冻结时 QuickSurf/体系 vdW 表面直接复用上一张网格，不再逐帧重算（md.gro 实测
+    // 单次 ~730 ms，不冻结会把播放拖到 1–3 FPS）。球棍/线框仍逐帧更新；解冻时
+    // 自动触发一次重建，把表面刷到当前帧。
+    void setSurfaceFreeze(bool frozen);
+    [[nodiscard]] bool surfaceFrozen() const {
+        return freezeSurfaces_.load(std::memory_order_relaxed);
+    }
 
     // 导出线程专用：先等未完成的表面任务写完缓存，再同步重建命令流；
     // 返回时命令流已包含最新表面（导出不会被"生成中"的旧画面污染）。
@@ -132,13 +145,16 @@ private:
     entity::FrameData frameData_;
     const std::vector<Representation>* representations_ = nullptr;   // 非拥有
     uint64_t repsRevision_ = 0;      // 绑定时的表示修订号（变更即触发重建）
+    uint64_t meshSerialCounter_ = 0; // 网格内容修订号计数（仅全量重建递增）
     bool needsRebuild_ = true;       // 结构/实例/表示变更 → 整条命令流重建
     bool needsCoords_ = false;       // 仅坐标变更 → 尝试坐标重放
     bool lastWasReplay_ = false;     // 上次 prepare 实际走了重放路径
+    uint64_t frameIndex_ = 0;       // 时间轴当前帧（表面预取的缓存键）
 
     // —— 异步表面生成状态 ——
     std::atomic<bool> asyncSurface_{false};       // 异步模式（GUI 打开）
     std::atomic<bool> waitingForSurface_{false};  // 正在等后台表面结果（保留旧命令流）
+    std::atomic<bool> freezeSurfaces_{false};     // 运动中冻结坐标相关表面
     bool forceSyncRebuild_ = false;               // 本次重建强制同步（导出线程用）
     RenderStyle style_{};                         // 渲染风格（UBO only；默认值）
     std::chrono::steady_clock::time_point surfaceWaitStart_{};   // 等待起点（诊断日志用）

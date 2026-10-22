@@ -50,6 +50,7 @@ constexpr RepTypeKey kRepTypeKeys[] = {
     {engine::RepresentationType::Plate, "plate"},
     {engine::RepresentationType::Diamond, "diamond"},
     {engine::RepresentationType::DotCloud, "dotcloud"},
+    {engine::RepresentationType::Polyhedron, "polyhedron"},
 };
 
 const char* repTypeKey(engine::RepresentationType t) {

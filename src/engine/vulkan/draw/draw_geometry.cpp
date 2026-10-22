@@ -197,10 +197,14 @@ void FrameGpuBuffers::destroy() {
 
 void drawGeometry(VkCommandBuffer cmd, VulkanDevice& device, const PipelineSet& pipelines,
                   const DrawList& draw, FrameGpuBuffers& gpu, const SharedMeshes& meshes,
-                  VkDescriptorSet globalSet, uint64_t listRevision, const RenderView* view) {
+                  VkDescriptorSet globalSet, uint64_t listRevision, uint64_t meshRevision,
+                  const RenderView* view) {
     // 内容未变（相机移动 / UI 重绘等不改几何的帧）→ 复用上次上传的缓冲，
     // 不重传任何实例/顶点数据。缓冲仍在（shutdown 才销毁），内容逐字节一致。
     bool reupload = gpu.uploadRevision != listRevision;
+    // 网格缓冲单独判断：坐标重放时 serial 每帧变（球棍在动），但 TriMesh 字节
+    // 未变（表面冻结）→ 只重传实例，不重传表面顶点/索引，也不重复烘焙材质。
+    const bool meshReupload = gpu.meshUploadRevision != meshRevision;
     // 本帧实际提交的绘制调用数（ground truth，供性能观测：批处理是否生效）
     gpu.drawCalls = 0;
 
@@ -332,7 +336,7 @@ void drawGeometry(VkCommandBuffer cmd, VulkanDevice& device, const PipelineSet& 
     // 性能：合并 + 材质烘焙只在命令流修订号变化时执行一次；未变帧直接复用
     // 缓存的 meshRanges（此前无论内容是否变化，每帧都会把全部网格顶点复制并
     // 重新烘焙一遍 —— QuickSurf 表面几十万顶点时静止帧也要白白复制十几 MB）。
-    if (reupload) {
+    if (meshReupload) {
         for (auto& r : gpu.meshRanges) {
             r = FrameGpuBuffers::MeshDrawRange{};
         }
@@ -465,6 +469,7 @@ void drawGeometry(VkCommandBuffer cmd, VulkanDevice& device, const PipelineSet& 
 
     // 记录本次内容来源：下一帧同修订号即跳过上述全部上传
     gpu.uploadRevision = listRevision;
+    gpu.meshUploadRevision = meshRevision;
 }
 
 } // namespace moleculens::engine

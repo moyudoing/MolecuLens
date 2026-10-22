@@ -196,7 +196,7 @@ TEST_CASE("CPK(Spacefill) uses scaled vdW radius (distinct from Vdw)", "[engine]
 TEST_CASE("style table covers every RepresentationType with no gap", "[engine][rep]") {
     using engine::RepresentationType;
     const int count = static_cast<int>(RepresentationType::Count);
-    REQUIRE(count == 16);   // 8 通用 + 4 骨架 + ESP + 平板 + 菱形 + 点云
+    REQUIRE(count == 17);   // 8 通用 + 4 骨架 + ESP + 平板 + 菱形 + 点云 + 多面体
     for (int i = 0; i < count; ++i) {
         const auto t = static_cast<RepresentationType>(i);
         INFO("RepresentationType index " << i);
@@ -722,12 +722,22 @@ std::vector<uint8_t> renderModes(const engine::SceneCommandList& list) {
 
 } // namespace
 
-TEST_CASE("Diamond emits one octahedron per residue", "[engine][rep][diamond]") {
-    BackboneFixture fx(3);   // 3 残基 × 3 原子
+TEST_CASE("Polyhedron emits one icosahedron per heavy atom",
+          "[engine][rep][polyhedron]") {
+    BackboneFixture fx(2);   // 6 个重原子
+    std::vector<bool> mask(fx.atomCount(), true);
+    const auto list = fx.run(engine::RepresentationType::Polyhedron, mask);
+    // 20 面/原子 × 6 = 120 三角形
+    REQUIRE(countMeshTriangles(list) == 120);
+    REQUIRE(countCmd(list, engine::Cmd::SphereInst) == 0);
+}
+
+TEST_CASE("Diamond emits one octahedron per heavy atom", "[engine][rep][diamond]") {
+    BackboneFixture fx(3);   // 3 残基 × 3 重原子（N/C/CA，无 H）
     std::vector<bool> mask(fx.atomCount(), true);
     const auto list = fx.run(engine::RepresentationType::Diamond, mask);
-    // 每个残基一颗八面体 = 8 三角形；3 残基 → 24 三角形
-    REQUIRE(countMeshTriangles(list) == 24);
+    // 每个非氢原子一颗八面体 = 8 三角形；9 个重原子 → 72 三角形
+    REQUIRE(countMeshTriangles(list) == 72);
     REQUIRE(countCmd(list, engine::Cmd::SphereInst) == 0);
     REQUIRE(countCmd(list, engine::Cmd::CylinderInst) == 0);
 }

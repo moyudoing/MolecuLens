@@ -329,43 +329,84 @@ bool SceneStructure::applyTrajectoryFrame(uint32_t instanceIndex, uint64_t frame
     const auto& positions = inst.trajectory->frames[frame].positions;
 
     bool primaryOk = false;
+    bool wroteAny = false;
     // 暂存缓冲提到循环外：多实例体系（md.gro 是 2042 个实例）时每帧都要为每个
     // 实例做一次 vector 分配 —— 实测这是帧切最贵的一段。提到外面后 capacity 在
     // 实例之间复用（同类实例原子数相近），不再逐实例分配/释放。
     std::vector<glm::vec3> world;
+    // 段起点随 instances_ 顺序**增量**推进：旧实现每实例调 writeFramePositions
+    // → globalAtomBase(i) 内部 O(i) 累加 → 整体 O(n²)（2042 实例实测 23 ms/帧）。
+    // 整段 O(n)，脏位/坐标版本号只置一次（语义与逐实例置脏等价）。
+    uint32_t base = 0;
     for (uint32_t i = 0; i < instances_.size(); ++i) {
         const auto& mi = instances_[i];
-        if (mi.trajectory.get() != shared) {
-            continue;
-        }
         const size_t n = structuresPool_[mi.structureIndex].elements.size();
+        const bool sharedTraj = mi.trajectory.get() == shared;
         // 尺寸校验：帧坐标长度不足以覆盖本实例的切片时拒绝写入。
         // （多帧 PDB 曾因"拓扑多采了其它 model 的原子、帧只有 1/3 长度"而静默
         //  拒绝写入 → 帧切永远不动；此处把"静默无反应"变成可判定的失败。）
         const size_t off = mi.trajAtomOffset;
-        if (off + n > positions.size()) {
-            continue;
+        if (sharedTraj && off + n <= positions.size() &&
+            static_cast<size_t>(base) + n <= coordsSoA_.positions.size()) {
+            // 与静态几何路径共用同一变换合成（曾因此处漏乘体系位姿而漂移）
+            const glm::mat4 m = instanceWorldMatrix(*this, mi);
+            world.resize(n);
+            for (size_t k = 0; k < n; ++k) {
+                world[k] = positions[off + k];
+            }
+            // 补齐跨盒子边界的分子**再**做位姿变换：轨迹文件（XTC/DCD）的坐标同样是
+            // wrapped 的，若不补齐，播放到该帧时分子又会被画成长棍（结构文件补齐了、
+            // 逐帧坐标没补齐 = 只有首帧正常，播放后立刻变形）。
+            unwrapAroundFirst(world.data(), world.size(),
+                              inst.trajectory->frames[frame].box);
+            for (size_t k = 0; k < n; ++k) {
+                coordsSoA_.positions[base + k] =
+                    glm::vec3(m * glm::vec4(world[k], 1.0f));
+            }
+            wroteAny = true;
+            if (i == instanceIndex) {
+                primaryOk = true;
+            }
         }
-        // 与静态几何路径共用同一变换合成（曾因此处漏乘体系位姿而漂移）
-        const glm::mat4 m = instanceWorldMatrix(*this, mi);
-        world.resize(n);
-        for (size_t k = 0; k < n; ++k) {
-            world[k] = positions[off + k];
-        }
-        // 补齐跨盒子边界的分子**再**做位姿变换：轨迹文件（XTC/DCD）的坐标同样是
-        // wrapped 的，若不补齐，播放到该帧时分子又会被画成长棍（结构文件补齐了、
-        // 逐帧坐标没补齐 = 只有首帧正常，播放后立刻变形）。
-        unwrapAroundFirst(world.data(), world.size(),
-                          inst.trajectory->frames[frame].box);
-        for (size_t k = 0; k < n; ++k) {
-            world[k] = glm::vec3(m * glm::vec4(world[k], 1.0f));
-        }
-        writeFramePositions(i, world);
-        if (i == instanceIndex) {
-            primaryOk = true;
-        }
+        base += static_cast<uint32_t>(n);
+    }
+    if (wroteAny) {
+        ++coordsSoA_.version;
+        setDirty(DIRTY_COORDS);
     }
     return primaryOk;
+}
+
+bool SceneStructure::buildWorldPositionsForFrame(uint64_t frame,
+                                                 std::vector<glm::vec3>& out) const {
+    out.clear();
+    out.reserve(coordsSoA_.positions.size());
+    for (const auto& mi : instances_) {
+        const size_t n = structuresPool_[mi.structureIndex].elements.size();
+        const size_t base = out.size();
+        out.resize(base + n, glm::vec3(0.0f));
+
+        const Timestep* ts = nullptr;
+        if (mi.trajectory && !mi.trajectory->frames.empty()) {
+            const uint64_t f = std::min<uint64_t>(frame, mi.trajectory->frames.size() - 1);
+            ts = &mi.trajectory->frames[f];
+        }
+        if (ts != nullptr) {
+            // 轨迹是 wrapped 的：先补齐再变换（与 applyTrajectoryFrame 完全一致）
+            for (size_t k = 0; k < n; ++k) {
+                const size_t src = static_cast<size_t>(mi.trajAtomOffset) + k;
+                if (src < ts->positions.size()) {
+                    out[base + k] = ts->positions[src];
+                }
+            }
+            unwrapAroundFirst(out.data() + base, n, ts->box);
+        }
+        const glm::mat4 m = instanceWorldMatrix(*this, mi);
+        for (size_t k = 0; k < n; ++k) {
+            out[base + k] = glm::vec3(m * glm::vec4(out[base + k], 1.0f));
+        }
+    }
+    return !out.empty();
 }
 
 bool SceneStructure::setSystemTrajectory(uint32_t systemId,

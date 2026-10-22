@@ -173,15 +173,24 @@ void apply(bool dark) {
     c[ImGuiCol_ScrollbarGrab] = dark ? rgb(55, 74, 101) : rgb(203, 213, 225);
     c[ImGuiCol_ScrollbarGrabHovered] = dark ? rgb(72, 95, 128) : rgb(148, 163, 184);
     c[ImGuiCol_ScrollbarGrabActive] = p.accent;
-    c[ImGuiCol_CheckMark] = p.accent;
-    c[ImGuiCol_SliderGrab] = p.accent;
-    c[ImGuiCol_SliderGrabActive] = p.accentHi;
+    // 浅色主题下原来的 checkmark/slider 直接用 accent，若用户选了浅粉强调色，
+    // 复选框勾与选中行几乎看不见。这里把浅色模式的"可交互标记"压暗 35%，
+    // 深色模式仍用亮色（在深底上更醒目）。
+    const ImVec4 markColor = dark ? p.accent
+                                  : mixColor(p.accent, rgb(20, 28, 40), 0.35f);
+    c[ImGuiCol_CheckMark] = markColor;
+    c[ImGuiCol_SliderGrab] = markColor;
+    c[ImGuiCol_SliderGrabActive] = dark ? p.accentHi
+                                        : mixColor(p.accentHi, rgb(20, 28, 40), 0.22f);
     c[ImGuiCol_Button] = dark ? p.panelAlt : rgb(244, 247, 251);
     c[ImGuiCol_ButtonHovered] = dark ? rgb(38, 55, 82) : rgb(232, 240, 251);
     c[ImGuiCol_ButtonActive] = p.accentSoft;
-    c[ImGuiCol_Header] = p.accentSoft;
-    c[ImGuiCol_HeaderHovered] = dark ? rgb(38, 58, 90) : rgb(228, 238, 252);
-    c[ImGuiCol_HeaderActive] = p.accentSoft;
+    // 选中行/树节点：浅色主题 72% 主色（旧值 22%/55%，浅粉强调色下仍偏淡），
+    // 深色 30%。左侧另有 4px 深墨竖条 + 1px 描边（见 renderRepList），保证可读。
+    c[ImGuiCol_Header] = mixColor(p.accent, p.panel, dark ? 0.70f : 0.72f);
+    c[ImGuiCol_HeaderHovered] = dark ? rgb(38, 58, 90)
+                                     : mixColor(p.accent, p.panel, 0.88f);
+    c[ImGuiCol_HeaderActive] = mixColor(p.accent, p.panel, dark ? 0.55f : 0.85f);
     c[ImGuiCol_Separator] = p.border;
     c[ImGuiCol_SeparatorHovered] = p.accentHi;
     c[ImGuiCol_SeparatorActive] = p.accent;

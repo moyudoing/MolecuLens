@@ -49,6 +49,14 @@ void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out);
 void quickSurfSetAsyncEnabled(bool enabled);
 bool quickSurfAsyncEnabled();
 
+// —— 运动中冻结表面几何（轨迹播放/拖时间轴）——
+// 开启后，整体系 QuickSurf 若已有缓存网格则**直接复用**（不再按坐标指纹重算、
+// 也不再提交后台任务）。轨迹每帧都改坐标，按原逻辑会每帧生成一次表面（实测
+// md.gro 单次 ~730 ms）→ 播放被拖到 1–3 FPS。冻结期间球棍/线框照常逐帧更新，
+// 表面保持上一帧；暂停后由 Renderer 关闭冻结并重建一次。
+void quickSurfSetFreezeGeometry(bool frozen);
+bool quickSurfFreezeGeometry();
+
 // —— 计算后端（QS.2：CUDA → AVX2 → 标量多线程；运行时自动选择或强制指定）——
 
 // 后端类型（Auto = 运行时自动选择；其它强制指定，便于测试/调优）

@@ -397,7 +397,7 @@ void OffscreenRenderer::execute(const SceneCommandList& list, const RenderView& 
     const VkDescriptorSet globalSet = globalUbo_.set(0);
     // 几何绘制（唯一实现：vulkan/draw/draw_geometry.cpp）
     drawGeometry(cmd, *device_, pipelines_, drawList_, gpu_, activeMeshes, globalSet, revision,
-                 &view);
+                 list.meshSerial(), &view);
 
     vkCmdEndRenderPass(cmd);
     device_->endSingleTimeCommands(cmd);

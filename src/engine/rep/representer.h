@@ -34,6 +34,9 @@ struct RepContext {
     uint32_t globalAtomBase = 0;                  // 实例首原子在全局段的位置
     float dt = 0.0f;
     uint64_t frameIndex = 0;
+    // true = 轨迹正在播放（动态窗口内）：体表面可临时使用更粗的网格，
+    // 保证 30 fps 下每帧都能在后台算完；暂停后 350 ms 内会以原精度重建。
+    bool lowDetail = false;
     uint8_t renderMode = 0;                       // 体系渲染模式（0实心/1线框/2透明/3点）
     // true = 坐标重放路径：命令序列（含 RenderMode/MaterialBlock 等状态命令）已
     // 存在于旧命令流，样式此时**只能发射坐标类命令**，否则重放游标失配。样式若
@@ -47,6 +50,9 @@ public:
     // 生成：rep × instance × frame → 命令流（准备可并行；独立命令段合并由调用方负责）
     // 样式分派经 engine/style/style_registry.h 的 styleFor()（先运行时覆盖层、
     // 后编译期静态表）——统一注册机制，热路径与插件扩展共用同一入口。
+    // globalAtomBaseOverride：调用方若已有一份"逐实例起始原子下标"的前缀和，
+    // 直接传入可避免每实例一次 O(n) 的 globalAtomBase 扫描（大体系渲染时是
+    // O(n²) 热点）。UINT32_MAX = 未提供，内部按场景计算。
     void generate(const Representation& rep,
                   const entity::SceneStructure& scene,
                   const entity::MoleculeInstance& mi,
@@ -54,7 +60,8 @@ public:
                   const entity::FrameData& frame,
                   uint64_t frameIndex,
                   const std::vector<bool>& mask,
-                  SceneCommandList& out);
+                  SceneCommandList& out,
+                  uint32_t globalAtomBaseOverride = UINT32_MAX);
 
     // 从 RepContext 取全局原子坐标（世界坐标）
     static const glm::vec3* globalPositions(const RepContext&);

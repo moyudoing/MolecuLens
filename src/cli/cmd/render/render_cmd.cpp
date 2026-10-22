@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "engine/camera/camera.h"
+#include "engine/export/anim/anim_encoder.h"   // --anim：PNG 序列 → MP4/WebM/GIF/APNG
 #include "engine/export/png/png_encoder.h"
 #include "engine/raytrace/ray_tracer.h"   // --rt：CPU 光追出图（P1）
 #include "engine/rep/representation.h"
@@ -63,6 +64,8 @@ bool parseStyle(const std::string& name, engine::RepresentationType* out) {
     else if (s == "plate" || s == "平板") *out = RT::Plate;
     else if (s == "diamond" || s == "gem" || s == "菱形") *out = RT::Diamond;
     else if (s == "dotcloud" || s == "dots" || s == "点云") *out = RT::DotCloud;
+    else if (s == "polyhedron" || s == "poly" || s == "多面体")
+        *out = RT::Polyhedron;
     else return false;
     return true;
 }
@@ -113,6 +116,83 @@ void applyCameraPreset(engine::OrbitCamera& cam, const std::string& preset) {
         cam.yaw = 0.0f;
         cam.pitch = 0.0f;
     }
+}
+
+// 把一帧"体系级"坐标（XTC/DCD/TRR 的原子顺序）按实例切片写回场景。
+// 关键两步（与 SceneStructure::applyTrajectoryFrame 完全一致）：
+//   ① 逐分子 PBC 补齐（unwrapAroundFirst）：轨迹坐标同样是 wrapped 的，不补齐
+//      就会把跨盒子的分子画成 ~盒长 的长棍，播放时看起来就是"一闪一闪"；
+//   ② 再乘实例世界变换（多体系并排时才有非单位变换）。
+// 旧实现只写 instance 0（一个水分子），其余实例保持首帧坐标 → 整片溶剂不动。
+void applySystemFrameToScene(entity::SceneStructure& scene,
+                             const std::vector<glm::vec3>& positions,
+                             const std::array<float, 9>& box) {
+    const auto& insts = scene.instances();
+    const auto& structs = scene.structures();
+    size_t offset = 0;
+    std::vector<glm::vec3> slice;
+    for (uint32_t i = 0; i < insts.size(); ++i) {
+        const auto& st = structs[insts[i].structureIndex];
+        const size_t n = st.elements.size();
+        if (offset + n > positions.size()) {
+            break;
+        }
+        slice.resize(n);
+        for (size_t k = 0; k < n; ++k) {
+            slice[k] = positions[offset + k];
+        }
+        entity::unwrapAroundFirst(slice.data(), slice.size(), box);
+        // 分子整体回盒：unwrapped 轨迹播放久了分子会"扩散出盒"（画面散开），
+        // 显示上应把每个分子的首原子折回盒子，其余原子跟着平移 —— 分子始终完整，
+        // 整体位置仍按轨迹走（跨盒瞬间会有一次整分子跳变，这是常规视角处理）。
+        const float L[3] = {box[0], box[4], box[8]};
+        glm::vec3 shift(0.0f);
+        for (int a = 0; a < 3; ++a) {
+            if (L[a] > 1e-3f) {
+                shift[a] = -std::floor(slice[0][a] / L[a]) * L[a];
+            }
+        }
+        for (size_t k = 0; k < n; ++k) {
+            slice[k] = insts[i].transform.apply(slice[k] + shift);
+        }
+        scene.writeFramePositions(i, slice);
+        offset += n;
+    }
+}
+
+// 时间轴 PBC 展开（分子级）：以上一帧连续位置为基准推进锚点，消除相邻帧
+// "跨盒跳一个盒长"。只用于**连续缓冲**；显示前再由 applySystemFrameToScene
+// 把每个分子整体折回盒子（否则扩散会让画面散开）。
+void unwrapAcrossTime(entity::SceneStructure& scene,
+                      const std::vector<glm::vec3>& raw,
+                      const std::array<float, 9>& box,
+                      std::vector<glm::vec3>* prev,
+                      std::vector<glm::vec3>* out) {
+    out->assign(raw.begin(), raw.end());
+    const auto& insts = scene.instances();
+    const auto& structs = scene.structures();
+    const float L[3] = {box[0], box[4], box[8]};
+    const bool firstFrame = prev->empty();
+    size_t offset = 0;
+    for (uint32_t i = 0; i < insts.size(); ++i) {
+        const size_t n = structs[insts[i].structureIndex].elements.size();
+        if (offset + n > raw.size()) {
+            break;
+        }
+        if (firstFrame) {
+            entity::unwrapAroundFirst(out->data() + offset, n, box);
+        } else {
+            const glm::vec3 d =
+                entity::minimumImageDelta(raw[offset] - (*prev)[offset], L);
+            const glm::vec3 base = (*prev)[offset] + d;
+            for (size_t k = 0; k < n; ++k) {
+                (*out)[offset + k] =
+                    base + entity::minimumImageDelta(raw[offset + k] - base, L);
+            }
+        }
+        offset += n;
+    }
+    *prev = *out;
 }
 
 // 盒式降采样（SSAA）：src 为 w*factor × h*factor
@@ -199,6 +279,12 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
     // 轨迹：把指定帧的坐标写进场景后再渲染（DCD/XTC/TRR）
     static std::string trajPath;         // 轨迹文件；空则渲染结构文件本身
     static int trajFrame = 0;            // 帧号（0 起；-1 = 末帧）
+    // 动画导出：逐帧渲染后交给 ffmpeg 封装（扩展名决定格式）
+    static std::string animOut;          // 输出文件（.mp4/.webm/.gif/.apng）
+    static int animFps = 30;             // 动画帧率
+    static std::string animRange;        // 帧范围 a:b（空 = 全部帧）
+    static int animStep = 1;             // 帧步长
+    static int animInterp = 1;           // 帧间线性插值倍数（1 = 关）
 
     auto* sub = app.add_subcommand("render", "无头渲染分子为图像");
     sub->add_option("input", input, "输入结构文件 (.pdb/.gro)")->required();
@@ -279,6 +365,15 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
     sub->add_option("--traj", trajPath,
                     "轨迹文件 (.dcd/.xtc/.trr)；提供后渲染其中一帧而非结构文件首帧");
     sub->add_option("--frame", trajFrame, "轨迹帧号（0 起；-1 = 末帧）")->default_val(0);
+    sub->add_option("--anim", animOut,
+                    "导出轨迹动画（扩展名决定格式：.mp4/.webm/.gif/.apng）；需配合 --traj");
+    sub->add_option("--anim-fps", animFps, "动画帧率")->default_val(30);
+    sub->add_option("--anim-range", animRange,
+                    "动画帧范围 a:b（缺省 = 全部帧；-1 表示末帧）");
+    sub->add_option("--anim-step", animStep, "动画帧步长")->default_val(1);
+    sub->add_option("--anim-interp", animInterp,
+                    "帧间线性插值倍数（1=关；2-4 可让 10 ps 帧距的轨迹播放更顺滑）")
+        ->default_val(1);
     sub->add_option("--out", out, "输出路径")->default_val("out.png");
 
     sub->callback([&]() {
@@ -306,11 +401,13 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
         }
 
         // —— 1.5 轨迹帧（可选）：把指定帧的世界坐标写进场景后再渲染 ——
+        // 读取器在动画导出（--anim）里还要复用，因此声明在 if 之外。
+        entity::TrrReader trr;
+        entity::XtcReader xtc;
+        entity::DcdReader dcd;
+        entity::ITrajectoryReader* rdr = nullptr;
+        uint64_t trajTotal = 0;
         if (!trajPath.empty()) {
-            entity::TrrReader trr;
-            entity::XtcReader xtc;
-            entity::DcdReader dcd;
-            entity::ITrajectoryReader* rdr = nullptr;
             if (trr.canOpen(trajPath)) {
                 rdr = &trr;
             } else if (xtc.canOpen(trajPath)) {
@@ -329,6 +426,7 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
                 std::exit(3);
             }
             const uint64_t frames = rdr->frameCount();
+            trajTotal = frames;
             uint64_t frame = 0;
             if (trajFrame < 0) {
                 frame = frames > 0 ? frames - 1 : 0;
@@ -340,12 +438,7 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
                 spdlog::error("[cli] render: 读取轨迹帧 {} 失败: {}", frame, ts.errorMessage());
                 std::exit(3);
             }
-            std::vector<glm::vec3> world(ts->positions.size());
-            const auto& inst = parsed->scene->instances()[0];
-            for (size_t i = 0; i < world.size(); ++i) {
-                world[i] = inst.transform.apply(ts->positions[i]);
-            }
-            parsed->scene->writeFramePositions(0, world);
+            applySystemFrameToScene(*parsed->scene, ts->positions, ts->box);
             spdlog::info("[cli] render: 使用轨迹帧 {}/{}（{} 原子）", frame, frames,
                          ts->positions.size());
         }
@@ -702,6 +795,168 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
         }
 
         engine::RenderView view = renderer.viewFor(cam, rw, rh);
+
+        // —— 2.95 动画导出（--anim）：逐帧改坐标 → 渲染 → PNG 序列 → ffmpeg ——
+        if (!animOut.empty()) {
+            if (rdr == nullptr) {
+                spdlog::error("[cli] render: --anim 需要同时提供 --traj");
+                std::exit(3);
+            }
+            if (depth == 16) {
+                spdlog::warn("[cli] render: 动画导出固定 8-bit（忽略 --depth 16）");
+            }
+            uint64_t from = 0;
+            uint64_t to = trajTotal > 0 ? trajTotal - 1 : 0;
+            if (!animRange.empty()) {
+                const auto colon = animRange.find(':');
+                auto parseNum = [&](const std::string& s, uint64_t* out) -> bool {
+                    try {
+                        const long long v = std::stoll(s);
+                        *out = v < 0 ? (trajTotal > 0 ? trajTotal - 1 : 0)
+                                     : static_cast<uint64_t>(v);
+                        return true;
+                    } catch (...) {
+                        return false;
+                    }
+                };
+                const std::string a = animRange.substr(0, colon);
+                const std::string b = colon == std::string::npos ? "" : animRange.substr(colon + 1);
+                if (!parseNum(a, &from) || (!b.empty() && !parseNum(b, &to))) {
+                    spdlog::error("[cli] render: --anim-range 需为 a:b，收到 '{}'", animRange);
+                    std::exit(3);
+                }
+            }
+            if (trajTotal > 0 && to >= trajTotal) {
+                to = trajTotal - 1;
+            }
+            if (from > to) {
+                spdlog::error("[cli] render: 动画起始帧 {} > 结束帧 {}", from, to);
+                std::exit(3);
+            }
+            const int stp = std::max(1, animStep);
+            const std::string framesDir = animOut + ".frames";
+            std::error_code ec;
+            std::filesystem::create_directories(framesDir, ec);
+            if (ec) {
+                spdlog::error("[cli] render: 无法创建帧目录 {}: {}", framesDir, ec.message());
+                std::exit(3);
+            }
+            int written = 0;
+            bool diagOnce = false;   // 首次帧打印映射/盒子自检（MOLECULENS_ANIM_DEBUG=1）
+            const bool animDebug = std::getenv("MOLECULENS_ANIM_DEBUG") != nullptr;
+            std::vector<glm::vec3> dbgPrev;
+            const int interp = std::max(1, animInterp);
+            auto writeFramePng = [&](const std::vector<glm::vec3>& positions,
+                                     const std::array<float, 9>& box) {
+                if (animDebug && written < 20) {
+                    if (!dbgPrev.empty() && dbgPrev.size() == positions.size()) {
+                        double sum = 0.0;
+                        float mx = 0.0f;
+                        for (size_t i = 0; i < positions.size(); ++i) {
+                            const float d = glm::length(positions[i] - dbgPrev[i]);
+                            sum += d;
+                            mx = std::max(mx, d);
+                        }
+                        spdlog::warn("[cli] anim-frame {}: meanDisp={:.2f} Å max={:.2f} Å",
+                                     written,
+                                     sum / static_cast<double>(positions.size()), mx);
+                    }
+                    dbgPrev = positions;
+                }
+                applySystemFrameToScene(*parsed->scene, positions, box);
+                // 强制整条命令流重建：坐标重放路径在"逐帧换整体系坐标"时会把
+                // 网格/键端点写串（实测相邻帧画面像随机重排），导出必须优先正确性。
+                parsed->scene->setDirty(entity::DIRTY_INSTANCE);
+                // update 消费 DIRTY_COORDS（置 needsCoords_），prepare 才会走"坐标重放"；
+                // 只调 prepare 会一直复用首帧命令流（实测 21 帧全同）。
+                renderer.update(0.0f);
+                renderer.prepare();
+                off.execute(renderer.commandList(), view);
+                std::vector<uint8_t> px;
+                if (!off.readbackPixels(px, engine::PixelFormat::Rgba8)) {
+                    spdlog::error("[cli] render: 动画帧像素回读失败");
+                    std::exit(3);
+                }
+                std::vector<uint8_t> finalPx =
+                    ss > 1 ? downsample(px, static_cast<uint32_t>(width),
+                                        static_cast<uint32_t>(height),
+                                        static_cast<uint32_t>(ss))
+                           : px;
+                char fname[32];
+                std::snprintf(fname, sizeof(fname), "frame_%04d", written);
+                const std::string framePath =
+                    (std::filesystem::path(framesDir) / (std::string(fname) + ".png")).string();
+                if (!engine::writePng(framePath, static_cast<uint32_t>(width),
+                                      static_cast<uint32_t>(height), finalPx)) {
+                    spdlog::error("[cli] render: 动画帧写出失败: {}", framePath);
+                    std::exit(3);
+                }
+                ++written;
+            };
+            std::vector<glm::vec3> prevCont;   // 上一帧的"连续"坐标（跨帧 PBC 展开后）
+            std::vector<glm::vec3> cont;
+            for (uint64_t f = from; f <= to; f += static_cast<uint64_t>(stp)) {
+                auto ts = rdr->readFrame(f);
+                if (!ts) {
+                    spdlog::error("[cli] render: 读取轨迹帧 {} 失败: {}", f, ts.errorMessage());
+                    std::exit(3);
+                }
+                // 先做时间轴 PBC 展开，再做帧间插值：顺序反了会在盒子边界处插出
+                // "横穿整个盒子的长棍"（分子在相邻帧被 wrap 到对面）。
+                // 时间轴展开 → 连续缓冲；插值必须在这个连续空间里做，
+                // 否则跨盒分子会在中间帧被拉成横穿盒子的长棍。
+                const std::vector<glm::vec3> prevSnapshot = prevCont;
+                unwrapAcrossTime(*parsed->scene, ts->positions, ts->box, &prevCont, &cont);
+                if (!prevSnapshot.empty() && prevSnapshot.size() == cont.size() &&
+                    std::getenv("MOLECULENS_ANIM_DEBUG") != nullptr) {
+                    double sum = 0.0;
+                    float mx = 0.0f;
+                    for (size_t i = 0; i < cont.size(); ++i) {
+                        const float d = glm::length(cont[i] - prevSnapshot[i]);
+                        sum += d;
+                        mx = std::max(mx, d);
+                    }
+                    spdlog::warn("[cli] anim-disp frame {}: mean={:.2f} Å max={:.2f} Å",
+                                 f, sum / static_cast<double>(cont.size()), mx);
+                }
+                if (!diagOnce && std::getenv("MOLECULENS_ANIM_DEBUG") != nullptr) {
+                    diagOnce = true;
+                    spdlog::warn("[cli] anim-diag: atoms={} instances={} boxIndices=({},{},{}) boxDiag=({:.3f},{:.3f},{:.3f}) replay={}",
+                                 ts->positions.size(), parsed->scene->instances().size(),
+                                 ts->box[0], ts->box[4], ts->box[8],
+                                 ts->box[0], ts->box[4], ts->box[8],
+                                 renderer.lastPrepareWasReplay());
+                }
+                // 帧间线性插值：MD 帧距 10 ps 时直接 30 fps 播放会有明显跳动，
+                // 插入 K-1 个中间构象可以让肉眼看到连续运动（不改变导出帧率）。
+                if (!prevSnapshot.empty() && interp > 1 &&
+                    prevSnapshot.size() == cont.size()) {
+                    std::vector<glm::vec3> mid(cont.size());
+                    for (int s = 1; s < interp; ++s) {
+                        const float t = static_cast<float>(s) / static_cast<float>(interp);
+                        for (size_t i = 0; i < cont.size(); ++i) {
+                            mid[i] = prevSnapshot[i] + (cont[i] - prevSnapshot[i]) * t;
+                        }
+                        writeFramePng(mid, ts->box);
+                    }
+                }
+                writeFramePng(cont, ts->box);
+            }
+            engine::AnimEncodeOptions enc;
+            enc.framePattern = (std::filesystem::path(framesDir) / "frame_%04d.png").string();
+            enc.outPath = animOut;
+            enc.format = engine::animFormatFromPath(animOut);
+            enc.fps = animFps > 0 ? animFps : 30;
+            std::string encErr;
+            if (!engine::encodeAnimation(enc, &encErr)) {
+                spdlog::error("[cli] render: 动画编码失败: {}", encErr);
+                std::exit(3);
+            }
+            std::filesystem::remove_all(framesDir, ec);
+            spdlog::info("[cli] render: 动画 {} 帧 -> {}（{} fps, {}）", written, enc.outPath,
+                         enc.fps, engine::animFormatName(enc.format));
+            return;
+        }
 
         // 16-bit：优先走 16F 半浮点附件（线性、不经 8-bit 量化；回读后由
         // writePng16FromHalfRgba 做色调映射 + sRGB + 16-bit 量化）。

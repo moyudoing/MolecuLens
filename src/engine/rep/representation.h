@@ -29,8 +29,9 @@ enum class RepresentationType : uint8_t {
     Ribbon,      // 丝带（薄带状，仅 backbone）
     EspSurface,  // ESP 映射表面（电子密度等值面 + 静电势逐顶点着色；输入 cube 文件）
     Plate,       // 平板：每个残基/分子一块扁平方板（辅基/配体示意图风格）
-    Diamond,     // 菱形：每个残基/分子一颗八面体宝石（示意图 / 粗粒化观感）
+    Diamond,     // 菱形：每个非氢原子一颗八面体宝石（示意图 / 粗粒化观感）
     DotCloud,    // 点云：每个原子一个近似的点精灵（超大体系快速预览，无键）
+    Polyhedron,  // 多面体：每个非氢原子一颗二十面体（平面法线、随机朝向）
     Count,
 };
 

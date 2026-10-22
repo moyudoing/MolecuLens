@@ -55,6 +55,8 @@ public:
 
     // 渲染（在 ImGui 窗口内调用：resize FBO → prepare → execute → Image）
     void render(const ImVec2& size);
+    // 时间轴当前帧：传给 Renderer 作为表面预取缓存键（不影响渲染结果）
+    void setTrajectoryFrame(uint64_t frame) { trajectoryFrame_ = frame; }
 
     // 相机交互（主方案 §7.10：命中视口才转发；左=0 中=1 右=2）
     bool handleMouse(float dx, float dy, int button);
@@ -156,6 +158,7 @@ private:
     std::unique_ptr<engine::OffscreenRenderer> exportTarget_;
     uint32_t viewportW_ = 0, viewportH_ = 0;   // 离屏渲染目标物理分辨率
     uint32_t displayW_ = 0, displayH_ = 0;     // 逻辑显示尺寸（拖拽换算 NDC）
+    uint64_t trajectoryFrame_ = 0;             // 时间轴当前帧（表面预取缓存键）
     uint64_t lastSerial_ = UINT64_MAX;
     uint64_t lastCameraFp_ = 0;   // 上次渲染的相机指纹（替代逐个镜像 7 个字段）
 

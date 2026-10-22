@@ -22,6 +22,7 @@ add_library(moleculens_engine STATIC
     style/plate/plate.h style/plate/plate.cpp
     style/diamond/diamond.h style/diamond/diamond.cpp
     style/dotcloud/dotcloud.h style/dotcloud/dotcloud.cpp
+    style/polyhedron/polyhedron.h style/polyhedron/polyhedron.cpp
     style/surface/surface.h style/surface/surface.cpp style/surface/mc_tables.h
     style/quicksurf/quicksurf.h style/quicksurf/quicksurf.cpp
     style/quicksurf/quicksurf_avx2.cpp
@@ -38,6 +39,7 @@ add_library(moleculens_engine STATIC
     export/pov/pov_exporter.h export/pov/pov_exporter.cpp
     export/stl/stl_exporter.h export/stl/stl_exporter.cpp
     export/png/png_encoder.h export/png/png_encoder.cpp
+    export/anim/anim_encoder.h export/anim/anim_encoder.cpp
     raytrace/ray_tracer.h raytrace/ray_tracer.cpp
     vulkan/geometry/geometry.h vulkan/geometry/geometry.cpp
     vulkan/backend/draw_list.h vulkan/backend/decode.h vulkan/backend/decode.cpp

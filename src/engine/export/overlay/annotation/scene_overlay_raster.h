@@ -196,12 +196,14 @@ inline void drawLabelsOnImage(std::vector<uint8_t>& rgba, int w, int h,
             tx = fx - dot - 6.0f * scale - tw;
         }
         const float baselineY = fy + px * 0.35f;
-        esp_overlay::detail::drawText(rgba, w, h, tx, baselineY, label.text.c_str(), px, r, g,
-                                      b, static_cast<uint8_t>(std::clamp(a, 0.0f, 1.0f) *
-                                                              255.0f),
-                                      std::max(1, px / 14), static_cast<uint8_t>(outline),
-                                      static_cast<uint8_t>(outline),
-                                      static_cast<uint8_t>(outline));
+        esp_overlay::detail::drawText(
+            rgba, w, h, tx, baselineY, label.text.c_str(), px,
+            static_cast<uint8_t>(std::clamp(r, 0, 255)),
+            static_cast<uint8_t>(std::clamp(g, 0, 255)),
+            static_cast<uint8_t>(std::clamp(b, 0, 255)),
+            static_cast<uint8_t>(std::clamp(a, 0.0f, 1.0f) * 255.0f),
+            std::max(1, px / 14), static_cast<uint8_t>(outline),
+            static_cast<uint8_t>(outline), static_cast<uint8_t>(outline));
     }
 }
 
@@ -238,9 +240,13 @@ inline void drawWatermarkOnImage(std::vector<uint8_t>& rgba, int w, int h,
             baselineY = static_cast<float>(h) - margin;
             break;
     }
-    esp_overlay::detail::drawText(rgba, w, h, x, baselineY, wm.text.c_str(), px, r, g, b,
-                                  static_cast<uint8_t>(std::clamp(a, 0.0f, 1.0f) * 255.0f),
-                                  std::max(0, px / 30), 0, 0, 0);
+    esp_overlay::detail::drawText(
+        rgba, w, h, x, baselineY, wm.text.c_str(), px,
+        static_cast<uint8_t>(std::clamp(r, 0, 255)),
+        static_cast<uint8_t>(std::clamp(g, 0, 255)),
+        static_cast<uint8_t>(std::clamp(b, 0, 255)),
+        static_cast<uint8_t>(std::clamp(a, 0.0f, 1.0f) * 255.0f),
+        std::max(0, px / 30), 0, 0, 0);
 }
 
 // 主入口：把所有标注叠加到 RGBA8 缓冲（PNG 导出在 ESP 叠加之后调用）

@@ -167,3 +167,30 @@ cmd /c F:\MolecuLens\tools\build_incremental.bat
   生成 87.8 ms 移到后台线程，UI 不再有 >50 ms 尖峰。
 - 测试：新增 `tests/engine/async/surface_async_tests.cpp`（5 用例 22 断言，覆盖
   后台执行/去重/旧命令流保留/完成后换入/同步回退/导出阻塞）。全量 **161/161 通过**。
+
+## 9. 2026-10-22 追加：v2.12 轨迹播放 / 光追透明 / 视图叠加 / 新表示
+
+本轮完整记录见 [`docs/_internal/CHANGELOG-2026-10-22-v2.12.md`](docs/_internal/CHANGELOG-2026-10-22-v2.12.md)。
+摘要：
+
+- **轨迹不能自动播放**：`FrameScheduler` 把物理 `dt`（10 ps）当实时步进间隔 → 改成
+  `playbackFps`（默认 30，可 12/20/24/30/60）+ 速度倍率；物理 dt 只用于时间显示。
+- **加载轨迹后不能拖拽/滚轮**：`Workbench` 在时间轴子窗口之后取 `GetItemRect()` 当视口矩形，
+  相机输入区错位；改为 `MolScene::render()` 后立即缓存矩形，并用 Active 续拖。
+- **播放流畅度**：`applyTrajectoryFrame` / `Renderer::rebuildCommandList` 的逐实例
+  `globalAtomBase` 是 O(n²) → 前缀和/递增基址；播放期自动低模（detail 2/12 段）+
+  跳过阴影 pass，暂停 350 ms 恢复高画质。
+- **光追透明**：`RtSphere/RtCylinder/RtTriangle` 加 `opacity`，`traceColor()` 做
+  `front·α + behind·(1−α)` 继续追踪（≤8 层）；半透明图元不投实体阴影。
+- **显示视图叠加**：右上包围盒尺寸（Å）、右下比例尺、左下 X/Y/Z 坐标轴；「显示」面板与
+  视口「叠加」按钮可分别关闭。
+- **选择器**：样式/配色/选择单元格点击先切换编辑目标再开弹层；骨架样式在无 CA 骨架时置灰，
+  当前表示不适用时给警告 +「改回球棍」；单元格加 `▾`。
+- **新表示**：`Diamond`（每残基/分子一颗八面体宝石）、`DotCloud`（点精灵）；`Plate` 补单/双原子。
+  网格拓扑恒定的样式支持坐标重放（`beginReplay(allowMesh)`）。
+- **渲染模式**：V2「分子」面板补实心/线框/透明/点入口；点模式大小按透视距离 + 圆形点精灵。
+- **UI 清晰度**：字号 18/22/14、系统字体回退补 `Å`/希腊/箭头、浅色主题对比度、
+  自适应 1440×900 窗口。
+
+验证：Debug + Release 三件套 exit 0；**182 例 / 193,749 断言全过**；GUI 实机
+（md.gro + md.xtc）播放 117–119 FPS、拖拽/缩放/时间轴/叠加/选择器均正常。

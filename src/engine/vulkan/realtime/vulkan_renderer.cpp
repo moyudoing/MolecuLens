@@ -344,7 +344,8 @@ void VulkanRenderer::recordFrame(const SceneCommandList& list, const RenderView&
 
     const VkDescriptorSet globalSet = globalUbo_.set(frameIndex_);
     // 几何绘制（唯一实现：vulkan/draw/draw_geometry.cpp）
-    drawGeometry(cmd, device_, pipelines_, drawList_, gpu_, meshes_, globalSet, revision, &view);
+    drawGeometry(cmd, device_, pipelines_, drawList_, gpu_, meshes_, globalSet, revision,
+                 list.meshSerial(), &view);
 
     // ImGui（UI 回调；renderPass 内）
     if (uiRenderFn_) {

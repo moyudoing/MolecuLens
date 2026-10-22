@@ -70,7 +70,7 @@ void TimeAxis::renderTransportBar() {
         ctl_->setSpeed(speed);
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("%s", tr("播放速度倍率（按帧的实测 dt 推进，与帧率解耦）"));
+        ImGui::SetTooltip("%s", tr("播放速度倍率（× 播放帧率；与轨迹物理 dt 无关）"));
     }
 
     // 帧信息右对齐（同一行）

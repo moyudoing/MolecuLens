@@ -278,6 +278,12 @@ public:
     // 否则新建列表的 serial_(0) 会随 move 覆盖掉，bump 后恒等于 1。
     void     setSerial(uint64_t s) { serial_ = s; }
 
+    // 网格（TriMesh）内容的独立修订号：只在**全量重建**时由 Renderer 递增，
+    // 坐标重放（球棍逐帧动、表面冻结）保持不变。后端据此跳过表面网格的重复
+    // 解码后拷贝/上传 —— 否则多表示 + QuickSurf 播放时每帧重传整张表面（14 FPS）。
+    uint64_t meshSerial() const { return meshSerial_; }
+    void     setMeshSerial(uint64_t s) { meshSerial_ = s; }
+
     bool first(CommandIterator&) const;
     bool next(CommandIterator&) const;
 
@@ -309,6 +315,9 @@ public:
     // 变化"的样式，如 Diamond/Plate/卡通；Surface/QuickSurf 的 MC 拓扑会变，
     // 尺寸不符时 append 会置 replayFailed_，调用方回退全量重建）。
     bool beginReplay(bool allowMesh = false);   // 进入重放模式（计划非空且不含 TriMesh）
+    // 冻结表面的重放：整段 TriMesh 命令保留在旧池中，不重写也不重新发射。
+    // 连续消费计划里的 TriMesh 条目，使后续坐标命令重新对齐。返回跳过条数。
+    uint32_t skipReplayMesh();
     bool endReplay();     // 校验重放完整；成功则 bumpSerial 并返回 true
 
     // 序列化 / 反序列化（配合 .mlscene 命令流段与 RPC 传帧）
@@ -326,6 +335,7 @@ private:
     bool   replayFailed_ = false;       // 重放期间发现不一致
     bool   hasMesh_ = false;            // 曾发射 TriMesh（禁用重放）
     uint64_t serial_ = 0;
+    uint64_t meshSerial_ = 0;            // 网格内容修订号（见 meshSerial()）
 };
 
 // —— 命令流序列化字节布局（.mlscene 命令流段 / RPC 传帧共用）——

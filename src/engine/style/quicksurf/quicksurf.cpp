@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // MolecuLens · engine · style/quicksurf/quicksurf.cpp —— QuickSurf 高斯表面实现
 // 规格来源：参考 other/QuickSurf（高斯密度和；radscale/gridspacing/isovalue）
 // 算法：对原子集合计算高斯密度场（含密度梯度），Marching Cubes 抽取 isovalue
@@ -49,22 +49,49 @@ int g_actualBackend = static_cast<int>(QuickSurfBackend::Scalar);
 
 // 异步生成开关（进程级；默认关 = 同步生成，见 quicksurf.h 说明）。
 std::atomic<bool> g_asyncEnabled{false};
+// 运动中冻结几何（轨迹播放/拖时间轴）：有缓存就直接复用，不按坐标重算。
+std::atomic<bool> g_freezeGeometry{false};
 
-// —— 整体系表面网格缓存 ——
-// 动机：命令流在**任何**表示变更（含只改材质/透明度/配色）时整条重建，而表面
-// 生成是其中最贵的一步（实测 md.gro 整体系 QuickSurf ~197 ms / 19.8 MB）。拖动
-// 不透明度滑杆本不该重算等值面 —— 缓存键只含几何输入，材质改动直接命中。
-// 带互斥：后台导出线程会与主线程并发进入本函数（见 MolScene::exportToPng）。
-struct SurfaceMeshCache {
-    std::mutex mtx;
-    bool valid = false;
+// —— 整体系表面网格缓存（多帧） ——
+// 动机：
+//   1) 命令流在**任何**表示变更（含只改材质/透明度/配色）时整条重建，而表面
+//      生成是其中最贵的一步（实测 md.gro 整体系 QuickSurf ~197 ms / 19.8 MB）。
+//      缓存键只含几何输入，材质改动直接命中。
+//   2) 轨迹逐帧播放：当前帧的表面在后台算完后存入本缓存，同时预取后续帧；
+//      播放到该帧时直接命中 ← 表面随轨迹逐帧正确切换，主线程不阻塞。
+// 容量按帧数限制（环形淘汰），每帧网格约 8–20 MB，24 帧约 0.2–0.5 GB。
+struct CachedSurface {
     uint64_t key = 0;
-    uint64_t hits = 0;
-    uint64_t misses = 0;
+    uint64_t lastUse = 0;
     std::vector<TriMeshVertex> verts;
     std::vector<uint32_t> indices;
 };
+struct SurfaceMeshCache {
+    std::mutex mtx;
+    std::unordered_map<uint64_t, std::shared_ptr<CachedSurface>> entries;
+    uint64_t tick = 0;
+    uint64_t lastKey = 0;
+    size_t capacity = 24;       // 约 0.2–0.5 GB 上限（按实测网格大小）
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+};
 SurfaceMeshCache g_systemMeshCache;
+
+// 取缓存项（调用方需持锁）。同时刷新 LRU 时间戳。
+std::shared_ptr<CachedSurface> findCachedSurfaceLocked(uint64_t key) {
+    auto it = g_systemMeshCache.entries.find(key);
+    if (it == g_systemMeshCache.entries.end()) {
+        return nullptr;
+    }
+    it->second->lastUse = ++g_systemMeshCache.tick;
+    g_systemMeshCache.lastKey = key;
+    return it->second;
+}
+
+bool hasCachedSurface(uint64_t key) {
+    std::lock_guard<std::mutex> lk(g_systemMeshCache.mtx);
+    return g_systemMeshCache.entries.find(key) != g_systemMeshCache.entries.end();
+}
 
 // 发射网格（缓存命中与未命中共用同一出口，避免两条路径的切块/序列化行为漂移）
 void emitQuickSurfMesh(const std::vector<TriMeshVertex>& verts,
@@ -626,12 +653,29 @@ bool buildSystemQuickSurfMesh(const SystemQuickSurfInput& in,
 // 写入整体系网格缓存（主线程与工作线程共用；内部加锁，调用方无需持锁）
 void storeSystemQuickSurfMesh(uint64_t key, std::vector<TriMeshVertex> verts,
                               std::vector<uint32_t> indices) {
+    auto entry = std::make_shared<CachedSurface>();
+    entry->key = key;
+    entry->verts = std::move(verts);
+    entry->indices = std::move(indices);
     std::lock_guard<std::mutex> lk(g_systemMeshCache.mtx);
-    g_systemMeshCache.verts = std::move(verts);
-    g_systemMeshCache.indices = std::move(indices);
-    g_systemMeshCache.key = key;
-    g_systemMeshCache.valid = true;
+    entry->lastUse = ++g_systemMeshCache.tick;
+    g_systemMeshCache.lastKey = key;
+    g_systemMeshCache.entries[key] = std::move(entry);
     ++g_systemMeshCache.misses;
+    // LRU 淘汰：只保留最近使用的 capacity 帧，避免长轨迹把内存吃满。
+    while (g_systemMeshCache.entries.size() > g_systemMeshCache.capacity) {
+        auto victim = g_systemMeshCache.entries.begin();
+        for (auto it = g_systemMeshCache.entries.begin();
+             it != g_systemMeshCache.entries.end(); ++it) {
+            if (it->second->lastUse < victim->second->lastUse) {
+                victim = it;
+            }
+        }
+        if (victim->first == g_systemMeshCache.lastKey) {
+            break;   // 不淘汰刚写入/正在使用的帧
+        }
+        g_systemMeshCache.entries.erase(victim);
+    }
 }
 
 // —— 异步生成开关（见 quicksurf.h）——
@@ -643,18 +687,25 @@ bool quickSurfAsyncEnabled() {
     return g_asyncEnabled.load(std::memory_order_relaxed);
 }
 
-// 体系级 QuickSurf（G5）：聚合全部可见实例原子（含溶剂分子）为一个整体高斯密度表面
-// （而不是每分子一个独立小表面）。用于溶剂化大体系（如 md.gro）。
-void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out) {
-    const glm::vec3* pos = Representer::globalPositions(ctx);
-    if (!pos) {
-        return;
-    }
+void quickSurfSetFreezeGeometry(bool frozen) {
+    g_freezeGeometry.store(frozen, std::memory_order_relaxed);
+}
+
+bool quickSurfFreezeGeometry() {
+    return g_freezeGeometry.load(std::memory_order_relaxed);
+}
+
+// 组装一组世界坐标的体系表面输入（主线程）：可见性/选择掩码过滤 → 网格 → 指纹。
+// pos/total 允许来自**未来帧**（见 prefetchSystemQuickSurf），不读写场景当前坐标。
+bool buildSystemSurfaceInput(const RepContext& ctx, const glm::vec3* pos, size_t total,
+                             SystemQuickSurfInput& in, uint64_t& fp) {
     std::vector<glm::vec3> centers;
     std::vector<float> radii;
     std::vector<glm::vec3> colors;
+    centers.reserve(total);
+    radii.reserve(total);
+    colors.reserve(total);
     const auto& insts = ctx.scene->instances();
-    const size_t total = ctx.frame && ctx.frame->positions ? ctx.frame->positions->size() : 0;
     size_t globalBase = 0;
     for (const auto& inst : insts) {
         uint32_t sysIdx = UINT32_MAX;
@@ -676,29 +727,24 @@ void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out) {
             }
             centers.push_back(pos[static_cast<size_t>(g)]);
             radii.push_back(elementInfo(st.elements[i]).vdwRadius * ctx.rep->radiusScale);
-            // 元素 CPK 色（体系级无 RepContext.instance → 用元素色近似，与
-            // drawQuickSurf 的密度加权原子色同源）
             const auto& el = elementInfo(st.elements[i]);
             colors.emplace_back(el.color[0], el.color[1], el.color[2]);
         }
         globalBase += n;
     }
     if (centers.empty()) {
-        return;
+        return false;
     }
 
-    // 密度/梯度/颜色计算（后端自动选择：CUDA → AVX2 → 标量 MT）
     glm::vec3 origin;
     glm::ivec3 dims;
     float sp = 0.0f;
     if (!computeGrid(centers, radii, 1.0f, ctx.rep->surfGridSpacing, origin, dims, sp)) {
-        return;
+        return false;
     }
-    // —— 几何指纹 → 网格缓存 ——
-    // 键只含**影响几何**的输入；材质/透明度/配色方案等改动不入键，故拖动不透明度
-    // 滑杆时不会重算表面（实测整体系 QuickSurf 单次 ~197 ms，逐帧重算会让界面卡死）。
-    // 必须带互斥：后台导出线程（MolScene::exportToPng）会与主线程并发调用本函数。
-    uint64_t fp = 1469598103934665603ull;
+
+    // 几何指纹：只含影响几何的输入；材质/透明度/配色改动不入键。
+    fp = 1469598103934665603ull;
     auto mix = [&fp](const void* data, size_t bytes) {
         const auto* p = static_cast<const uint8_t*>(data);
         for (size_t i = 0; i < bytes; ++i) {
@@ -715,17 +761,6 @@ void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out) {
     mix(radii.data(), radii.size() * sizeof(float));
     mix(colors.data(), colors.size() * sizeof(glm::vec3));
 
-    {
-        std::lock_guard<std::mutex> lk(g_systemMeshCache.mtx);
-        if (g_systemMeshCache.valid && g_systemMeshCache.key == fp) {
-            g_systemMeshCache.hits++;
-            emitQuickSurfMesh(g_systemMeshCache.verts, g_systemMeshCache.indices, out);
-            return;
-        }
-    }
-
-    // 组装可跨线程的计算输入（纯数值拷贝，不引用 ctx/scene/命令流）。
-    SystemQuickSurfInput in;
     in.xyzr.resize(centers.size() * 4);
     in.flatColors.resize(colors.size() * 3);
     for (size_t i = 0; i < centers.size(); ++i) {
@@ -741,6 +776,111 @@ void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out) {
     in.dims = dims;
     in.spacing = sp;
     in.isovalue = ctx.rep->surfIsovalue;
+    return true;
+}
+
+// 向前预取后续帧的整体系表面（异步路径专用，主线程只做轻量组装+提交）。
+// 播放到第 f 帧时，drawSystemQuickSurf 按同一指纹命中缓存 → 表面随轨迹逐帧正确
+// 切换，而不再冻结/复用旧表面。窗口 6 帧：Release 单帧约 30–80 ms，后台算得过来。
+void prefetchSystemQuickSurf(const RepContext& ctx, uint64_t currentFrame) {
+    if (!quickSurfAsyncEnabled() || ctx.scene == nullptr || ctx.scene->instances().empty()) {
+        return;
+    }
+    constexpr int kAhead = 6;
+    // 没有多帧轨迹时不需要预取
+    bool hasTrajectory = false;
+    for (const auto& inst : ctx.scene->instances()) {
+        if (inst.trajectory && inst.trajectory->frames.size() > 1) {
+            hasTrajectory = true;
+            break;
+        }
+    }
+    if (!hasTrajectory) {
+        return;
+    }
+    std::vector<glm::vec3> world;
+    for (int d = 1; d <= kAhead; ++d) {
+        const uint64_t frame = currentFrame + static_cast<uint64_t>(d);
+        if (!ctx.scene->buildWorldPositionsForFrame(frame, world)) {
+            continue;
+        }
+        SystemQuickSurfInput in;
+        uint64_t fp = 0;
+        if (!buildSystemSurfaceInput(ctx, world.data(), world.size(), in, fp)) {
+            continue;
+        }
+        if (hasCachedSurface(fp)) {
+            continue;   // 已算好/正在算
+        }
+        auto input = std::make_shared<SystemQuickSurfInput>(std::move(in));
+        async::submitPrefetchSurfaceJob(fp, [input, fp]() {
+            std::vector<TriMeshVertex> verts;
+            std::vector<uint32_t> indices;
+            if (buildSystemQuickSurfMesh(*input, verts, indices)) {
+                storeSystemQuickSurfMesh(fp, std::move(verts), std::move(indices));
+            }
+        });
+    }
+}
+
+// 体系级 QuickSurf（G5）：聚合全部可见实例原子（含溶剂分子）为一个整体高斯密度表面
+// （而不是每分子一个独立小表面）。用于溶剂化大体系（如 md.gro）。
+void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out) {
+    const glm::vec3* pos = Representer::globalPositions(ctx);
+    if (!pos) {
+        return;
+    }
+    const size_t total = ctx.frame && ctx.frame->positions ? ctx.frame->positions->size() : 0;
+    SystemQuickSurfInput in;
+    uint64_t fp = 0;
+    if (!buildSystemSurfaceInput(ctx, pos, total, in, fp)) {
+        return;
+    }
+
+    // —— 几何指纹 → 多帧网格缓存 ——
+    // 命中（同一帧表面已由当前帧异步任务/后续帧预取算好）→ 直接发射。
+    std::shared_ptr<CachedSurface> cached;
+    {
+        std::lock_guard<std::mutex> lk(g_systemMeshCache.mtx);
+        cached = findCachedSurfaceLocked(fp);
+        if (cached) {
+            ++g_systemMeshCache.hits;
+        }
+    }
+    if (cached) {
+        emitQuickSurfMesh(cached->verts, cached->indices, out);
+        prefetchSystemQuickSurf(ctx, ctx.frameIndex);
+        return;
+    }
+
+    // 预取尚未追上（刚跳帧/刚开始播放）：冻结模式下先复用最近一张表面保证画面
+    // 不断档，同时继续预取；下一帧命中缓存后即切成该帧的正确表面。
+    if (quickSurfFreezeGeometry()) {
+        std::shared_ptr<CachedSurface> fallback;
+        {
+            std::lock_guard<std::mutex> lk(g_systemMeshCache.mtx);
+            if (!g_systemMeshCache.entries.empty()) {
+                auto it = g_systemMeshCache.entries.find(g_systemMeshCache.lastKey);
+                if (it == g_systemMeshCache.entries.end()) {
+                    it = g_systemMeshCache.entries.begin();
+                }
+                for (auto cur = g_systemMeshCache.entries.begin();
+                     cur != g_systemMeshCache.entries.end(); ++cur) {
+                    if (cur->second->lastUse > it->second->lastUse) {
+                        it = cur;
+                    }
+                }
+                fallback = it->second;
+                fallback->lastUse = ++g_systemMeshCache.tick;
+                ++g_systemMeshCache.hits;
+            }
+        }
+        if (fallback) {
+            emitQuickSurfMesh(fallback->verts, fallback->indices, out);
+            prefetchSystemQuickSurf(ctx, ctx.frameIndex);
+            return;
+        }
+    }
 
     // —— 异步路径（GUI 主线程）——
     // 缓存未命中 → 提交后台生成并立即返回：本帧不发射该表面，Renderer 检测到
@@ -755,6 +895,7 @@ void drawSystemQuickSurf(const RepContext& ctx, SceneCommandList& out) {
                 storeSystemQuickSurfMesh(fp, std::move(verts), std::move(indices));
             }
         });
+        prefetchSystemQuickSurf(ctx, ctx.frameIndex);
         return;
     }
 

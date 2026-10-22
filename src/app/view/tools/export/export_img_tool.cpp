@@ -7,11 +7,14 @@
 #include "app/view/tools/export/export_img_tool.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <filesystem>
 
 #include "app/view/control/view_control.h"
 #include "app/view/theme/ui_theme.h"
 #include "app/view/viewport/mol_scene.h"
+#include "engine/export/anim/anim_encoder.h"
 
 #include "spdlog/spdlog.h"
 
@@ -203,7 +206,7 @@ void ExportImgTool::render(DataManager* dm, MolScene* scene) {
                     ImGui::TextDisabled("%s", msg.c_str());
                 }
             }
-            ImGui::TextDisabled(tr("PNG 序列已支持；APNG/GIF/MP4/WebM 需外部编码器（未接入）"));
+            ImGui::TextDisabled(tr("PNG 序列直接输出；APNG/GIF/MP4/WebM 调用 ffmpeg（PATH 或 MOLECULENS_FFMPEG）"));
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -249,13 +252,6 @@ bool ExportImgTool::exportAnimation(const AnimationExportOptions& opts, MolScene
         spdlog::error("[io] export(anim): 场景未就绪");
         return false;
     }
-    if (opts.codec != Codec::PngSequence) {
-        // APNG/GIF/MP4/WebM 需要外部编码器（ffmpeg / apngasm），当前未接入 ——
-        // 明确报错而不是静默产出一堆 PNG 让调用方以为拿到了目标格式。
-        spdlog::error("[io] export(anim): 编解码器 {} 尚未接入（当前仅支持 PNG 序列）",
-                      static_cast<int>(opts.codec));
-        return false;
-    }
     // 尺寸：以视口逻辑尺寸 × scale 为准（与图像导出的"视口倍数"一致）
     const uint32_t w = std::max(1u, scene->displayWidth() * std::max(1u, opts.scale));
     const uint32_t h = std::max(1u, scene->displayHeight() * std::max(1u, opts.scale));
@@ -266,12 +262,47 @@ bool ExportImgTool::exportAnimation(const AnimationExportOptions& opts, MolScene
         return false;
     }
     uint32_t frames = 0;
-    // ssaa / colorDepth 取面板真值（此前硬编码 1 与 8：动画导出的抗锯齿与位深
-    // 完全无从配置，面板上也没有对应控件）
-    return scene->exportAnimationToPng(w, h, opts.outPath, /*instanceIndex=*/0,
-                                       opts.inFrame, opts.outFrame, opts.step,
-                                       /*bgOverride=*/nullptr, opts.ssaa,
-                                       opts.colorDepth, &frames);
+    // PNG 序列：直接写目标目录（文件名按顺序 0000.png 递增）
+    if (opts.codec == Codec::PngSequence) {
+        return scene->exportAnimationToPng(w, h, opts.outPath, /*instanceIndex=*/0,
+                                           opts.inFrame, opts.outFrame, opts.step,
+                                           /*bgOverride=*/nullptr, opts.ssaa,
+                                           opts.colorDepth, &frames);
+    }
+
+    // 视频/动图：先写临时帧目录，再交给 ffmpeg 封装；成功后清掉帧目录。
+    const std::string framesDir = opts.outPath + ".frames";
+    if (!scene->exportAnimationToPng(w, h, framesDir, /*instanceIndex=*/0, opts.inFrame,
+                                     opts.outFrame, opts.step, /*bgOverride=*/nullptr,
+                                     opts.ssaa, opts.colorDepth, &frames)) {
+        return false;
+    }
+    engine::AnimEncodeOptions enc;
+    enc.framePattern = framesDir + "/frame_%04d.png";
+    enc.outPath = opts.outPath;
+    switch (opts.codec) {
+    case Codec::Apng: enc.format = engine::AnimFormat::Apng; break;
+    case Codec::Gif: enc.format = engine::AnimFormat::Gif; break;
+    case Codec::Webm: enc.format = engine::AnimFormat::Webm; break;
+    case Codec::Mp4:
+    case Codec::PngSequence: enc.format = engine::AnimFormat::Mp4; break;
+    }
+    enc.fps = std::max(1, static_cast<int>(std::lround(opts.fps)));
+    enc.loop = opts.loop;
+    // 输出路径没有扩展名时按格式补一个，避免 ffmpeg 无法推断容器
+    if (std::filesystem::path(enc.outPath).extension().empty()) {
+        enc.outPath += engine::animFormatExtension(enc.format);
+    }
+    std::string err;
+    if (!engine::encodeAnimation(enc, &err)) {
+        spdlog::error("[io] export(anim): 编码失败: {}", err);
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(framesDir, ec);
+    spdlog::info("[io] export(anim): {} 帧 -> {}（{}，{} fps）", frames, enc.outPath,
+                 engine::animFormatName(enc.format), enc.fps);
+    return true;
 }
 
 // QS.4：图像导出放入后台线程执行（不阻塞主视图）。

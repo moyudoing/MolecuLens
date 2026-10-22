@@ -82,8 +82,9 @@ const TypeEntry kTypes[] = {
     {RepresentationType::NewCartoon, "改进卡通"},
     {RepresentationType::Ribbon, "丝带"},
     {RepresentationType::Plate, "平板（辅基）"},
-    {RepresentationType::Diamond, "菱形（宝石）"},
+    {RepresentationType::Diamond, "菱形（非氢原子）"},
     {RepresentationType::DotCloud, "点云"},
+    {RepresentationType::Polyhedron, "多面体（非氢原子）"},
 };
 constexpr int kTypeCount = static_cast<int>(sizeof(kTypes) / sizeof(kTypes[0]));
 
@@ -442,6 +443,25 @@ void repPicker(Workbench& wb) {
     }
 }
 
+// 材质预设的中文显示名（引擎层仍以英文名作为稳定键/CLI 参数；此处只影响 UI）。
+// 与 kMaterialPresets 一一对应，数量由 static_assert 守住，增删预设会在此报错。
+const char* materialPresetNameZh(int index) {
+    static const char* const kZh[] = {
+        "不透明", "透明", "拉丝金属", "漫反射", "幽灵",
+        "玻璃 1", "玻璃 2", "玻璃 3", "光泽", "硬塑料",
+        "金属粉彩", "钢", "半透明", "硬边", "硬边高光",
+        "硬边玻璃", "Goodsell 风格", "AO 高光", "AO 哑光", "AO 硬边",
+        "吹制玻璃", "玻璃气泡", "光追铬",
+    };
+    static_assert(sizeof(kZh) / sizeof(kZh[0]) ==
+                      static_cast<size_t>(engine::kMaterialPresetCount),
+                  "materialPresetNameZh 与 kMaterialPresets 数量不一致");
+    if (index < 0 || index >= engine::kMaterialPresetCount) {
+        return tr("自定义");
+    }
+    return tr(kZh[index]);
+}
+
 void materialCombo(Workbench& wb, int32_t id, const Representation& r) {
     int idx = r.materialPreset;
     if (idx < 0 || idx >= engine::kMaterialPresetCount) {
@@ -449,7 +469,7 @@ void materialCombo(Workbench& wb, int32_t id, const Representation& r) {
     }
     std::string items;
     for (int i = 0; i < engine::kMaterialPresetCount; ++i) {
-        items += engine::materialPresetAt(i).name;
+        items += materialPresetNameZh(i);
         items.push_back('\0');
     }
     items += tr("自定义");
@@ -710,7 +730,145 @@ static void renderMolScopeEditor(Workbench& wb, int32_t repId, const std::string
         ImGui::PopID();
     }
 }
-static void renderRepTable(Workbench& wb) {
+// v2.13：表示切换改为**列表**（点击选中、下方表单编辑），不再用表格里的
+// 样式/配色/选择单元格弹层。用户明确要求"不使用表格选择渲染类型、作用分子和
+// 表达式；选择或新建后在下方编辑"。
+static void renderRepList(Workbench& wb) {
+    RepresentationController* ctl = wb.reps();
+    const auto& reps = wb.representations();
+    if (ctl == nullptr || reps.empty()) {
+        ImGui::TextDisabled("%s", tr("暂无表示，点下方「新建」添加"));
+        return;
+    }
+    const int32_t active = activeId(wb);
+    const float rowH = 26.0f;
+    for (size_t i = 0; i < reps.size(); ++i) {
+        const Representation rep = reps[i];   // 按值：本帧可能增删
+        ImGui::PushID(static_cast<int>(i));
+        const bool sel = (static_cast<int32_t>(i) == active);
+        // 选中行的底色由我们自己画：把主题主色向正文墨色压暗，
+        // 浅粉/浅蓝在白面板上也能形成清楚的中等饱和底色。
+        const auto& pal = aurora::palette();
+        const ImVec4 selBg(pal.accent.x * 0.72f + pal.text.x * 0.28f,
+                           pal.accent.y * 0.72f + pal.text.y * 0.28f,
+                           pal.accent.z * 0.72f + pal.text.z * 0.28f, 1.0f);
+        const ImVec4 selEdge(pal.accent.x * 0.45f + pal.text.x * 0.55f,
+                             pal.accent.y * 0.45f + pal.text.y * 0.55f,
+                             pal.accent.z * 0.45f + pal.text.z * 0.55f, 1.0f);
+        if (sel) {
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            const float w = ImGui::GetContentRegionAvail().x;
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                p0, ImVec2(p0.x + w, p0.y + rowH), aurora::col(selBg), 3.0f);
+        }
+        bool visible = rep.visible;
+        if (ImGui::Checkbox("##vis", &visible)) {
+            ctl->setVisible(static_cast<int32_t>(i), visible);
+        }
+        ImGui::SameLine();
+        char line[320];
+        std::snprintf(line, sizeof(line), "%s   %s · %s%s",
+                      rep.name.empty() ? tr("未命名") : rep.name.c_str(),
+                      tr(typeLabel(rep.type)), engine::colorSchemeZh(rep.colorScheme),
+                      rep.visible ? "" : tr("   · 隐藏"));
+        if (!rep.visible) {
+            ImGui::PushStyleColor(ImGuiCol_Text, aurora::palette().textMuted);
+        }
+        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
+                              ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        if (ImGui::Selectable(line, sel, ImGuiSelectableFlags_None,
+                              ImVec2(0.0f, rowH))) {
+            wb.clearRepMultiSelection();
+            wb.setActiveRepIndex(static_cast<int32_t>(i));
+        }
+        ImGui::PopStyleColor(2);
+        if (sel) {
+            // 4px 深色竖条 + 1px 描边，保证即使底色被主题调淡也能看出当前表示。
+            const ImVec2 a = ImGui::GetItemRectMin();
+            const ImVec2 b = ImGui::GetItemRectMax();
+            auto* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(a, ImVec2(a.x + 4.0f, b.y), aurora::col(selEdge), 2.0f);
+            dl->AddRect(a, b, aurora::col(selEdge), 2.0f, 0, 1.0f);
+        }
+        if (!rep.visible) {
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopID();
+    }
+}
+
+// 新建菜单：先选渲染类型，再在下方表单里编辑（名称/配色/作用分子/材质…）。
+static void newRepMenu(Workbench& wb, RepresentationController* ctl) {
+    const bool hasBackbone = sceneHasProteinBackbone(wb);
+    if (ImGui::SmallButton(tr("新建"))) {
+        ImGui::OpenPopup("##new_rep_types");
+    }
+    if (ImGui::BeginPopup("##new_rep_types")) {
+        ImGui::TextDisabled("%s", tr("选择渲染类型"));
+        ImGui::Separator();
+        for (const auto& entry : kTypes) {
+            const bool usable = hasBackbone || !isBackboneOnlyStyle(entry.type);
+            if (!usable) {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Selectable(tr(entry.label)) && usable) {
+                std::string sel;
+                if (wb.selectedMolecule() >= 0 && wb.data() != nullptr) {
+                    const std::string nm = groupBaseName(
+                        wb.data()->moleculeName(
+                            static_cast<size_t>(wb.selectedMolecule())));
+                    if (!nm.empty() && nm.find(' ') == std::string::npos) {
+                        sel = "resname " + nm;
+                    }
+                }
+                const ColorScheme cs =
+                    entry.type == RepresentationType::Wireframe
+                        ? ColorScheme::AtomName
+                        : ColorScheme::ElementCPK;
+                const int32_t nid = ctl->addRepresentation(
+                    tr(entry.label), entry.type, sel, cs);
+                if (nid >= 0) {
+                    wb.setActiveRepIndex(nid);
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            if (!usable) {
+                ImGui::EndDisabled();
+            }
+        }
+        ImGui::EndPopup();
+    }
+}
+
+// 样式下拉（按结构类型过滤骨架样式；当前值始终保留，避免旧场景无法显示）。
+static void styleCombo(Workbench& wb, int32_t id, const Representation& r) {
+    const bool hasBackbone = sceneHasProteinBackbone(wb);
+    std::string items;
+    std::vector<RepresentationType> types;
+    for (const auto& entry : kTypes) {
+        if (hasBackbone || !isBackboneOnlyStyle(entry.type) || entry.type == r.type) {
+            items += tr(entry.label);
+            items.push_back('\0');
+            types.push_back(entry.type);
+        }
+    }
+    int idx = 0;
+    for (size_t i = 0; i < types.size(); ++i) {
+        if (types[i] == r.type) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    }
+    aurora::sectionLabel(tr("绘图样式"));
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##rep_style", &idx, items.c_str()) && idx >= 0 &&
+        idx < static_cast<int>(types.size())) {
+        wb.reps()->setType(id, types[static_cast<size_t>(idx)]);
+    }
+}
+
+[[maybe_unused]] static void renderRepTable(Workbench& wb) {
     RepresentationController* ctl = wb.reps();
     const auto& reps = wb.representations();
     if (ctl == nullptr || reps.empty()) {
@@ -816,26 +974,35 @@ static void renderRepTable(Workbench& wb) {
         const std::string popStyle = "##style_pop" + std::to_string(i);
         const std::string popColor = "##color_pop" + std::to_string(i);
         const std::string popBoth = "##style_color_pop" + std::to_string(i);
+        // 单元格点击 = 「先把这个表示设为编辑目标，再打开选择器」。
+        // 旧行为只打开弹层、不改活动表示，于是"点了样式却改了别的表示" ——
+        // 这是用户反馈的"显示视图的选择器 bug"的主因。现在与点名称行一致。
+        const auto activateRow = [&]() {
+            wb.clearRepMultiSelection();
+            wb.setActiveRepIndex(rowId);
+        };
         if (wide) {
             ImGui::TableSetColumnIndex(1);
-            const std::string styleLbl = style + "##st" + std::to_string(i);
+            const std::string styleLbl = style + " ▾##st" + std::to_string(i);
             if (ImGui::Selectable(styleLbl.c_str())) {
+                activateRow();
                 ImGui::OpenPopup(popStyle.c_str());
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", tr("点击修改绘制样式"));
+                ImGui::SetTooltip("%s", tr("点击修改绘制样式（同时切换编辑目标）"));
             }
             if (ImGui::BeginPopup(popStyle.c_str())) {
                 popupStyles(rowId);
                 ImGui::EndPopup();
             }
             ImGui::TableSetColumnIndex(2);
-            const std::string colorLbl = color + "##cl" + std::to_string(i);
+            const std::string colorLbl = color + " ▾##cl" + std::to_string(i);
             if (ImGui::Selectable(colorLbl.c_str())) {
+                activateRow();
                 ImGui::OpenPopup(popColor.c_str());
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", tr("点击修改配色方案"));
+                ImGui::SetTooltip("%s", tr("点击修改配色方案（同时切换编辑目标）"));
             }
             if (ImGui::BeginPopup(popColor.c_str())) {
                 popupColors(rowId);
@@ -844,8 +1011,9 @@ static void renderRepTable(Workbench& wb) {
             ImGui::TableSetColumnIndex(3);
         } else {
             ImGui::TableSetColumnIndex(1);
-            const std::string both = style + " · " + color + "##sc" + std::to_string(i);
+            const std::string both = style + " · " + color + " ▾##sc" + std::to_string(i);
             if (ImGui::Selectable(both.c_str())) {
+                activateRow();
                 ImGui::OpenPopup(popBoth.c_str());
             }
             if (ImGui::BeginPopup(popBoth.c_str())) {
@@ -864,9 +1032,10 @@ static void renderRepTable(Workbench& wb) {
         if (selShort.size() > 14) {
             selShort = selShort.substr(0, 12) + "…";
         }
-        const std::string selLbl = selShort + "##selcell" + std::to_string(i);
+        const std::string selLbl = selShort + " ▾##selcell" + std::to_string(i);
         const std::string popSel = "##sel_pop" + std::to_string(i);
         if (ImGui::Selectable(selLbl.c_str())) {
+            activateRow();
             ImGui::OpenPopup(popSel.c_str());
         }
         if (ImGui::IsItemHovered()) {
@@ -881,6 +1050,7 @@ static void renderRepTable(Workbench& wb) {
         const std::string menuLbl = "...##rm" + std::to_string(i);
         const std::string popMenu = "##rep_row_menu" + std::to_string(i);
         if (ImGui::SmallButton(menuLbl.c_str())) {
+            activateRow();
             ImGui::OpenPopup(popMenu.c_str());
         }
         if (ImGui::BeginPopup(popMenu.c_str())) {
@@ -966,8 +1136,8 @@ static void renderRepTable(Workbench& wb) {
 class VisualizeModule : public IInspectorModule {
 public:
     const char* id() const override { return "visualize"; }
-    const char* label() const override { return "显示"; }
-    const char* subtitle() const override { return "表示、材质与作用分子"; }
+    const char* label() const override { return "渲染视图"; }
+    const char* subtitle() const override { return "选择或新建表示，在下方编辑"; }
 
     void render(Workbench& wb) override {
         RepresentationController* ctl = wb.reps();
@@ -998,25 +1168,9 @@ public:
 
 
         auto drawReps = [&]() {
-            aurora::sectionLabel(tr("表示"), tr("点击行切换 · Ctrl/Shift 多选"));
-            renderRepTable(wb);
-            if (ImGui::SmallButton(tr("新建"))) {
-                // VMD 式：若已在列表中选中某个分子，新表示默认只作用于它
-                std::string sel;
-                if (wb.selectedMolecule() >= 0 && wb.data() != nullptr) {
-                    const std::string nm =
-                        groupBaseName(wb.data()->moleculeName(static_cast<size_t>(wb.selectedMolecule())));
-                    if (!nm.empty() && nm.find(' ') == std::string::npos) {
-                        sel = "resname " + nm;
-                    }
-                }
-                const int32_t nid = ctl->addRepresentation(
-                    tr("球棍"), RepresentationType::BallAndStick, sel,
-                    ColorScheme::ElementCPK);
-                if (nid >= 0) {
-                    wb.setActiveRepIndex(nid);
-                }
-            }
+            aurora::sectionLabel(tr("表示"), tr("点击选中 · 在下方编辑"));
+            renderRepList(wb);
+            newRepMenu(wb, ctl);
             ImGui::SameLine();
             if (ImGui::SmallButton(tr("复制"))) {
                 // v2.12：复制当前表示（样式 + 选择 + 配色 + 材质 + 几何一并带上）
@@ -1065,7 +1219,7 @@ public:
         // 只保留一行「当前表示」摘要（下面是该表示的材质/颜色/几何参数归属说明），
         // 以及表格里没有的「材质」维度。
         {
-            aurora::sectionLabel(tr("当前表示"), tr("样式 / 配色可在上表直接点选"));
+            aurora::sectionLabel(tr("当前表示"), tr("样式 / 配色 / 作用分子都在下方编辑"));
             const std::string curStyle = engine::representationTypeZh(r.type);
             const std::string curColor = engine::colorSchemeZh(r.colorScheme);
             char line[256];
@@ -1083,6 +1237,9 @@ public:
                 }
             }
         }
+        aurora::spacer(2.0f);
+        styleCombo(wb, id, r);
+        colorCombo(wb, id, r);
         aurora::spacer(2.0f);
         materialCombo(wb, id, r);
 

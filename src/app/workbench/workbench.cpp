@@ -1654,6 +1654,9 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
                             std::max(avail.y - stripH, 64.0f));
         // 视图叠加开关（坐标轴 / 比例尺+尺寸）与播放期低细节网格
         svc_.viewport->setViewOverlay(showViewAxes_, showViewScale_);
+        if (svc_.timelineCtl != nullptr) {
+            svc_.viewport->setTrajectoryFrame(svc_.timelineCtl->frame());
+        }
         svc_.viewport->render(canvas);
         // ⚠ 必须在 render() 之后、时间轴等其它控件之前立刻取图像矩形：
         // 视口下方的 InvisibleButton（相机交互）依赖它。此前该矩形在时间轴
@@ -1839,8 +1842,14 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
     }
     vpOverlayRects_.push_back(ImVec4(pos.x + 8.0f, pos.y + 8.0f, 400.0f, 34.0f));
 
+    // 时间轴条占位：底部悬浮状态与 ESP 色标必须上移，否则会压在时间轴上
+    //（用户反馈"有时间轴后 esp 轴被挡"）。74 = renderViewport 里的 stripH。
+    const bool hasTimelineNow = svc_.timelineCtl != nullptr &&
+                                svc_.timelineCtl->frameCount() > 1;
+    const float bottomReserve = hasTimelineNow ? 74.0f : 0.0f;
+
     // —— 左下状态 ——
-    float infoY = pos.y + size.y - 30.0f;
+    float infoY = pos.y + size.y - 30.0f - bottomReserve;
     if (svc_.renderer != nullptr && svc_.renderer->surfaceGenerationPending()) {
         ImGui::SetCursorScreenPos(ImVec2(pos.x + 12.0f, infoY));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
@@ -1866,7 +1875,8 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
     if (rep != nullptr && rep->type == engine::RepresentationType::EspSurface &&
         rep->visible) {
         const float barW = std::min(240.0f, size.x * 0.42f);
-        const ImVec2 b0(pos.x + size.x - barW - 16.0f, pos.y + size.y - 46.0f);
+        const ImVec2 b0(pos.x + size.x - barW - 16.0f,
+                        pos.y + size.y - 46.0f - bottomReserve);
         const ImVec2 b1(b0.x + barW, b0.y + 12.0f);
         ImDrawList* fg = ImGui::GetWindowDrawList();
         const auto cmap = static_cast<engine::EspColormap>(std::clamp<int32_t>(

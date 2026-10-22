@@ -97,8 +97,9 @@ constexpr const char* kStyleNames[static_cast<int>(RepresentationType::Count)] =
     "丝带",      // 11 Ribbon       —— 薄带状，仅 backbone
     "ESP 表面",  // 12 EspSurface   —— 密度等值面 + 静电势逐顶点着色
     "平板",      // 13 Plate        —— 每个残基/分子一块扁平方板（辅基示意）
-    "菱形",      // 14 Diamond      —— 每个残基/分子一颗八面体宝石
+    "菱形",      // 14 Diamond      —— 每个非氢原子一颗八面体宝石
     "点云",      // 15 DotCloud     —— 每个原子一个点精灵（超大体系）
+    "多面体",    // 16 Polyhedron   —— 每个非氢原子一颗二十面体
 };
 
 // 结构类型 × 样式的适用性表（General 全可用；Protein 仅骨架专属样式）
@@ -107,10 +108,10 @@ constexpr bool kStyleSupportsKindTable[static_cast<int>(StyleKind::Count)]
                                        [static_cast<int>(RepresentationType::Count)] = {
     // General（小分子/溶剂/通用）：全部可用
     {true, true, true, true, true, true, true, true, true, true, true, true, true, true,
-     true, true},
-    // Protein：仅骨架专属（Cartoon=4 / Tube=9 / NewCartoon=10 / Ribbon=11）+ 平板/菱形
+     true, true, true},
+    // Protein：仅骨架专属（Cartoon=4 / Tube=9 / NewCartoon=10 / Ribbon=11）+ 平板/菱形/多面体
     {false, false, false, false, true, false, false, false, false, true, true, true, false,
-     true, true, false},
+     true, true, false, true},
 };
 
 bool typeIndexValid(RepresentationType t) noexcept {

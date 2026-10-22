@@ -216,7 +216,8 @@ void Representer::generate(const Representation& rep,
                            const entity::FrameData& frame,
                            uint64_t frameIndex,
                            const std::vector<bool>& mask,
-                           SceneCommandList& out) {
+                           SceneCommandList& out,
+                           uint32_t globalAtomBaseOverride) {
     RepContext ctx;
     ctx.scene = &scene;
     ctx.instance = &mi;
@@ -224,7 +225,9 @@ void Representer::generate(const Representation& rep,
     ctx.rep = &rep;
     ctx.mask = &mask;
     ctx.instanceIndex = instanceIndex;
-    ctx.globalAtomBase = scene.globalAtomBase(instanceIndex);
+    ctx.globalAtomBase = globalAtomBaseOverride != UINT32_MAX
+                             ? globalAtomBaseOverride
+                             : scene.globalAtomBase(instanceIndex);
     ctx.frameIndex = frameIndex;
     // 体系渲染模式（每体系独立；后端据此切换 VkPipeline）
     ctx.renderMode = 0;

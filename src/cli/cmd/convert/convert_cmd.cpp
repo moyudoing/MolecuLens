@@ -57,6 +57,8 @@ bool parseStyle(const std::string& name, engine::RepresentationType* out) {
     else if (s == "plate" || name == "平板") *out = RT::Plate;
     else if (s == "diamond" || s == "gem" || name == "菱形") *out = RT::Diamond;
     else if (s == "dotcloud" || s == "dots" || name == "点云") *out = RT::DotCloud;
+    else if (s == "polyhedron" || s == "poly" || name == "多面体")
+        *out = RT::Polyhedron;
     else return false;
     return true;
 }

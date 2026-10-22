@@ -413,6 +413,12 @@ void MolScene::render(const ImVec2& size) {
         dirty_ = true;   // 退出低模窗口后重画一帧高清图
     }
     lastDynamicDetail_ = dynamicDetail;
+    // 运动窗口内冻结 QuickSurf/vdW 表面几何：轨迹每帧改坐标，若按原逻辑生成表面
+    // 会 700+ ms/帧（实测），播放直接掉到 1–3 FPS。球棍仍逐帧动，表面暂停刷新；
+    // 窗口结束（暂停 350 ms）后 Renderer 解冻并重建一次当前帧表面。
+    if (renderer_ != nullptr) {
+        renderer_->setSurfaceFreeze(dynamicDetail);
+    }
 
     // CPU 光线追踪预览：整个视口由 RT 渲染（相机/场景变化时重渲）
     if (rayTracePreview_) {
@@ -444,7 +450,10 @@ void MolScene::render(const ImVec2& size) {
     const bool cameraMoved = (camFp != lastCameraFp_);
     const bool sceneDirty = renderer_->scene()->dirtyBits() != 0;
     const bool gateOpen = dirty_ || cameraMoved || sceneDirty ||
-                          renderer_->commandSerial() != lastSerial_;
+                          renderer_->commandSerial() != lastSerial_ ||
+                          // 异步表面在后台生成时保持出帧：否则界面空闲后 prepare 不再被调用，
+                          // 完成通知没人消费 → 表面要等下一次鼠标/相机变化才出现。
+                          renderer_->surfaceGenerationPending();
 
     // 诊断：原子数变化时（= 导入/替换场景）打出重绘门控的四个输入。
     // 视口空白时这一条能直接指出成因：门控全假 → 永不重绘；或原子数为 0 →
@@ -485,11 +494,13 @@ void MolScene::render(const ImVec2& size) {
 
     // 判断变化 是否需要渲染器更新
     if (gateOpen) {
-
+        renderer_->setTrajectoryFrame(trajectoryFrame_);
         renderer_->update(0.0f);   // 脏位域 → needsRebuild_（prepare 阶段重建命令流）
         const auto& props = renderer_->scene()->properties();
         offscreen_->setBackground(props.bgColor);
+        const auto tPrepare0 = std::chrono::steady_clock::now();
         renderer_->prepare();
+        const auto tPrepare1 = std::chrono::steady_clock::now();
 
         // 诊断（命令流重建时打一条）：这是"数据 → 命令流"链路上最有价值的一处观测
         // —— 视口空白时，它能立刻区分"命令流本来就是空的"（生成侧问题）与
@@ -512,7 +523,23 @@ void MolScene::render(const ImVec2& size) {
         engine::RenderView view = renderer_->viewFor(*camera_, w, h);
         view.lowDetail = dynamicDetail;
         /// @key 渲染的关键
+        // 耗时拆分（每 60 帧一条 debug）：轨迹播放掉帧时能直接区分"命令流重放慢"
+        // 与"GPU 执行慢"，不必再猜。
+        const auto tPrep0 = std::chrono::steady_clock::now();
         offscreen_->execute(renderer_->commandList(), view);
+        const auto tPrep1 = std::chrono::steady_clock::now();
+        static int sViewPerf = 0;
+        if ((sViewPerf++ % 60) == 0) {
+            const double prepareMs =
+                std::chrono::duration<double, std::milli>(tPrepare1 - tPrepare0).count();
+            const double execMs =
+                std::chrono::duration<double, std::milli>(tPrep1 - tPrep0).count();
+            if (prepareMs + execMs > 4.0) {
+                spdlog::debug("[perf] viewport prepare {:.1f} ms, execute {:.1f} ms "
+                              "(lowDetail={})",
+                              prepareMs, execMs, dynamicDetail);
+            }
+        }
 
 #if MOLECULENS_RENDER_DIAG
         // 一次性诊断：回读离屏图像统计非背景像素——区分"渲染空白"（draw 未写入）
@@ -1188,8 +1215,9 @@ bool MolScene::exportAnimationToPng(uint32_t width, uint32_t height,
         renderer_->update(0.0f);
         renderer_->prepareBlocking();   // 动画逐帧导出：同步确保表面就绪
         char name[64];
-        std::snprintf(name, sizeof(name), "frame_%04llu.png",
-                      static_cast<unsigned long long>(f));
+        // 顺序命名（0000.png 起）：既便于 ffmpeg 按帧率读取，也不会因为起始帧/步长
+        // 不是 0/1 而在序列里留下编号空洞（旧实现用轨迹帧号 f）。
+        std::snprintf(name, sizeof(name), "frame_%04u.png", written);
         const std::string out =
             (std::filesystem::path(dirPath) / name).string();
         if (!exportToPng(width, height, out, bgOverride, ssaa, colorDepth, false)) {

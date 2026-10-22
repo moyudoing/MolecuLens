@@ -201,6 +201,19 @@ bool SceneCommandList::beginReplay(bool allowMesh) {
     return true;
 }
 
+uint32_t SceneCommandList::skipReplayMesh() {
+    if (!replaying_) {
+        return 0;
+    }
+    uint32_t skipped = 0;
+    while (replayCursor_ < replay_.size() &&
+           replay_[replayCursor_].code == Cmd::TriMesh) {
+        ++replayCursor_;
+        ++skipped;
+    }
+    return skipped;
+}
+
 bool SceneCommandList::endReplay() {
     replaying_ = false;
     // 必须恰好用完整份计划（少了 = 样式提前返回；多了/不符 = append 已置失败）
@@ -282,6 +295,7 @@ bool SceneCommandList::readFrom(ByteSource& in, SceneCommandList& out) {
     out.replaying_ = false;
     out.replayFailed_ = false;
     out.hasMesh_ = false;
+    out.meshSerial_ = 0;   // 反序列化：强制后端重新上传网格
     CommandIterator it(out);
     for (bool has = out.first(it); has; has = out.next(it)) {
         if (it.code() == Cmd::TriMesh) {

@@ -12,6 +12,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -69,6 +70,63 @@ void buildQuickSurfScene(entity::SceneStructure& scene,
     rep.surfGridSpacing = 0.35f;       // 小体系用较粗网格，测试快
     reps.clear();
     reps.push_back(rep);
+}
+
+// 建两帧轨迹的最小场景：用于验证"预取缓存让表面跟随轨迹帧"。
+void buildTwoFrameQuickSurfScene(entity::SceneStructure& scene,
+                                 std::vector<engine::Representation>& reps,
+                                 float x0, float x1) {
+    const uint32_t sysId = scene.addSystem("A");
+
+    MoleculeStructure ms;
+    ms.elements = {ElementType::Carbon, ElementType::Carbon};
+    Atom atom;
+    atom.element = ElementType::Carbon;
+    ms.atoms = {atom, atom};
+    ms.atomNameIds = {0, 0};
+    ms.key = computeStructureKey(ms);
+    const uint32_t si = scene.registerStructure(ms);
+
+    auto traj = std::make_shared<Trajectory>();
+    Timestep ts0;
+    ts0.positions.emplace_back(x0, 0.0f, 0.0f);
+    ts0.positions.emplace_back(x1, 0.0f, 0.0f);
+    traj->frames.push_back(std::move(ts0));
+    Timestep ts1;
+    ts1.positions.emplace_back(x0 + 0.8f, 0.0f, 0.0f);
+    ts1.positions.emplace_back(x1 + 0.8f, 0.0f, 0.0f);
+    traj->frames.push_back(std::move(ts1));
+    scene.addTrajectoryInstance(si, Transform{}, std::move(traj), sysId);
+
+    engine::Representation rep;
+    rep.name = "quicksurf";
+    rep.type = engine::RepresentationType::QuickSurf;
+    rep.systemSurface = true;
+    rep.surfGridSpacing = 0.35f;
+    reps.clear();
+    reps.push_back(rep);
+}
+
+// 命令流里所有 TriMesh 顶点的质心（用于确认表面确实跟着轨迹平移）。
+bool meshCentroid(const engine::SceneCommandList& list, glm::vec3& out, uint32_t& verts) {
+    out = glm::vec3(0.0f);
+    verts = 0;
+    engine::CommandIterator it(list);
+    for (bool has = list.first(it); has; has = list.next(it)) {
+        if (it.code() != engine::Cmd::TriMesh) {
+            continue;
+        }
+        engine::TriMeshHeader hdr{};
+        std::memcpy(&hdr, it.payload(), sizeof(hdr));
+        const uint8_t* p = it.payload() + sizeof(hdr);
+        for (uint32_t i = 0; i < hdr.vertexCount; ++i) {
+            engine::TriMeshVertex v{};
+            std::memcpy(&v, p + static_cast<size_t>(i) * sizeof(v), sizeof(v));
+            out += glm::vec3(v.pos);
+            ++verts;
+        }
+    }
+    return verts > 0;
 }
 
 } // namespace
@@ -160,6 +218,147 @@ TEST_CASE("renderer with async disabled still generates surface synchronously",
     REQUIRE_FALSE(renderer.surfaceGenerationPending());
     REQUIRE(countTriMesh(renderer.commandList()) > 0);   // 同步生成，一次到位
 
+    engine::async::shutdownSurfaceJobs();
+}
+
+TEST_CASE("frozen system surface survives coordinate replay",
+          "[engine][render][async][freeze]") {
+    entity::SceneStructure scene;
+    std::vector<engine::Representation> reps;
+    buildQuickSurfScene(scene, reps, /*x0=*/30.0f, /*x1=*/31.35f);
+    engine::Representation ball;
+    ball.name = "ballstick";
+    ball.type = engine::RepresentationType::BallAndStick;
+    reps.push_back(ball);   // 多渲染模式：球棍坐标命令 + 整体系表面 TriMesh
+
+    engine::async::shutdownSurfaceJobs();
+    engine::Renderer renderer;
+    renderer.setScene(&scene);
+    renderer.bindRepresentations(&reps, 1);
+    renderer.update(0.0f);
+    renderer.prepare();
+    REQUIRE(countTriMesh(renderer.commandList()) > 0);
+    const uint64_t serialFull = renderer.commandSerial();
+    const uint64_t meshSerialFull = renderer.commandList().meshSerial();
+
+    // 轨迹帧切：坐标变、拓扑不变。冻结表面后应走坐标重放，且旧 TriMesh 保留。
+    std::vector<glm::vec3> world = scene.instances()[0].trajectory->frames[0].positions;
+    for (auto& p : world) {
+        p.x += 2.0f;
+    }
+    scene.writeFramePositions(0, world);
+    renderer.setSurfaceFreeze(true);
+    renderer.update(0.0f);
+    renderer.prepare();
+    REQUIRE(renderer.lastPrepareWasReplay());
+    REQUIRE(renderer.commandSerial() > serialFull);
+    REQUIRE(renderer.commandList().meshSerial() == meshSerialFull);
+    REQUIRE(countTriMesh(renderer.commandList()) > 0);
+
+    // 解冻：下一次 prepare 应全量重建并把表面刷到当前帧
+    renderer.setSurfaceFreeze(false);
+    renderer.update(0.0f);
+    renderer.prepare();
+    REQUIRE_FALSE(renderer.lastPrepareWasReplay());
+    REQUIRE(renderer.commandList().meshSerial() != meshSerialFull);
+    REQUIRE(countTriMesh(renderer.commandList()) > 0);
+
+    engine::async::shutdownSurfaceJobs();
+}
+
+TEST_CASE("frozen surface-only playback keeps command serial unchanged",
+          "[engine][render][async][freeze]") {
+    entity::SceneStructure scene;
+    std::vector<engine::Representation> reps;
+    buildQuickSurfScene(scene, reps, /*x0=*/40.0f, /*x1=*/41.35f);
+
+    engine::async::shutdownSurfaceJobs();
+    engine::Renderer renderer;
+    renderer.setScene(&scene);
+    renderer.bindRepresentations(&reps, 1);
+    renderer.update(0.0f);
+    renderer.prepare();
+    REQUIRE(countTriMesh(renderer.commandList()) > 0);
+    const uint64_t serialBefore = renderer.commandSerial();
+
+    // 只开整体系表面时，冻结播放期间没有任何需要更新的可见命令：
+    // 必须保留 serial，否则后端会每帧重传整张表面网格（14 FPS 的根因）。
+    std::vector<glm::vec3> world = scene.instances()[0].trajectory->frames[0].positions;
+    for (auto& p : world) {
+        p.y += 1.0f;
+    }
+    scene.writeFramePositions(0, world);
+    renderer.setSurfaceFreeze(true);
+    renderer.update(0.0f);
+    renderer.prepare();
+    REQUIRE(renderer.lastPrepareWasReplay());
+    REQUIRE(renderer.commandSerial() == serialBefore);
+    REQUIRE(countTriMesh(renderer.commandList()) > 0);
+
+    // 解冻后仍应重建并换入最新坐标对应的表面
+    renderer.setSurfaceFreeze(false);
+    renderer.update(0.0f);
+    renderer.prepare();
+    REQUIRE_FALSE(renderer.lastPrepareWasReplay());
+    REQUIRE(renderer.commandSerial() > serialBefore);
+
+    engine::async::shutdownSurfaceJobs();
+}
+
+TEST_CASE("prefetched QuickSurf follows trajectory frame",
+          "[engine][render][async][prefetch]") {
+    entity::SceneStructure scene;
+    std::vector<engine::Representation> reps;
+    buildTwoFrameQuickSurfScene(scene, reps, /*x0=*/70.0f, /*x1=*/71.35f);
+
+    engine::async::shutdownSurfaceJobs();
+    engine::Renderer renderer;
+    renderer.setScene(&scene);
+    renderer.bindRepresentations(&reps, 2);
+    renderer.setAsyncSurfaceEnabled(true);
+
+    // 第 0 帧：首次异步生成
+    scene.applyTrajectoryFrame(0, 0);
+    renderer.setTrajectoryFrame(0);
+    renderer.update(0.0f);
+    renderer.prepare();
+    engine::async::waitForSurfaceJobs();
+    renderer.update(0.0f);
+    renderer.prepare();          // 换入第 0 帧表面，并在命中时提交后续帧预取
+    engine::async::waitForSurfaceJobs();
+
+    glm::vec3 c0(0.0f);
+    uint32_t v0 = 0;
+    REQUIRE(meshCentroid(renderer.commandList(), c0, v0));
+    c0 /= static_cast<float>(v0);
+    const uint64_t meshSerial0 = renderer.commandList().meshSerial();
+
+    // 第 1 帧：应直接命中预取缓存，表面整体 +0.8 Å
+    scene.applyTrajectoryFrame(0, 1);
+    renderer.setTrajectoryFrame(1);
+    renderer.update(0.0f);
+    renderer.prepare();
+
+    glm::vec3 c1(0.0f);
+    uint32_t v1 = 0;
+    REQUIRE(meshCentroid(renderer.commandList(), c1, v1));
+    c1 /= static_cast<float>(v1);
+    REQUIRE(c1.x > c0.x + 0.3f);            // 表面确实换到了新帧
+    REQUIRE(v1 > 0);
+    REQUIRE(renderer.commandList().meshSerial() != meshSerial0);
+
+    engine::async::shutdownSurfaceJobs();
+}
+
+TEST_CASE("prefetch jobs do not block current frame rebuild",
+          "[engine][async][prefetch]") {
+    engine::async::shutdownSurfaceJobs();
+    const uint64_t submittedBefore = engine::async::submittedSurfaceJobCount();
+    REQUIRE(engine::async::submitPrefetchSurfaceJob(0xFEED1234ull, [] {}));
+    // 预取只写缓存，不应让 Renderer 误判"当前帧命令流不完整"
+    REQUIRE_FALSE(engine::async::surfaceJobsBusy());
+    REQUIRE(engine::async::submittedSurfaceJobCount() == submittedBefore);
+    engine::async::waitForSurfaceJobs();
     engine::async::shutdownSurfaceJobs();
 }
 

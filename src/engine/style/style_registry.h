@@ -47,6 +47,7 @@ inline constexpr StyleDrawFn kStyleStaticTable[static_cast<int>(RepresentationTy
     drawPlate,             // 13 Plate        —— 平板（每残基/分子一块扁平方板）
     drawDiamond,           // 14 Diamond      —— 菱形（每残基/分子一颗八面体宝石）
     drawDotCloud,          // 15 DotCloud     —— 点云（每原子一个点精灵）
+    drawPolyhedron,        // 16 Polyhedron   —— 多面体（每个非氢原子一颗二十面体）
 };
 
 // 编译期按类型查询：直接取静态表对应槽位；未注册/越界返回 nullptr（不改动表）。

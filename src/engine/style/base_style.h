@@ -42,6 +42,7 @@ void drawEspSurface  (const RepContext&, SceneCommandList&);   // EspSurface（c
 void drawPlate       (const RepContext&, SceneCommandList&);   // Plate（每残基/分子一块扁平方板）
 void drawDiamond     (const RepContext&, SceneCommandList&);   // Diamond（每残基/分子一颗八面体宝石）
 void drawDotCloud    (const RepContext&, SceneCommandList&);   // DotCloud（每原子一个点精灵）
+void drawPolyhedron  (const RepContext&, SceneCommandList&);   // Polyhedron（每个非氢原子一颗二十面体）
 
 } // namespace moleculens::engine
 

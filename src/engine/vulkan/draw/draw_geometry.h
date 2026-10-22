@@ -73,6 +73,9 @@ struct FrameGpuBuffers {
         uint32_t materialIndex = 0;
     };
     MeshDrawRange meshRanges[4];
+    // 上一次网格上传对应的内容修订号。与 listRevision 分开：坐标重放只改坐标命令，
+    // 网格字节未变，可复用顶点/索引缓冲，避免每帧重传整张 QuickSurf 表面。
+    uint64_t meshUploadRevision = UINT64_MAX;
 
     // 上一次 drawGeometry 实际提交的绘制调用数（ground truth，每帧开头清零）。
     // 存在的意义：批处理是否生效**必须可观测**。调用数由 computeDrawRuns 的
@@ -89,10 +92,13 @@ struct FrameGpuBuffers {
 // 说明：globalSet 为全局 UBO 描述符集（相机/光照/雾）。
 //       listRevision 为 draw 的来源命令流 serial：与 gpu.uploadRevision 相同时
 //       跳过实例/顶点缓冲重传（内容未变）。
+//       meshRevision 为网格内容修订号（SceneCommandList::meshSerial）：坐标重放
+//       保持同一值，网格缓冲无需重传；全量重建才变化。
 void drawGeometry(VkCommandBuffer cmd, VulkanDevice& device,
                   const PipelineSet& pipelines, const DrawList& draw,
                   FrameGpuBuffers& gpu, const SharedMeshes& meshes,
                   VkDescriptorSet globalSet, uint64_t listRevision,
+                  uint64_t meshRevision,
                   const RenderView* view = nullptr);
 
 } // namespace moleculens::engine

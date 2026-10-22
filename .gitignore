@@ -67,6 +67,7 @@ build_style/
 build_*/
 vcpkg_installed/
 _test/
+_testtmp/
 .monitor/
 _esp/
 _aclrepair/

@@ -7,6 +7,7 @@
 #include "app/controller/timeline/timeline_controller.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include "engine/scheduler/frame_scheduler.h"
 #include "entity/scene/scene.h"
@@ -206,7 +207,19 @@ void TimelineController::publishFrame() {
     const uint64_t f = svc_.scheduler->frame();
     // 帧坐标 → 世界坐标（乘实例位姿）的唯一实现在 SceneStructure::applyTrajectoryFrame
     // —— 动画导出走同一入口，避免该变换两处各写一份而漂移。
+    const auto t0 = std::chrono::steady_clock::now();
     svc_.scene->applyTrajectoryFrame(activeInstance_, f);
+    // 每 60 帧一条 debug：多实例体系（md.gro 2042 实例）的帧切开销可观，
+    // 播放卡顿时先看这里，再看渲染器重放。
+    static int sFramePerf = 0;
+    if ((sFramePerf++ % 60) == 0) {
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                .count();
+        if (ms > 2.0) {
+            spdlog::debug("[perf] applyTrajectoryFrame {} -> {:.1f} ms", f, ms);
+        }
+    }
     if (svc_.bus) {
         svc_.bus->publish({EventType::FrameChanged, static_cast<int64_t>(f)});
     }

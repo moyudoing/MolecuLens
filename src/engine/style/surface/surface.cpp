@@ -10,7 +10,9 @@
 #include "engine/style/surface/mc_tables.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -20,6 +22,17 @@
 namespace moleculens::engine {
 
 namespace {
+
+// 体系表面最近一次生成的网格（运动中冻结时复用；轨迹每帧改坐标时不再重算）。
+// 带互斥：导出线程会与主线程并发进入 drawSystemSurface。
+struct SystemSurfaceCache {
+    std::mutex mtx;
+    bool valid = false;
+    std::vector<TriMeshVertex> verts;
+    std::vector<uint32_t> indices;
+};
+SystemSurfaceCache g_systemSurfaceCache;
+std::atomic<bool> g_freezeSurface{false};
 
 // —— Marching Cubes 查找表（Paul Bourke 公开实现，公共领域）——
 // 统一使用共享头 style/surface/mc_tables.h（quicksurf / esp_surface 共用）；
@@ -289,6 +302,14 @@ void drawSystemSurface(const RepContext& ctx, SceneCommandList& out) {
     if (!pos) {
         return;
     }
+    // 运动中冻结：复用上一次网格（见 quicksurf 同名逻辑）。
+    if (g_freezeSurface.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lk(g_systemSurfaceCache.mtx);
+        if (g_systemSurfaceCache.valid && !g_systemSurfaceCache.indices.empty()) {
+            out.appendTriMesh(g_systemSurfaceCache.verts, g_systemSurfaceCache.indices);
+            return;
+        }
+    }
     std::vector<glm::vec3> centers;
     std::vector<float> radii;
     std::vector<glm::vec4> atomColors;   // 与 centers 并行：逐顶点着色
@@ -463,7 +484,21 @@ void drawSystemSurface(const RepContext& ctx, SceneCommandList& out) {
         mesh[i].normal = glm::vec4(vertNrm[i], 0.0f);
         mesh[i].color = atomColors[static_cast<size_t>(ai)];
     }
+    {
+        std::lock_guard<std::mutex> lk(g_systemSurfaceCache.mtx);
+        g_systemSurfaceCache.verts = mesh;
+        g_systemSurfaceCache.indices = indices;
+        g_systemSurfaceCache.valid = true;
+    }
     out.appendTriMesh(mesh, indices);
+}
+
+void surfaceSetFreezeGeometry(bool frozen) {
+    g_freezeSurface.store(frozen, std::memory_order_relaxed);
+}
+
+bool surfaceFreezeGeometry() {
+    return g_freezeSurface.load(std::memory_order_relaxed);
 }
 
 } // namespace moleculens::engine

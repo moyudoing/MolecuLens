@@ -259,6 +259,10 @@ public:
     // 返回 false：无轨迹 / 实例越界 / 帧越界 / 帧坐标长度与本实例原子数不符
     //（坐标段保持不变）。
     bool applyTrajectoryFrame(uint32_t instanceIndex, uint64_t frame);
+    // 只读预测：按实例顺序生成第 frame 帧的**世界坐标**（不修改 coordsSoA、不置脏）。
+    // QuickSurf 逐帧预计算用：播放时提前算好后续帧的表面，而不必把场景切到那一帧。
+    // 无轨迹的实例按第 0 帧处理；短轨迹按末帧钳制。返回 false 仅当场景为空。
+    bool buildWorldPositionsForFrame(uint64_t frame, std::vector<glm::vec3>& out) const;
     // 重建 CoordsSoA（实例位姿/结构变更后）
     void rebuildCoordsSoA();
 
