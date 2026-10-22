@@ -4,7 +4,7 @@
 > 范围：**尚未落地**的方向、验收标准与选型。已完成的实施记录（视锥剔除、QuickSurf AVX2、BVH 光追、
 > 三角形光追、RT LOD、玻璃观感）连同全部实测数字已归档：
 > [`archive/ROADMAP-渲染与DFT视图-20261022-全量.md`](archive/ROADMAP-渲染与DFT视图-20261022-全量.md)。
-> 现存缺陷见 [`ISSUES-已知问题登记.md`](ISSUES-已知问题登记.md)；环境与构建约定见 [`../../REMAINING_WORK.md`](../../REMAINING_WORK.md)。
+> 现存缺陷见 [`ISSUES-已知问题登记.md`](ISSUES-已知问题登记.md)；环境与构建约定见 [REMAINING_WORK.md](https://github.com/moyudoing/MolecuLens/blob/master/REMAINING_WORK.md)。
 
 ---
 
@@ -14,7 +14,7 @@
 |---|---|---|---|
 | 渲染性能 | 实例化 + 视锥剔除 + 120 FPS 限帧；6.4k 原子场景瓶颈在**片元填充/呈现** | 先量填充率与超大体系才谈优化；细分档仍为静态两档 | 缩小场景顶点量降 ≥50% 且无观感差异 |
 | 密度场 | AVX2 + 多线程 MC（Release 166→49 ms，3.4×） | GPU compute（`surface.comp` 已写、缺 `.cpp` 与构建接入） | 同场景 QuickSurf 再降一个量级，且与 CPU 路径视觉一致 |
-| 光线追踪 | 自研 BVH（球/胶囊/三角形，231–310×）+ RT 预览两级 LOD + **opacity 半透明合成**（v2.12） | AO/GGX、降噪、折射近似；非 GUI 导出复用 BVH | 同 spp 噪点明显下降，接近 VMD Tachyon 观感 |
+| 光线追踪 | 自研 BVH（球/胶囊/三角形，231–310×）+ RT 预览两级 LOD + **opacity 半透明合成**（v2.12） | AO/GGX、降噪、折射近似；非 GUI 导出复用 BVH | 同 spp 噪点明显下降，接近 Tachyon 观感 |
 | DFT 属性 | cube 解析 + ESP 等值面 + 9 种色标 + 色标条 | **MO 等值面 + 能级图**（第一优先），再 DOS/PDOS、CDD/自旋 | 一组 cube 能直接出一张"轨道 + 能级"论文插图 |
 
 ---
@@ -68,9 +68,9 @@ NCI / RDG（先支持显示外部算好的 sign(λ₂)ρ cube）、能带结构�
 ### 2.6 RT 观感与工程化（P2，1–2 周）
 - **表面不透明度**（v2.12 已完成基础版）：`traceColor` 按 `MaterialBlock::opacity` 继续追踪后方并
   `front·α + behind·(1−α)`；半透明图元不投实体阴影。剩余近似边界见 ISSUES I-28（无排序/折射）。
-- **材质**：GGX 高光 + 菲涅尔 + 环境光遮蔽（AO），参数对齐 VMD Tachyon；加简易降噪（双边滤波）或 2× 超采样。
+- **材质**：GGX 高光 + 菲涅尔 + 环境光遮蔽（AO），参数对齐 Tachyon；加简易降噪（双边滤波）或 2× 超采样。
 - **BVH 缓存**：GUI 预览已有；CLI/批量导出每次重建（Release 911k 三角形约 118 ms），可做成跨调用缓存。
-- **验收**：同 spp 下噪点明显下降；与 VMD 同结构同角度截图观感接近；导出时间不劣化。
+- **验收**：同 spp 下噪点明显下降；与参考渲染同结构同角度截图观感接近；导出时间不劣化。
 
 ### 2.7 GPU 密度核（P2，工作量最大）
 - **已就绪**：`shaders/surface.comp`（6486 B）、`src/engine/vulkan/compute/surface_compute.h`（push constant 128B、SSBO、`compute()` 签名）。
@@ -109,7 +109,7 @@ NCI / RDG（先支持显示外部算好的 sign(λ₂)ρ cube）、能带结构�
 ## 3. 数据层建议（做 2.2–2.5 之前先统一）
 
 - 引入 `PropertyField {dims, origin, spacing, values, sign convention}`：密度、势、轨道、CDD、自旋都进这个结构，渲染层只认它 → 新增属性图 = 新增"怎么算/怎么读"的适配器。
-- 体积数据内存：cube 512³ ≈ 537 MB → 需要分块/降采样（参考 VMD `VolumetricData`）。
+- 体积数据内存：cube 512³ ≈ 537 MB → 需要分块/降采样（参考成熟体数据实现）。
 - 解析层用 **cclib**（Python）做参考验证，但**不引入运行时依赖**：C++ 只需覆盖 Gaussian/ORCA/VASP 常见片段。
 
 ---

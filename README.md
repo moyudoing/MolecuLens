@@ -13,6 +13,8 @@ from the command line for a paper.
 [![Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C.svg)](#architecture)
 [![Tests](https://img.shields.io/badge/tests-187%20cases%20%2F%20193%2C781%20assertions-brightgreen.svg)](#testing)
 [![Version](https://img.shields.io/badge/version-v2.13-orange.svg)](docs/_internal/CHANGELOG-2026-10-22-v2.13.md)
+[![Docs & quality](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml/badge.svg)](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml)
+[![Docs site](https://github.com/moyudoing/MolecuLens/actions/workflows/pages.yml/badge.svg)](https://moyudoing.github.io/MolecuLens/)
 
 **[English](README.md)** · **[简体中文](README.zh-CN.md)** · [Documentation](docs/) · [Changelog](docs/_internal/)
 
@@ -31,7 +33,7 @@ a real-time Vulkan viewport, per-representation styling, trajectory scrubbing th
 *Reproduction* — every visible setting has a CLI flag, so a figure you tuned interactively can be
 regenerated bit-for-bit in a script or CI job: `moleculens-cli render … --rep quicksurf --style publication`.
 
-It is not a plugin of VMD, PyMOL or ChimeraX. The renderer, the representation system, the
+It is a standalone application, not a plugin host. The renderer, the representation system, the
 trajectory reader and the CPU ray tracer are all implemented in this repository (~41k lines of C++20,
 no Python or runtime dependency in the shipped app).
 
@@ -54,18 +56,41 @@ no Python or runtime dependency in the shipped app).
 
 More figures (materials, tessellation, quality comparisons) live in [`docs/figs_v2/`](docs/figs_v2/).
 
+## Open data & demos
+
+[`datasets/`](datasets/) ships 12 openly licensed structures, small molecules and a 51-frame
+trajectory. Every image below was rendered by `moleculens-cli` from those files — no post-processing.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/figs_v2/demo/1crn_newcartoon.png" alt="Crambin cartoon"><br>
+<sub><b>1CRN · new-cartoon</b> — 327 atoms, publication style.</sub></td>
+<td width="50%"><img src="docs/figs_v2/demo/md_1u19_frame25.png" alt="Rhodopsin trajectory"><br>
+<sub><b>Rhodopsin trajectory · frame 25</b> — 5,547 atoms, 51 frames at 20 ps.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/figs_v2/demo/glycine_esp.png" alt="ESP surface"><br>
+<sub><b>ESP-mapped surface</b> — density isosurface coloured by electrostatic potential (synthetic fixture).</sub></td>
+<td><img src="docs/figs_v2/demo/aspirin_rt.png" alt="Ray-traced aspirin"><br>
+<sub><b>CPU ray tracing</b> — aspirin, 4 spp, soft shadows.</sub></td>
+</tr>
+</table>
+
+Provenance, SHA-256 checksums and licenses: [`datasets/README.md`](datasets/README.md).
+Full gallery and exact commands: [Open data & demos](docs/06-开源数据集与演示.md).
+
 ## Features
 
 | Area | What you get |
 | --- | --- |
 | **Input formats** | PDB, GRO, SDF, Gaussian cube (`.cube`/`.cub`); trajectories **DCD**, **XTC**, **TRR** (GROMACS legacy *and* 2023+ layouts) |
 | **Representations (17)** | wireframe, stick, ball-and-stick, spacefill, VdW, licorice, tube, ribbon, cartoon, new-cartoon, surface, QuickSurf, ESP surface, plate, diamond, dot cloud, polyhedron |
-| **Colouring** | CPK by element, VMD-style *Name* palette, chain, residue, B-factor, uniform |
+| **Colouring** | CPK by element, atom-name palette (cyan carbon, red oxygen, blue nitrogen, white hydrogen), chain, residue, B-factor, uniform |
 | **ESP surfaces** | density isosurface + per-vertex electrostatic potential, colour maps (`bwr`, `coolwarm`, `viridis`, `jet`, reference/spectral), colourbar and extrema labels |
 | **Ray tracing** | built-in CPU path tracer with a compact BVH for spheres, capsules and triangles — surfaces and QuickSurf meshes included, no GPU or OptiX needed |
 | **Trajectories** | time-driven playback at 12–60 FPS, selection-aware looping, frame-accurate scrubbing, frame-incremental uploads |
 | **Animation export** | PNG sequence, APNG, GIF, MP4, WebM (the last four through `ffmpeg`; override the encoder with `MOLECULENS_FFMPEG`) |
-| **Workbench** | fixed five-zone layout, 9 inspector modules (display, molecules, ESP, orbitals, trajectory, annotations, analysis, log, settings), light/dark themes, Chinese and English UI |
+| **Workbench** | fixed layout (nav rail + left tool shelf + viewport + inspector), 9 inspector modules (display, molecules, ESP, orbitals, trajectory, annotations, analysis, log, settings), left shelf tools (browse / distance measure / label / arrow, + display toggles), light/dark themes, Chinese and English UI |
 | **Publication output** | style presets `default` / `soft` / `publication` / `vivid`, 8-bit and 16-bit PNG, transparent background, OBJ / POV / STL / `.mlscene` export |
 | **Engineering** | Catch2 suites, spdlog level logging, Vulkan single backend with an offscreen FBO path, three-platform CMake build |
 
@@ -182,10 +207,11 @@ The long-form documentation is written in Chinese; English translations are welc
 | Document | Contents |
 | --- | --- |
 | [软件架构书](docs/01-软件架构书.md) | layering, modules, data flow, command stream, render pipeline, ADR and deviation log |
-| [功能介绍书](docs/02-功能介绍书.md) | feature matrix, per-module walkthrough, comparison with VMD / Multiwfn / GaussView |
+| [功能介绍书](docs/02-功能介绍书.md) | feature matrix, per-module walkthrough, comparison with Multiwfn / GaussView |
 | [使用说明](docs/03-使用说明.md) | installation, UI tour, per-module operations, shortcuts, CLI reference, FAQ |
 | [测试报告](docs/04-测试报告.md) | real 6,452-atom benchmark: surface speed, export, trajectories, defects found and fixed |
 | [DFT 常用绘图指南](docs/05-DFT常用绘图指南.md) | paper figure types → data source → parameters → tool → support status |
+| [Open data & demos](docs/06-开源数据集与演示.md) | 12 openly licensed datasets, provenance, licenses and reproducible renders |
 | [ESP_SURFACE.md](ESP_SURFACE.md) | ESP surface data path, parameters and figure recipes |
 | [REMAINING_WORK.md](REMAINING_WORK.md) | open work index and build/environment conventions |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | dependency installation, versions, environment |
@@ -201,6 +227,16 @@ The long-form documentation is written in Chinese; English translations are welc
 * ESP colourbar and extrema labels move above the timeline when a trajectory is loaded.
 
 Full entry: [CHANGELOG v2.13](docs/_internal/CHANGELOG-2026-10-22-v2.13.md).
+
+## Documentation & open data (2026-10-22)
+
+* New `datasets/` collection: 12 openly licensed files (RCSB PDB structures, PubChem 3D
+  conformers, an MIT-licensed 51-frame trajectory) with provenance, SHA-256 checksums and a
+  reproducible demo gallery.
+* GitHub Pages documentation site, community health files, issue/PR templates and a CI gate that
+  checks relative links and keeps the documentation free of third-party product names.
+* The long-form documentation is now vendor-neutral; third-party reference notes and assets were
+  removed from the repository.
 
 ## Roadmap
 

@@ -103,13 +103,14 @@ build(cmake): 升级 vcpkg baseline
 3. 按 [PR 模板](.github/PULL_REQUEST_TEMPLATE.md) 填写：跑了什么命令、测试数是多少。
 4. 明确写清渲染输出有没有变；没变就贴改前改后的 md5。
 5. 正在评审的分支不要 force-push，追加提交即可，压不压交给维护者决定。
-6. 目前没有 CI，评审者本地跑测试。请先自己本地跑通，别让评审者替你发现编译错误。
+6. CI（.github/workflows/quality.yml）检查文档相对链接、第三方产品名与目录粒度；C++ 测试仍在本地跑，请先自己跑通，别让评审者替你发现编译错误。
 
 ## 文档
 
 * 行为变了就更新 `docs/` 下对应文档、`docs/_internal/` 里的变更记录；用户可见的变化还要同步 README 功能表。
 * 长文档以中文为准；README 是中英双语（`README.md` 英文、`README.zh-CN.md` 中文），动一处请两边同步。
-* `docs/figs_v2/` 里的插图应当能由命令行复现，新增插图时在 PR 里贴出命令。
+* `docs/figs_v2/` 里的插图应当能由命令行复现，新增插图时在 PR 里贴出命令；`docs/06-开源数据集与演示.md` 的图库就是这样生成的。
+* `datasets/` 新增文件必须可再分发（公有领域、CC0/CC-BY、MIT/BSD）；禁止 GPL、NC、ND 或许可不明数据，并在 `datasets/README.md` 记录来源、许可与 SHA-256。
 
 ## 许可证与签署
 

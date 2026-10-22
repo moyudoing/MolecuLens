@@ -12,6 +12,8 @@
 [![Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C.svg)](#架构)
 [![Tests](https://img.shields.io/badge/tests-187%20cases%20%2F%20193%2C781%20assertions-brightgreen.svg)](#测试)
 [![Version](https://img.shields.io/badge/version-v2.13-orange.svg)](docs/_internal/CHANGELOG-2026-10-22-v2.13.md)
+[![Docs & quality](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml/badge.svg)](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml)
+[![Docs site](https://github.com/moyudoing/MolecuLens/actions/workflows/pages.yml/badge.svg)](https://moyudoing.github.io/MolecuLens/)
 
 **[简体中文](README.zh-CN.md)** · **[English](README.md)** · [文档](docs/) · [更新记录](docs/_internal/)
 
@@ -33,7 +35,7 @@
 moleculens-cli render md.gro --rep quicksurf --style publication --bg white --out fig.png
 ```
 
-它不是 VMD / PyMOL / ChimeraX 的插件：渲染器、表示系统、轨迹读取和 CPU 光追都在本仓库实现
+它是独立应用，不是插件宿主：渲染器、表示系统、轨迹读取和 CPU 光追都在本仓库实现
 （约 4.1 万行 C++20，发布的应用不依赖 Python 运行时）。
 
 ## 界面与效果
@@ -55,18 +57,41 @@ moleculens-cli render md.gro --rep quicksurf --style publication --bg white --ou
 
 更多插图（材质、细分对比、画质对比）在 [`docs/figs_v2/`](docs/figs_v2/)。
 
+## 开源数据集与演示
+
+[`datasets/`](datasets/) 收录 12 个可公开分发的结构、小分子与 51 帧轨迹文件。下面的每张图都由
+`moleculens-cli` 直接从这些文件渲染，未做后期处理。
+
+<table>
+<tr>
+<td width="50%"><img src="docs/figs_v2/demo/1crn_newcartoon.png" alt="Crambin 卡通"><br>
+<sub><b>1CRN · 改进卡通</b> —— 327 原子，白底出版风格。</sub></td>
+<td width="50%"><img src="docs/figs_v2/demo/md_1u19_frame25.png" alt="视紫红素轨迹"><br>
+<sub><b>视紫红素轨迹 · 第 25 帧</b> —— 5,547 原子，51 帧 × 20 ps。</sub></td>
+</tr>
+<tr>
+<td><img src="docs/figs_v2/demo/glycine_esp.png" alt="ESP 映射表面"><br>
+<sub><b>ESP 映射表面</b> —— 密度等值面按静电势逐顶点着色（合成夹具）。</sub></td>
+<td><img src="docs/figs_v2/demo/aspirin_rt.png" alt="阿司匹林光追"><br>
+<sub><b>CPU 光追</b> —— 阿司匹林，4 spp，柔和阴影。</sub></td>
+</tr>
+</table>
+
+来源、SHA-256 与许可见 [`datasets/README.md`](datasets/README.md)；完整图库与复现命令见
+[开源数据集与演示](docs/06-开源数据集与演示.md)。
+
 ## 功能
 
 | 方面 | 内容 |
 | --- | --- |
 | **输入格式** | PDB、GRO、SDF、Gaussian cube（`.cube`/`.cub`）；轨迹 **DCD / XTC / TRR**（GROMACS 经典与 2023+ 布局） |
 | **表示（17 种）** | 线状、棍状、球棍、空间填充、范德华球、甘草棍、管状、丝带、卡通、改进卡通、表面、QuickSurf、ESP 映射表面、平板、菱形、点云、多面体 |
-| **配色** | 元素 CPK、VMD 风格 *Name* 调色板、链、残基、B 因子、单色 |
+| **配色** | 元素 CPK、原子名调色板（碳青、氧红、氮蓝、氢白）、链、残基、B 因子、单色 |
 | **ESP 表面** | 密度等值面 + 静电势逐顶点着色，色标可选 `bwr` / `coolwarm` / `viridis` / `jet` / 参考谱，附极值数值标注 |
 | **光追** | 自研 CPU 路径追踪 + 紧凑 BVH（球、胶囊、三角形），表面与 QuickSurf 网格同样可光追，不依赖 GPU 或 OptiX |
 | **轨迹** | 时间驱动播放 12–60 FPS、选区循环、逐帧精确拖动、帧增量上传 |
 | **动画导出** | PNG 序列 / APNG / GIF / MP4 / WebM（后四者经 `ffmpeg`，可用 `MOLECULENS_FFMPEG` 指定编码器） |
-| **工作台** | 固定五区布局、9 个检查器模块（显示/分子/ESP/轨道/轨迹/标注/分析/日志/设置）、浅色深色双主题、中英双语 |
+| **工作台** | 固定布局（左导航 + 左侧工具栏 + 视口 + 检查器）、9 个检查器模块（显示/分子/ESP/轨道/轨迹/标注/分析/日志/设置）、左侧工具栏（浏览/测距/标注/箭头 + 显示开关）、浅色深色双主题、中英双语 |
 | **出版出图** | 风格预设 `default`/`soft`/`publication`/`vivid`、8 位与 16 位 PNG、透明背景；OBJ / POV / STL / `.mlscene` 导出 |
 | **工程** | Catch2 测试、spdlog 分级日志、Vulkan 单后端 + 离屏 FBO、三平台 CMake 构建 |
 
@@ -181,10 +206,11 @@ data/         演示结构、轨迹夹具、界面字体
 | 文档 | 内容 |
 | --- | --- |
 | [01-软件架构书](docs/01-软件架构书.md) | 分层、模块、数据流、命令流、渲染管线、ADR 与设计偏差记录 |
-| [02-功能介绍书](docs/02-功能介绍书.md) | 功能矩阵、模块逐项说明、与 VMD / Multiwfn / GaussView 的对照 |
+| [02-功能介绍书](docs/02-功能介绍书.md) | 功能矩阵、模块逐项说明、与 Multiwfn / GaussView 的对照 |
 | [03-使用说明](docs/03-使用说明.md) | 安装、界面导览、逐模块操作、快捷键、命令行参数、FAQ |
 | [04-测试报告](docs/04-测试报告.md) | GROMACS 6452 原子真实算例：表面速度、导出、轨迹、缺陷与修复 |
 | [05-DFT常用绘图指南](docs/05-DFT常用绘图指南.md) | 论文插图类型 → 数据来源 → 参数 → 工具 → 本项支持度 |
+| [06-开源数据集与演示](docs/06-开源数据集与演示.md) | 12 个公开数据集、来源与许可、可复现演示图 |
 | [ESP_SURFACE.md](ESP_SURFACE.md) | ESP 映射表面的数据链、参数与出图配方 |
 | [REMAINING_WORK.md](REMAINING_WORK.md) | 剩余工作索引与**环境/构建约定**（新会话先读） |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | 依赖安装、版本、环境配置 |
@@ -201,6 +227,14 @@ data/         演示结构、轨迹夹具、界面字体
 * 有轨迹时间轴时，ESP 色标与极值标注上移，避免被遮挡。
 
 完整条目见 [CHANGELOG v2.13](docs/_internal/CHANGELOG-2026-10-22-v2.13.md)。
+
+## 文档与开源数据（2026-10-22）
+
+* 新增 `datasets/`：12 个可公开分发的数据文件（RCSB PDB 结构、PubChem 3D 构象、MIT 许可的
+  51 帧轨迹），附来源、SHA-256 与可复现演示图库。
+* 新增 GitHub Pages 文档站、社区健康文件、issue/PR 模板，以及检查相对链接与第三方产品名的
+  CI 文档门禁。
+* 长篇文档改为不依赖任何第三方软件命名；相关参考笔记与素材已从仓库移除。
 
 ## 路线图
 

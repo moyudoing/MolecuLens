@@ -148,7 +148,7 @@ public:
 13. 路线图（GPU compute 表面、IGMH/AIM、Python 脚本、插件 ABI）
 
 ### 7.2 功能介绍书（docs/02-功能介绍书.md）
-- 产品定位与目标用户；能力矩阵（对比 VMD / Multiwfn / GXNU-MolStudio / PyMOL）
+- 产品定位与目标用户；能力矩阵（对比 Multiwfn / GXNU-MolStudio / PyMOL）
 - 按模块讲功能（场景/可视化/表面/ESP/轨道/轨迹/分析/日志/设置），每节：做什么、
   怎么用、参数含义、限制；性能与规模数据；已知限制与路线图。
 

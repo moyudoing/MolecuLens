@@ -1,0 +1,51 @@
+# 换行与文本属性（保守策略）
+# 只声明"按扩展名自动识别"，**不强制 eol=lf**：已有文件不会因为一次属性提交被整库重写；
+# 需要统一行尾时由编辑器或 .editorconfig 处理，不在这里一刀切。
+* text=auto
+
+# —— 明确按文本处理：提交时存 LF，检出时按平台 ——
+*.md       text
+*.txt      text
+*.pdb      text
+*.gro      text
+*.cube     text
+*.cub      text
+*.sdf      text
+*.json     text
+*.cmake    text
+*.glsl     text
+*.vert     text
+*.frag     text
+*.comp     text
+*.py       text
+*.yml      text
+*.yaml     text
+*.cff      text
+*.sh       text
+*.bat      text
+*.ps1      text
+
+# 说明：本项目的 *.pdb 是分子结构文件（data/*.pdb 等），不是 MSVC 调试符号。
+# 调试符号 *.pdb 由 .gitignore 排除，两种文件靠路径区分，这里按结构文件当文本处理。
+
+# —— 二进制：禁止换行转换，禁止文本合并 ——
+*.xtc      binary
+*.trr      binary
+*.dcd      binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.ico      binary
+*.tga      binary
+*.docx     binary
+*.stl      binary
+*.spv      binary
+*.ttf      binary
+*.otf      binary
+
+# STL 有 ASCII 与二进制两种写法：导出器目前写 ASCII，统一标 binary 只影响 diff 与换行转换，
+# 对两种写法都安全，也避免把二进制 STL 当文本合并。
+# *.obj 是文本格式，不做标记；轨迹与结构数据（.xtc/.trr/.dcd）体积大，上面已按二进制处理。
+
+# —— GitHub 语言统计：文档不计入代码行数 ——
+docs/**    linguist-documentation

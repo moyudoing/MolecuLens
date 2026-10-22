@@ -11,7 +11,7 @@
 | 方向 | 现状 | 最高性价比动作 | 预期收益 |
 |---|---|---|---|
 | 渲染性能 | Vulkan GPU 实例化；键搜索已是 cell-list；quicksurf 已多线程 | **视锥剔除 + 屏幕尺寸自适应细分（LOD）** | 缩小看全场景时 draw/顶点量降一个数量级 |
-| 密度场生成 | CPU 多线程高斯 splat（对标 VMD QuickSurf 的标量版） | **AVX2 内核**（VMD 现成范式） | 单核 3–4×，叠加多线程总提速 2–3× |
+| 密度场生成 | CPU 多线程高斯 splat（对标 QuickSurf 的标量版） | **AVX2 内核**（成熟工程范式） | 单核 3–4×，叠加多线程总提速 2–3× |
 | 光线追踪 | 已有 CPU 光追（`src/engine/raytrace/`），未见 BVH | **tinybvh 加速 + 简单降噪** | 同质量下 5–20×；或同时间内可加 2–3 次反弹 |
 | DFT 属性 | cube 解析 + ESP 表面 + 色标 | **MO 等值面 + 能级图 + DOS/PDOS**（数据侧接 cclib/pymatgen） | 从"能看 ESP"到"能出一套论文插图" |
 
@@ -31,24 +31,24 @@
 **明确缺口**
 1. 无视锥剔除：缩小/移出视野的实例仍然全量提交（搜 `cull|frustum` 无实现）。
 2. 细分档是**静态**的（预览/导出两档），不是按屏幕投影尺寸自适应。
-3. 密度核是标量循环，没有 SIMD；VMD 有 AVX2/NEON 专用实现。
+3. 密度核是标量循环，没有 SIMD；已有成熟实现提供 AVX2/NEON 专用版本。
 4. 光追没有加速结构（BVH），复杂场景退化为逐个求交。
 5. DFT 侧只有 cube → ESP 表面；没有 MO/DOS/自旋密度/CDD/能带。
 
 ---
 
-## 2. 渲染性能：从 VMD / LAMMPS 学什么
+## 2. 渲染性能：从成熟实现 / LAMMPS 学什么
 
-### 2.1 VMD 的可借鉴点（源码：`F:\vmd-1.9.4a57.src\vmd-1.9.4a57\src\`）
+### 2.1 可借鉴的工程实现
 
-| VMD 做法 | 文件/函数 | MolecuLens 对应 | 改造建议 |
+| 参考做法 | 关键点 | MolecuLens 对应 | 改造建议 |
 |---|---|---|---|
-| 高斯密度核的 SIMD 版本（AVX2 / NEON） | `QuickSurf.C` → `vmd_gaussdensity_avx2()` / `vmd_gaussdensity_neon()` | `quicksurf.cpp` 标量三重循环 | 抽出 `splatRow(...)` 用 `_mm256_fmadd_ps` 一次算 8 个格点；本机若支持 FMA，单核可 3–4× |
-| 密度线程 + 归约线程两段式 | `vmd_gaussdensity_threaded()` / `densitythread()` / `reductionthread()` | 已有 `std::thread` 分块 | 补"归约与 splat 流水线重叠"，减少串行尾部 |
+| 高斯密度核的 SIMD 版本（AVX2 / NEON） | 密度核按 8 个格点向量化 | `quicksurf.cpp` 标量三重循环 | 抽出 `splatRow(...)` 用 `_mm256_fmadd_ps` 一次算 8 个格点；本机若支持 FMA，单核可 3–4× |
+| 密度线程 + 归约线程两段式 | 分块计算与归约流水线重叠 | 已有 `std::thread` 分块 | 补"归约与 splat 流水线重叠"，减少串行尾部 |
 | 显示列表缓存（命令流只重建变化部分） | `DrawMolecule` 的 display list | 已有 serial 缓存 | 可进一步做**按表示粒度**的脏标记，避免整段重建 |
 | 分辨率随距离缩放 | 各 rep 的 `resolution` 参数 | 现在是静态档位 | 见 2.2 LOD |
 
-> VMD 的 `QuickSurf.C` 约 60 KB，一半是 SIMD 分支和线程同步，**算法本身和我们一致**，值得抄的是工程实现而不是思路。
+> 成熟实现的密度核约 60 KB，一半是 SIMD 分支和线程同步，**算法本身和我们一致**，值得学的是工程实现而不是思路。
 
 ### 2.2 具体改造点（按优先级）
 
@@ -64,12 +64,12 @@
    - 收益：缩小看时不浪费三角形；拉近时不糊。
 
 3. **密度核 SIMD + 归约优化（P1，2 天）**
-   - 依据：VMD `vmd_gaussdensity_avx2`；
+   - 依据：成熟实现的 AVX2 密度核；
    - 注意：MSVC 需 `/arch:AVX2` 或函数级 `__declspec(cpu_specific)` + 运行时分派（`__cpuid` 判断），否则老 CPU 崩；
    - 验收：quicksurf 生成时间对比（md.gro，1200×800），期望 ≥2×。
 
 4. **（可选）GPU 密度核（P2）**
-   - 用 Vulkan compute 做 splat + marching cubes；VMD 有 CUDA 版本可作参考架构；
+   - 用 Vulkan compute 做 splat + marching cubes；已有成熟实现提供 CUDA 版本可作参考架构；
    - 收益大但工作量大，建议等 P0/P1 稳定后再评估。
 
 ### 2.3 LAMMPS 的可借鉴点
@@ -100,7 +100,7 @@
 | **[OSPRay](https://www.khronos.org/assets/uploads/developers/presentations/Portable_and_Scalable_Rendering_with_ANARI.pdf)**（经 ANARI 调） | CPU/GPU 生产级光线追踪 | 科学可视化成熟、支持体积 | 依赖重（oneAPI 运行时），打包体积大 | ★★★☆ 适合"要出版级图" |
 | **[Vulkan RT (VK_KHR_ray_tracing_pipeline)](https://github.com/AlexanderVeselov/RayTracing)** | GPU 硬件光追 | 实时预览可用、与现有 Vulkan 后端同栈 | 需 RTX/RDNA2+ 硬件、着色器要写 RT 管线 | ★★★★（有硬件时） |
 | **Intel Embree** | CPU BVH | 快、成熟 | 引入二进制依赖与许可管理 | ★★★ |
-| **VMD Tachyon** | 参考实现 | 分子领域经典、参数直观 | 只作参考（GPL 混合） | 参考 |
+| **Tachyon** | 参考实现 | 分子领域经典、参数直观 | 只作参考（GPL 混合） | 参考 |
 
 ### 3.3 推荐路线（分三步）
 
@@ -110,9 +110,9 @@
 - 验收：md.gro（6452 原子，球棍）1024×768、64 spp 的导出时间，对比现状；目标 ≥5×。
 
 **Step 2（1–2 周）：材质/采样升级**
-- 加 GGX 高光 + 菲涅尔 + 环境光遮蔽（AO），参考 VMD Tachyon 与环境光遮蔽参数；
+- 加 GGX 高光 + 菲涅尔 + 环境光遮蔽（AO），参考 Tachyon 与环境光遮蔽参数；
 - 加简易降噪（双边滤波）或 2× 超采样；
-- 验收：同 spp 下噪点明显下降，出图接近 VMD `Tachyon` 观感。
+- 验收：同 spp 下噪点明显下降，出图接近 Tachyon 观感。
 
 **Step 3（可选，2–3 周）：Vulkan RT 预览**
 - 有 RT 硬件时做"实时软阴影/AO"预览通道；没有则跳过；
@@ -147,7 +147,7 @@
 - 统一一个 `PropertyField` 抽象：`{grid dims, origin, spacing, values, sign convention}`；
 - 所有 cube 类数据（密度、势、轨道、CDD、自旋）都进这个结构，渲染层只认它 → 新增属性图 = 新增一个"怎么算/怎么读"的适配器；
 - 解析层用 **cclib**（Python）做参考实现验证，但**不引入运行时依赖**（我们的 C++ 只需覆盖 Gaussian/ORCA/VASP 的常见片段）；
-- 体积数据要考虑内存：cube 512³ ≈ 134M float ≈ 537 MB → 需要分块/降采样（VMD `VolumetricData` 的降采样策略可参考）。
+- 体积数据要考虑内存：cube 512³ ≈ 134M float ≈ 537 MB → 需要分块/降采样（成熟体数据实现的降采样策略可参考）。
 
 ---
 
@@ -161,7 +161,7 @@
 | **P1** | tinybvh 加速光追 | 1024×768/64spp 导出 ≥5× | 1 周 |
 | **P1** | MO 等值面 + 能级图 | 一个 cube 组能出"轨道 + 能级"插图 | 1 周 |
 | **P2** | DOS/PDOS、CDD、自旋密度 | 各出一个可导出 PNG 的面板 | 各 3–5 天 |
-| **P2** | 光追材质升级（GGX/AO/降噪） | 与 VMD Tachyon 观感接近 | 1–2 周 |
+| **P2** | 光追材质升级（GGX/AO/降噪） | 与 Tachyon 观感接近 | 1–2 周 |
 | **P3** | Vulkan RT 实时预览 / GPU 密度核 | 有硬件时帧率 ≥30 | 2–3 周 |
 
 ---
@@ -205,7 +205,7 @@
 放大后**更慢**而不是更快——因为放大后球体铺满屏幕，**片元填充**成为瓶颈，剔除省下的顶点提交被淹没。这与 I-08 的结论一致：当前场景的瓶颈在填充率/同步，不在实例数量。
 
 **结论**：剔除是正确的可扩展性优化（为 10⁵ 原子级体系、以及将来多视口/平移浏览兜底），但在 6.4k 原子场景上**看不出收益**。要真正提速，下一步应做：
-1. 密度核 SIMD（VMD 路线）——影响 surface/quicksurf 生成；
+1. 密度核 SIMD——影响 surface/quicksurf 生成；
 2. 查 present mode / 帧同步（I-08 的 64 FPS 天花板）；
 3. 若做超大体系，再回来量剔除的实际 draw 数（需要加计数打点）。
 
@@ -366,21 +366,21 @@ Debug 构建同样加速（密度核 582→66 ms；MC 450→198 ms @4 线程）�
 
 ---
 
-### 2026-10-21 21:30 · v2.6 玻璃观感落地（VMD Glass 对标）
+### 2026-10-21 21:30 · v2.6 玻璃观感落地（Glass 对标）
 
-用户给了 4 张对照图（自建引擎的白底半透明聚合物 vs VMD 1.9.3 的 QuickSurf + DynamicBonds 玻璃壳），要求「实现图片相同风格的渲染作为检验」＋「UI 优化」。
+用户给了 4 张对照图（自建引擎的白底半透明聚合物 vs 参考实现的 QuickSurf + DynamicBonds 玻璃壳），要求「实现图片相同风格的渲染作为检验」＋「UI 优化」。
 
 **渲染侧**
 - `shaders/mesh.frag`：半透明片元加视相关玻璃壳——边缘抬 alpha（`fres = pow(1-N·V,3)`）、边缘吸收压暗（`×0.72`）、`rim = pow(1-N·V,6)` 叠冷调反射与材质掠射高光。不透明片元零影响。
-- 材质仍用 `kMaterialPresets` 里的 Glass1/2/3（与 VMD materials.dat 参数一一对应），本次只补"视相关"这一层，不改参数表。
+- 材质仍用 `kMaterialPresets` 里的 Glass1/2/3（参数按经典材质库校准），本次只补"视相关"这一层，不改参数表。
 
 **入口侧（此前缺失）**
 - CLI：`--material <预设名>`；`--rep` 规格第 5 段可写材质；`--system-surface` 修正为对 `--rep` 也生效（否则多表示 + 整体系表面会退化成逐分子壳）。
-- GUI：显示模块顶栏「一键风格」→ **VMD 玻璃**（整体系 Glass2 表面 0.32 + 球棍 Opaque + 白底 + Name 配色）/ **不透明**。
+- GUI：显示模块顶栏「一键风格」→ **玻璃**（整体系 Glass2 表面 0.32 + 球棍 Opaque + 白底 + Name 配色）/ **不透明**。
 
 **对照结果**：`.monitor/polymer.gro`（md.gro 去 SOL，356 原子）在 1100×950 / SSAA 2× 下表面 26,660 三角形，玻璃壳有明暗层次、掠射高光与壳内球棍透视，见 `docs/figs_v2/glass_D.png`。
 
-**遗留**：① 真正对标还需要 VMD 同机同结构截图逐项比对（VMD 1.9.3 已在机器上运行，`F:\VMD1.9.3\vmd.exe`）；② 用户要的「UI 优化」目前只落到一键风格，面板分层/密度尚未动；③ 玻璃表面在 RT 下未处理折射/反射（P2 tinybvh 之后再谈）。
+**遗留**：① 真正对标还需要同机同结构参考截图逐项比对；② 用户要的「UI 优化」目前只落到一键风格，面板分层/密度尚未动；③ 玻璃表面在 RT 下未处理折射/反射（P2 tinybvh 之后再谈）。
 
 ## 2026-10-21 23:30 · v2.9 分子标注 + 多选 + 自定义内容区
 
@@ -388,12 +388,12 @@ Debug 构建同样加速（密度核 582→66 ms；MC 450→198 ms @4 线程）�
   - 每帧从 `svc_.scene->instances()` 取每个结构的第一条实例，用 `globalAtomBase(li)` 定位 `coordsSoA().positions` 中的坐标段（段长 = `structuresPool_[sidx].elements.size()`），求质心，再经 `engine::esp_overlay::projectToPixel(cam->viewProjMatrix(canvas.x/canvas.y), ...)` 投影成像素。
   - 标签画在 `ImGui::GetWindowDrawList()` 上：深色半透明圆角底 + 淡蓝描边 + 白字，避免白底/深底看不清。
   - **防重叠**：维护 `std::vector<ImVec4> lbPlaced`，与已放置矩形相交就向下错开 16px（最多 6 次）。
-- **表示表格重排**（`src/app/workbench/modules/modules.cpp` 的 `anchorRep`/`tableRep`：VMD 式列：可见 ✓ | 名称 | 样式 | 配色 | 选择 | ⋯ 菜单；用 `ImGui::TableSetupColumn` 固定列宽，全部 `PushID(row)` 保证控件唯一。东/西侧用 `ImGui::TableSetupScrollFreeze(0,1)` 固定表头。
+- **表示表格重排**（`src/app/workbench/modules/modules.cpp` 的 `anchorRep`/`tableRep`：表示表格列：可见 ✓ | 名称 | 样式 | 配色 | 选择 | ⋯ 菜单；用 `ImGui::TableSetupColumn` 固定列宽，全部 `PushID(row)` 保证控件唯一。东/西侧用 `ImGui::TableSetupScrollFreeze(0,1)` 固定表头。
 - **多选 + 批量编辑**（`Workbench` 新增 `std::vector<Representation> selList_`）：Ctrl/Shift 点行切换选择（`repRowCtl` 与多选条都改 `selList_`），多选后出现的批量条支持「批量样式 / 批量配色 / 批量可见 / 删除选中」。
 - **删除快捷键**：表示表格获得焦点时 `Del` 删除选中表示。
 - **自定义内容区**（自绘双栏布局）：`renderViewport+Inspector` 内若 `aspect < 0.9`，用 `ImGui::BeginChild("vp_col")` / `BeginChild("insp_col")` 两列排列（左视口、右检查器），`splitter` 拖拽值 0.92–0.982 存 `inspFrac_`（默认 0.965）并持久化到 `Settings::inspectorFraction`。
 - **进展**：Debug 构建 exit 0；177 例 / 193,713 断言全过；GUI 实机确认标签与表格。
-### 23:35 · 表示表格单元格可编辑（VMD 式）
+### 23:35 · 表示表格单元格可编辑（表格式）
 - `renderRepTable`（`src/app/workbench/modules/modules.cpp`）的「样式」「配色」两格从 `TextDisabled` 改为 `Selectable` + 弹出选择列表：样式列用现有 `kTypes`（13 项，`TypeEntry{RepresentationType, const char*}`），配色列遍历 `engine::ColorScheme::Count` 用 `engine::colorSchemeZh(cs)` 取名。窄面板（`availW < 430`）合并为一格，弹出菜单分「绘制样式 / 配色」两段。
 - 行尾原「×」删除按钮紧贴选择列，实测容易误删 → 改为「...」小按钮 + 弹出菜单（「删除此表示」「设为编辑目标」）。注意 ImGui 默认字体没有 `⋯`(U+22EF) 字形，会显示成 `?`，用 ASCII 三点。
 - 实机验证：样式列点「球棍」→ 选「范德华球」视图立刻变空间填充；配色列弹出 6 个方案；悬停提示「点击修改配色方案」正常。

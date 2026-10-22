@@ -1,0 +1,13 @@
+# 依赖更新：只盯 GitHub Actions（C++ 依赖走 vcpkg.json 的 baseline，由人工升）
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    assignees:
+      - "moyudoing"
+    open-pull-requests-limit: 5

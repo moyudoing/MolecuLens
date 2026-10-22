@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use MolecuLens in your research, please cite it as below."
+type: software
+title: "MolecuLens（分子视镜）"
+abstract: >-
+  MolecuLens is a local, single-window molecular viewer and rendering engine for
+  structural biology and computational chemistry. It reads PDB, GRO, SDF and
+  Gaussian cube files plus DCD, XTC and TRR trajectories, draws them in a real-time
+  Vulkan viewport with 17 representations and 23 material presets, maps electrostatic
+  potential onto isosurfaces, and exports publication figures through a built-in CPU
+  ray tracer. Every visible setting has a matching command-line flag, so a figure
+  tuned interactively can be reproduced bit-for-bit from a script.
+authors:
+  - family-names: "moyuMaster"
+    alias: "moyuMaster"
+repository-code: "https://github.com/moyudoing/MolecuLens"
+url: "https://moyudoing.github.io/MolecuLens/"
+license: "Apache-2.0"
+version: "2.13.0"
+date-released: "2026-10-22"
+keywords:
+  - "molecular visualization"
+  - "molecular graphics"
+  - "structural biology"
+  - "computational chemistry"
+  - "Vulkan"
+  - "ray tracing"
+  - "trajectory analysis"
+  - "electrostatic potential"
+  - "publication figures"
+  - "C++20"

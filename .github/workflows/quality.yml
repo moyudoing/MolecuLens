@@ -1,0 +1,39 @@
+# 文档与仓库结构门禁
+#   · tools/check_docs.py —— 相对链接是否可解析、文档里是否残留禁用术语
+#   · cmake/check_tree.py —— 每个目录最多 3 个 .cpp/.h
+# 只读权限，不构建 C++ 工程（本地构建与测试见 CONTRIBUTING.md）。
+name: quality
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: docs / tree
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install checker dependencies
+        run: pip install pyyaml
+
+      - name: Markdown relative links and forbidden terms
+        run: python tools/check_docs.py
+
+      - name: Directory granularity (at most 3 cpp/h per directory)
+        run: python cmake/check_tree.py

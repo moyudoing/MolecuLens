@@ -120,8 +120,9 @@ Rules of thumb:
 4. State explicitly whether rendering output changed, and paste the before/after md5 when it did not
    change.
 5. Do not force-push a branch under review; add commits and let the maintainer decide about squashing.
-6. There is no CI pipeline yet — the reviewer runs the suite locally. Please do not ask the reviewer
-   to discover breakage a local run would have shown.
+6. CI (.github/workflows/quality.yml) checks documentation links, forbidden product names and
+   the directory-granularity rule. The C++ suite still runs locally before review — do not ask the
+   reviewer to discover breakage a local run would have shown.
 
 ## Documentation
 
@@ -130,7 +131,9 @@ Rules of thumb:
 * Long-form documentation is written in Chinese; the README is bilingual (`README.md` English,
   `README.zh-CN.md` Chinese). Keep both languages in sync when you touch them.
 * Screenshots in `docs/figs_v2/` should be reproducible from a command line; mention the command in
-  the PR if you add one.
+  the PR if you add one. The demo gallery in `docs/06-开源数据集与演示.md` is generated this way.
+* New files under `datasets/` must be redistributable (public domain, CC0/CC-BY, MIT/BSD). Never add
+  GPL, NC, ND or unclear-licence data; update `datasets/README.md` with source, licence and SHA-256.
 
 ## License and sign-off
 

@@ -2,6 +2,7 @@
 # ⚠ 目录规则一律用根锚定（/build/ 而不是 build/）：裸 build/、export/、gen/
 #   会匹配到任意层级的同名目录，曾把 src/engine/export/** 整块排除在仓库外。
 /build/
+/site/
 cmake-build-*/
 /out/
 *.o
@@ -58,6 +59,8 @@ Thumbs.db
 
 # —— 例外：data/ 下的结构夹具（PDB 结构文件不是调试符号 .pdb）——
 !data/*.pdb
+# —— 例外：datasets/ 下的开源结构数据集（同上）——
+!datasets/**/*.pdb
 
 # —— 本地环境 / 临时缓存（不入库）——
 .venv/
@@ -72,5 +75,10 @@ _testtmp/
 _esp/
 _aclrepair/
 .dsh-progress/
+.tmp/
 test_export*
 /软件注册/
+
+# —— 第三方参考源码（本地阅读，不入库）——
+# 体积大、许可证与项目不同；不随仓库分发。
+/reference/

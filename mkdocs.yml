@@ -1,0 +1,65 @@
+# MolecuLens 文档站（GitHub Pages · MkDocs Material）
+# 构建：pip install mkdocs-material && mkdocs build --strict
+# 注意：
+#   · nav 里的路径相对 docs_dir（docs/），不要写成 docs/xxx；
+#   · 06-开源数据集与演示.md 尚未落地时，--strict 会因为 nav 指向不存在的文件而失败，
+#     该文件补上后流水线即通过；
+#   · 只索引 01–06 与内部变更记录，.docx 原件不进 nav（Pages 只发布 Markdown 渲染结果）。
+site_name: MolecuLens（分子视镜）
+site_description: 面向结构生物学与计算化学的分子可视化与渲染引擎 · Vulkan viewport, CPU ray tracing, reproducible CLI figures.
+site_url: https://moyudoing.github.io/MolecuLens/
+repo_url: https://github.com/moyudoing/MolecuLens
+repo_name: moyudoing/MolecuLens
+edit_uri: edit/master/docs/
+copyright: Copyright &copy; 2026 moyuMaster · Apache-2.0
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: 切换到浅色模式
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+
+nav:
+  - 首页: index.md
+  - 软件架构: 01-软件架构书.md
+  - 功能介绍: 02-功能介绍书.md
+  - 使用说明: 03-使用说明.md
+  - 测试报告: 04-测试报告.md
+  - DFT 绘图指南: 05-DFT常用绘图指南.md
+  - 开源数据集与演示: 06-开源数据集与演示.md
+  - 更新记录: _internal/CHANGELOG-2026-10-22-v2.13.md

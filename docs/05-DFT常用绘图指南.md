@@ -41,7 +41,7 @@
 
 | 问题类型 | 典型图 | 数据从哪来 | 常用工具 |
 | --- | --- | --- | --- |
-| **电子结构在空间上长什么样** | ESP 映射表面、分子轨道、CDD、自旋密度、ELF/LOL、NCI | 波函数/密度 → 三维网格（cube / CHGCAR） | Multiwfn、VASPKIT、NCIPLOT、critic2 → MolecuLens / VMD / VESTA |
+| **电子结构在空间上长什么样** | ESP 映射表面、分子轨道、CDD、自旋密度、ELF/LOL、NCI | 波函数/密度 → 三维网格（cube / CHGCAR） | Multiwfn、VASPKIT、NCIPLOT、critic2 → MolecuLens / VESTA |
 | **能量上怎么分布** | 能级图（HOMO/LUMO）、DOS/PDOS、能带 | 轨道能量、本征值、投影态密度 | Multiwfn、VASPKIT、pymatgen、LOBSTER → Origin / gnuplot / matplotlib |
 | **反应怎么走、能垒多少** | 势能面扫描、IRC、能垒图 | 一系列单点能 / 优化结构 | Gaussian、ORCA、ASE → Origin / gnuplot / matplotlib |
 | **定量与切片** | 静电势切片/等值线、原子电荷着色、表面积极值统计 | 网格数据的二维切片或逐原子标量 | Multiwfn、VESTA、gnuplot、matplotlib |
@@ -98,7 +98,7 @@
 | 适用问题 | 亲电/亲核位点、σ-hole、氢键给受体、分子间识别、溶剂化趋势 |
 | 数据来源与格式 | **两个 cube，必须同一次计算、同一网格**：`density.cub`（几何）+ `totesp.cub`（颜色）。由 `.fchk` 经 Multiwfn 导出 |
 | 方法与关键参数 | 密度等值面 iso = **0.001 a.u.**（≈ vdW 面；GUI 滑杆范围 **0.0005–0.02 a.u.**，别与 Surface/QuickSurf 的 0.05–2.0 混淆）；色标默认 **±45 kcal/mol**；自动范围取 **±99.5 分位**；Hartree→kcal/mol **×627.509474**；表面不透明度建议 **0.6–0.85** |
-| 工具 | Multiwfn 生成 cube；MolecuLens 渲染（GUI「ESP」模块 / CLI `--esp`）；替代：GaussView、VMD + 自写脚本 |
+| 工具 | Multiwfn 生成 cube；MolecuLens 渲染（GUI「ESP」模块 / CLI `--esp`）；替代：GaussView + 自写脚本 |
 | MolecuLens 现状 | **✅ 原生**：密度等值面 + ESP 逐顶点着色 + 色标条 + 极值标注，导出 PNG 时一并写入 |
 | 坑 | 两个 cube 网格不一致 → 表面出现或全灰；iso 过大表面缩进分子内部；跨分子比较时忘了固定 vmin/vmax（自动范围各自不同，颜色不可比）；把 ESP 当成「总能」解释 |
 
@@ -142,7 +142,7 @@
 | 适用问题 | HOMO/LUMO 形状、成键/反键性质、孤对与空轨道、激发定域性 |
 | 数据来源与格式 | **每个轨道一个 cube**（Gaussian `cubegen` 或 Multiwfn 输出；ORCA 用 `orca_plot`）。cube 数值 = 该轨道的波函数幅值（有正负） |
 | 方法与关键参数 | 单 cube 等值面；典型 iso **0.02–0.05 a.u.**；同一组图必须用**同一 iso**（或用工具提供的「包络百分比」模式，但不同软件定义不同）；正负号用双色区分 |
-| 工具 | 轨道 cube：Gaussian / Multiwfn / ORCA；等值面：MolecuLens（轨道模块）、VMD、GaussView；能级图：GaussView / Chemcraft / Origin / gnuplot / matplotlib |
+| 工具 | 轨道 cube：Gaussian / Multiwfn / ORCA；等值面：MolecuLens（轨道模块）、GaussView；能级图：GaussView / Chemcraft / Origin / gnuplot / matplotlib |
 | MolecuLens 现状 | **◐**：单个 cube 的等值面 ✅（「轨道」模块，iso 0.0005–0.5，默认 0.02），颜色即数值大小，**能显示正负两色**；但**不解析 fchk/MO、不能按轨道号选择、没有能级图/节面/双等值面**（路线图） |
 | 坑 | 不同软件的 cube 归一化不同，绝对 iso 不可跨软件比较；iso 太小会出现碎片；把 HOMO/LUMO 画在同一 iso 下比较大小是常见做法，但**形状差异不等于能量差** |
 
@@ -195,7 +195,7 @@ plot "tdos.dat" u 1:2 w l lw 2 t "Total", \
 | 适用问题 | 成键/吸附的电荷转移方向与大小、配位键、界面相互作用、形变密度 |
 | 数据来源与格式 | 三个单点：**复合物 AB、片段 A、片段 B**，几何完全相同、泛函/基组/网格一致；`Δρ = ρ(AB) − ρ(A) − ρ(B)` |
 | 方法与关键参数 | 同一网格逐点相减；等值面 **±0.005 a.u.**（常用 0.002–0.01）；正（积累）与负（耗散）分别用两个等值面/两种颜色；CDD 对基组与 BSSE 敏感 |
-| 工具 | Gaussian `cubegen` / Multiwfn 网格运算 / VASP `CHGCAR` 相减（`ICHARG=11` 非自洽）；画：MolecuLens（只显示结果 cube）、VESTA、VMD |
+| 工具 | Gaussian `cubegen` / Multiwfn 网格运算 / VASP `CHGCAR` 相减（`ICHARG=11` 非自洽）；画：MolecuLens（只显示结果 cube）、VESTA |
 | MolecuLens 现状 | **◐**：能把**已经算好的** CDD cube 当单 cube 等值面显示（正负值落在色标两端）；**不能**做三份密度的相减 |
 | 坑 | 三个计算的网格/盒子必须完全一致；片段单点要用复合物几何（否则混入弛豫能）；BSSE 未校正时电荷转移会被高估；只画一个 iso 会漏掉另一半符号 |
 
@@ -210,7 +210,7 @@ plot "tdos.dat" u 1:2 w l lw 2 t "Total", \
 | 适用问题 | 自由基/开壳层体系的未成对电子分布、磁性耦合、自旋污染判断 |
 | 数据来源与格式 | ρ(α) − ρ(β) 的 cube（Gaussian 自旋密度、ORCA、VASP `ISPIN=2` 的 `CHGCAR` 差值） |
 | 方法与关键参数 | 等值面 **0.005 a.u.**（0.001–0.01 视体系）；单色（只画正值）或正负双色；总自旋积分应等于 2S（自旋污染时不等） |
-| 工具 | Gaussian / ORCA / VASP 产生；MolecuLens / VESTA / VMD 显示 |
+| 工具 | Gaussian / ORCA / VASP 产生；MolecuLens / VESTA 显示 |
 | MolecuLens 现状 | **◐**：显示单 cube；无自旋密度计算、无自旋布居分析 |
 | 坑 | 自旋污染（`<S²>` 偏离 S(S+1)）会让密度「看起来对、积分不对」；UKS 与 ROKS 结果不可直接比；离域体系 iso 太小会把整个分子染红 |
 
@@ -223,7 +223,7 @@ plot "tdos.dat" u 1:2 w l lw 2 t "Total", \
 | 适用问题 | 非共价相互作用：氢键、π–π、CH–π、卤键、vdW 接触；配体-蛋白相互作用 |
 | 数据来源与格式 |  promolecular 密度与 RDG（s）；NCI 图 = `s` 对 `sign(λ2)ρ` 的散点 + 梯度等值面；IGMH 对片段对做 δg 分解 |
 | 方法与关键参数 | RDG 等值面常用 **s = 0.5**；着色用 `sign(λ2)ρ`（蓝=强吸引/氢键，绿=vdW，红=排斥）；δg 散点用于确认峰位；IGMH 需要片段划分 |
-| 工具 | Multiwfn **主功能 20（弱相互作用分析：RDG/NCI/IGM/IGMH）**、NCIPLOT、IGMH_Toolbox；画：VMD（常用）、MolecuLens 可显示 RDG 等值面但无散点图 |
+| 工具 | Multiwfn **主功能 20（弱相互作用分析：RDG/NCI/IGM/IGMH）**、NCIPLOT、IGMH_Toolbox；画：MolecuLens 可显示 RDG 等值面但无散点图 |
 | MolecuLens 现状 | **✗ 计算**（无 NCI/IGMH 实现）；**◐ 显示**：把已生成的 RDG 等值面 cube 当普通体数据等值面画，无法做 `sign(λ2)ρ` 的 BGR 映射与 δg 散点 |
 | 坑 | 用 promolecular 密度（而非真实密度）时峰位会偏移；等值面 iso 与散点阈值必须一起调；分子内 vs 分子间要分开看；NCI 图的「绿斑」不等于有强相互作用 |
 
@@ -263,7 +263,7 @@ plot "tdos.dat" u 1:2 w l lw 2 t "Total", \
 | --- | --- | --- | --- | --- |
 | **ELF / LOL** | 波函数 → ELF/LOL 网格；等值面或切片 | ELF 0.5–0.8；LOL 0.5–0.6 | **◐** 显示 cube 等值面 | Multiwfn、VASP + VESTA |
 | **静电势切片/等值线** | 平面网格（2D）→ 等值线/热图 | 平面位置、色标范围、等值线间隔 | **✗**（只有 3D 表面） | Multiwfn 导出 2D、gnuplot、matplotlib |
-| **原子电荷着色** | 逐原子标量（Mulliken/Hirshfeld/ADCH…）→ 按值着色 | 电荷方案必须与文献一致 | **✗** 仅支持元素/链/残基/BFactor/单色 | VMD、PyMOL、Multiwfn、VESTA |
+| **原子电荷着色** | 逐原子标量（Mulliken/Hirshfeld/ADCH…）→ 按值着色 | 电荷方案必须与文献一致 | **✗** 仅支持元素/链/残基/BFactor/单色 | PyMOL、Multiwfn、VESTA |
 | **表面极值统计** | 表面局部极大/极小 + 数值 | 平滑半径、NMS 阈值 | **◐** 自动标注 8 极大 + 8 极小（1.2 Å NMS），**无面积/统计导出** | Multiwfn `surfanalysis` |
 | **表面积 / 体积** | 等值面网格积分 | iso、网格密度 | **✗** | Multiwfn、MSMS、VESTA |
 
@@ -290,7 +290,6 @@ plot "tdos.dat" u 1:2 w l lw 2 t "Total", \
 | 画 | **VESTA** | 晶体结构、CHGCAR 等值面、能带/DOS 数据可视化 | 分子体系观感一般 | 免费 |
 | 画 | GaussView / Chemcraft | 轨道、振动、能级图、建模 | 商业（Chemcraft 有试用） | 商业 |
 | 画 | Avogadro | 建模 + 简易可视化 | 大体系与出版级出图有限 | 开源 |
-| 画 | VMD | 大体系、NCI 散点、动画 | 学习曲线陡；脚本 Tcl | 学术免费 |
 | 画 | PyMOL | 蛋白/配体、卡通、表面 | 出版风格偏生物 | 开源版 + 商业版 |
 | 画 | Origin / gnuplot / matplotlib | 曲线/散点/能级图/DOS | 不负责 3D 分子渲染 | 商业 / 开源 / 开源 |
 
@@ -301,7 +300,7 @@ plot "tdos.dat" u 1:2 w l lw 2 t "Total", \
 | 小分子 ESP 图（论文） | Gaussian → fchk → Multiwfn（density + totesp）→ **MolecuLens**（`--cmap rwb`，固定 ±45） |
 | 轨道形状 + 能级图 | Gaussian/ORCA → Multiwfn/orca_plot 出 cube → **MolecuLens**（iso 0.02）+ Origin（能级） |
 | 固体 DOS / 能带 | VASP → VASPKIT/pymatgen → gnuplot / Origin（E_F 对齐 0） |
-| 弱相互作用（NCI/IGMH） | Gaussian → Multiwfn 主功能 20 → VMD（散点 + 等值面）；MolecuLens 仅作等值面预览 |
+| 弱相互作用（NCI/IGMH） | Gaussian → Multiwfn 主功能 20 → Multiwfn 出散点 + 等值面；MolecuLens 仅作等值面预览 |
 | 反应能垒 / IRC | Gaussian/ORCA → cclib 解析 → Origin；几何变化转 DCD → **MolecuLens** 播放 |
 | 快速检查 cube 是否合理 | **MolecuLens** 打开 cube 看网格/范围/等值面，再决定是否进 Multiwfn 深挖 |
 

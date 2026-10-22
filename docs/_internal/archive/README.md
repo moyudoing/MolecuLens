@@ -8,7 +8,7 @@
 > - [`../ROADMAP-渲染与DFT视图.md`](../ROADMAP-渲染与DFT视图.md) —— 只管**尚未落地**的方向与验收标准
 > - [`../PLAN-UI组件丰富化.md`](../PLAN-UI组件丰富化.md) —— UI 组件设计 token + **未做**的组件
 > - [`../blueprint.md`](../blueprint.md) —— v2 设计基线（结构约定，仍然有效）
-> - [`../../../REMAINING_WORK.md`](../../../REMAINING_WORK.md) —— 跨文档的开放项索引 + 环境与构建约定
+> - [REMAINING_WORK.md](https://github.com/moyudoing/MolecuLens/blob/master/REMAINING_WORK.md) —— 跨文档的开放项索引 + 环境与构建约定
 
 ## 文件清单
 
@@ -18,7 +18,6 @@
 | `ROADMAP-渲染与DFT视图-20261022-全量.md` | 路线 + 413 行实施/实测记录 | P0 视锥剔除、QuickSurf AVX2、BVH 光追、RT LOD、玻璃观感均已落地，记录移入归档 |
 | `PLAN-UI组件丰富化-20261022-全量.md` | UI 组件方案 + 各版本实施进度 | P0 组件已落地，v2.7/v2.8/v2.10 的进度段落已成为历史 |
 | `REMAINING_WORK-20261022-全量.md` | 2026-09-26 的剩余工作 + 10-18 清理记录 | §1.1 异步表面已完成；其余开放项已并入新的 ISSUES / ROADMAP 与环境约定 |
-| `PLAN-线框配色与VMD风格对齐.md` | 线框「一链一色」三因诊断与方案 A/B/C | 三因全部落地（详见 ISSUES 快照 §9–§11），方案已无用例 |
 | `HANDOFF-新会话接手-20261021-0835.md` | 08:35 版交接 | 被 12:40 版与后续工作的现状文档取代 |
 | `HANDOFF-新会话接手-20261021-1240.md` | 12:40 版交接（线框配色专题） | 同上 |
 | `HANDOFF-2026-10-21-P1光追.md` | P1 光追交接 | 光追 BVH/三角形/LOD 均已完成 |
