@@ -268,6 +268,8 @@ struct SceneSnapshot {
         bool  systemSurface = false;
         float surfIsovalue = 0.5f;
         float surfGridSpacing = 0.5f;
+        // 表面平滑次数（0–3）：vdW 标量场盒式平滑；旧文件缺键 → 1。
+        int   surfSmooth = 1;
         // ESP 映射表面（type == "espsurface"）：cube 数据源 + 色标参数（v3 新增，
         // 旧文件缺键 → 默认值，不影响载入）。
         std::string espDensityCubePath;
@@ -290,6 +292,18 @@ struct SceneSnapshot {
         float metallic = 0.0f;
         float roughness = 0.40f;
         float opacity = 1.0f;
+        // 表面绘制模式（v2.19，可选键）：0 实心 / 1 线框 / 2 半透明。
+        // 旧文件缺键 → 0，与旧版"体系表面恒定实心"的观感一致。
+        uint8_t surfaceDrawMode = 0;
+        // 实例级类型范围（v2.19，可选键）：按"分子类型 + 比例/步长"过滤实例，
+        // 用于"只渲染一半溶剂分子"这类需求。缺键 → 全部实例（旧行为）。
+        // 语义与 engine/rep/representation.h 的 rangeMode 完全一致（持久化层是
+        // 纯数据镜像，不重复实现过滤逻辑）。
+        uint8_t rangeMode = 0;          // 0 全部 / 1 按比例 / 2 每隔 N 个
+        std::string rangeType;          // 分子类型（实例名 "#" 前的 token）；空 = 全部
+        float rangeFraction = 1.0f;     // 0..1
+        uint32_t rangeStride = 1;
+        uint32_t rangeOffset = 0;
     };
 
     std::vector<Structure> structures;

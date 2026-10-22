@@ -40,6 +40,13 @@ struct Settings {
     bool timelineLoop = true;
     float timelineDt = 2.0f;
     float timelineSpeed = 1.0f;
+    // —— 轨迹播放节奏（v2.19 动态 FPS）——
+    // 稳定键 "dynamic" | "fixed" | "refresh"（存字符串不存枚举序号：日后增删模式
+    // 不会让旧配置指向错误的节奏；缺键走默认 dynamic）。
+    std::string playbackMode = "dynamic";
+    int playbackFps = 60;          // 动态的目标上限 / 固定的帧率；0 = 跟随渲染
+    float playbackSpeed = 1.0f;    // 播放倍速（0.1–4.0）
+    int playbackMaxCatchUp = 2;    // 每渲染帧最多追几帧（1–8）
     std::vector<std::string> recentFiles;
     std::array<float, 3> cameraTarget{0, 0, 0};
     float cameraDistance = 40.0f;

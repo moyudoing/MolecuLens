@@ -20,7 +20,15 @@ glm::vec3 OrbitCamera::position() const {
 }
 
 glm::mat4 OrbitCamera::viewMatrix() const {
-    glm::mat4 v = glm::lookAt(position(), target, glm::vec3(0.0f, 1.0f, 0.0f));
+    // lookAt 的 up 与视线共线时（pitch≈±90°）叉乘退化，画面会突然翻 180°。
+    // 这里在接近极区时换一根不共线的 up，保证基向量始终正交、不翻转。
+    const glm::vec3 eye = position();
+    const glm::vec3 fwd = glm::normalize(target - eye);
+    glm::vec3 up(0.0f, 1.0f, 0.0f);
+    if (std::abs(glm::dot(fwd, up)) > 0.9995f) {
+        up = glm::vec3(0.0f, 0.0f, 1.0f);
+    }
+    glm::mat4 v = glm::lookAt(eye, target, up);
     // 绕屏幕法线（视图空间 +Z）滚转：view' = Rz(roll) * view（先 lookAt 再滚转
     // 视图空间坐标 → 图像绕屏幕中心旋转；正 roll = 逆时针，见 rollView 注释）
     if (roll != 0.0f) {
@@ -58,11 +66,18 @@ void OrbitCamera::rayForNdc(float ndcX, float ndcY, float aspect,
 
 void OrbitCamera::orbit(float dx, float dy) {
     yaw += dx;
+    // 留约 1.2° 余量：贴到 90° 时 lookAt 的 up 与视线共线，画面会翻 180°。
+    // viewMatrix 里还会在极区换一根 up，这里负责不让 pitch 真正越过极点。
     pitch = std::clamp(pitch + dy, -1.55f, 1.55f);
 }
 
 void OrbitCamera::dolly(float factor) {
-    distance = std::clamp(distance * factor, nearClip * 10.0f, farClip * 0.5f);
+    distance = std::clamp(distance * factor, std::max(minDistance, nearClip * 2.0f),
+                          std::max(maxDistance, nearClip * 4.0f));
+    // 近裁剪面随距离收缩、远面随距离外扩：放大到贴近包围球时不把原子/键
+    // 切成断面，缩小时也不会把整个分子切在远面之外。
+    nearClip = std::max(1e-4f, std::min(boundRadius * 1e-3f, distance * 1e-3f));
+    farClip = std::max(boundRadius * 10.0f, distance * 2.0f);
 }
 
 void OrbitCamera::pan(const glm::vec2& ndcDelta) {
@@ -87,9 +102,14 @@ void OrbitCamera::setFov(float degrees) {
 void OrbitCamera::centerOn(const glm::vec3& center, float radius) {
     target = center;
     const float r = std::max(radius, 1e-3f);
+    boundRadius = r;
     // distance = radius / tan(fov/2) * 1.2（主方案 §5.5）
     distance = r / std::tan(glm::radians(fov) * 0.5f) * 1.2f;
-    nearClip = r * 1e-3f;
+    // 最近只允许到包围球的 0.15 倍：再近相机就进入分子内部，近裁剪面会把
+    // 球/键切开（用户报的“放大后拖动翻形”）。要看清内部请用剖切/隐藏。
+    minDistance = std::max(r * 0.15f, 0.05f);
+    maxDistance = std::max(r * 10.0f, distance * 4.0f);
+    nearClip = std::max(1e-4f, r * 1e-3f);
     farClip = r * 10.0f;
 }
 

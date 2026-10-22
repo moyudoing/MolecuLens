@@ -10,9 +10,13 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "engine/camera/camera.h"
 #include "engine/cmd/cmd.h"
@@ -115,6 +119,13 @@ RoundTrip saveRound(const entity::SceneStructure& sc, const std::filesystem::pat
     rep.metallic = 0.65f;
     rep.roughness = 0.21f;
     rep.opacity = 0.44f;
+    // v2.19：表面绘制模式 + 实例级类型范围（非默认值，验证逐字段往返）
+    rep.surfaceDrawMode = 2;
+    rep.rangeMode = static_cast<uint8_t>(Representation::InstanceRangeMode::Stride);
+    rep.rangeType = "SOL";
+    rep.rangeFraction = 0.5f;
+    rep.rangeStride = 3;
+    rep.rangeOffset = 2;
     // 材质预设：取一个非默认项，验证"名字"持久化后能恢复出同一下标
     // （存名字而非下标：材质表增删/重排后旧文件不会静默指向别的材质）
     rep.materialPreset = kSteelPresetIndex;
@@ -251,6 +262,13 @@ TEST_CASE("scene bridge round-trips the domain model", "[serialize][bridge]") {
     REQUIRE(repsOut[0].metallic == Catch::Approx(rt.repsIn[0].metallic));
     REQUIRE(repsOut[0].roughness == Catch::Approx(rt.repsIn[0].roughness));
     REQUIRE(repsOut[0].opacity == Catch::Approx(rt.repsIn[0].opacity));
+    // v2.19：表面绘制模式 + 实例级类型范围逐字段往返（.mlscene 可选键）
+    REQUIRE(repsOut[0].surfaceDrawMode == rt.repsIn[0].surfaceDrawMode);
+    REQUIRE(repsOut[0].rangeMode == rt.repsIn[0].rangeMode);
+    REQUIRE(repsOut[0].rangeType == rt.repsIn[0].rangeType);
+    REQUIRE(repsOut[0].rangeFraction == Catch::Approx(rt.repsIn[0].rangeFraction));
+    REQUIRE(repsOut[0].rangeStride == rt.repsIn[0].rangeStride);
+    REQUIRE(repsOut[0].rangeOffset == rt.repsIn[0].rangeOffset);
     // 材质预设：存的是**名字**，载入后应恢复出同一下标（不是"碰巧数值相同"）
     REQUIRE(kSteelPresetIndex >= 0);
     REQUIRE(rt.repsIn[0].materialPreset == kSteelPresetIndex);
@@ -423,5 +441,104 @@ TEST_CASE("scene bridge embeds a shared system trajectory once", "[serialize][br
         REQUIRE(coords[k].z == Catch::Approx(traj->frames[1].positions[k].z));
         REQUIRE(coords[2 + k].x == Catch::Approx(traj->frames[1].positions[2 + k].x));
     }
+    std::filesystem::remove(path);
+}
+
+// =============================================================================
+// v2.19 可选字段向后兼容：旧 .mlscene 没有 surfaceDrawMode / range* 键
+// =============================================================================
+namespace {
+
+// 与 scene_serializer.cpp 内部实现同款（IEEE 802.3 / 多项式 0xEDB88320）。
+// 复制一份而不是暴露内部函数：测试要构造"旧版本文件"，需要自己回填 CRC。
+uint32_t testCrc32(const uint8_t* data, size_t size) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; ++i) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+// 写一个"只有元数据"的 v2 .mlscene（空命令流 + 空坐标段 + CRC）。
+// 用来模拟旧版本文件：元数据里**故意不含** v2.19 的 6 个可选键。
+void writeMetaOnlySceneFile(const std::filesystem::path& path,
+                            const nlohmann::json& meta) {
+    const std::string metaStr = meta.dump(2);
+    persist::mlscene::Header header{};
+    std::memcpy(header.magic, persist::mlscene::kMagic, 6);
+    header.version = persist::mlscene::kVersion;
+    header.metaSize = static_cast<uint64_t>(metaStr.size());
+
+    std::vector<uint8_t> buf;
+    const auto* hp = reinterpret_cast<const uint8_t*>(&header);
+    buf.insert(buf.end(), hp, hp + sizeof(header));
+    buf.insert(buf.end(), metaStr.begin(), metaStr.end());
+    const uint64_t zero = 0;
+    for (int k = 0; k < 2; ++k) {   // cmdSize = 0、coordsSize = 0
+        const auto* zp = reinterpret_cast<const uint8_t*>(&zero);
+        buf.insert(buf.end(), zp, zp + sizeof(zero));
+    }
+    const uint32_t crc = testCrc32(buf.data(), buf.size());
+    const auto* cp = reinterpret_cast<const uint8_t*>(&crc);
+    buf.insert(buf.end(), cp, cp + sizeof(crc));
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(out.good());
+    out.write(reinterpret_cast<const char*>(buf.data()),
+              static_cast<std::streamsize>(buf.size()));
+    out.flush();
+}
+
+} // namespace
+
+TEST_CASE("v2.19 optional representation fields default for old scene files",
+          "[serialize][bridge][range]") {
+    const auto path =
+        std::filesystem::temp_directory_path() / "moleculens_bridge_old_range.mlscene";
+
+    // 旧文件形态：表示只有 v2 基础字段，没有 surfaceDrawMode / range* 键
+    nlohmann::json meta;
+    meta["version"] = 2;
+    meta["units"] = "angstrom";
+    meta["structures"] = nlohmann::json::array();
+    meta["instances"] = nlohmann::json::array();
+    nlohmann::json oldRep = {{"name", "old"},
+                             {"type", "ballstick"},
+                             {"selection", "*"},
+                             {"colorScheme", "element"},
+                             {"radiusScale", 1.0f},
+                             {"bondScale", 1.0f},
+                             {"visible", true},
+                             {"systemSurface", false}};
+    meta["representations"] = nlohmann::json::array({oldRep});
+    writeMetaOnlySceneFile(path, meta);
+
+    auto loaded = persist::mlscene::MlSceneSerializer::load(path);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->representations.size() == 1u);
+    const auto& r = loaded->representations[0];
+    REQUIRE(r.surfaceDrawMode == 0);          // 实心（旧版体系表面固定实心）
+    REQUIRE(r.rangeMode == 0);                // 全部实例
+    REQUIRE(r.rangeType.empty());             // 不按类型过滤
+    REQUIRE(r.rangeFraction == Catch::Approx(1.0f));
+    REQUIRE(r.rangeStride == 1u);
+    REQUIRE(r.rangeOffset == 0u);
+
+    // 桥接到引擎表示：缺字段 → 默认值，渲染行为与旧版逐位一致（不误过滤实例）
+    std::vector<Representation> reps;
+    RestoreTarget target;
+    target.representations = &reps;
+    applySnapshot(loaded.value(), target);
+    REQUIRE(reps.size() == 1u);
+    REQUIRE(reps[0].surfaceDrawMode == 0);
+    REQUIRE(reps[0].rangeMode == 0);
+    REQUIRE(reps[0].rangeType.empty());
+    REQUIRE(reps[0].rangeFraction == Catch::Approx(1.0f));
+    REQUIRE(reps[0].rangeStride == 1u);
+    REQUIRE(reps[0].rangeOffset == 0u);
+
     std::filesystem::remove(path);
 }

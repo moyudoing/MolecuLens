@@ -20,6 +20,7 @@ cmake-build-*/
 /logs/
 *.log
 *.crash
+.pytest_cache/
 
 # —— IDE ——
 .vscode/

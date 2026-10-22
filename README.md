@@ -160,6 +160,40 @@ Other useful flags: `--rep` / `--repr`, `--coloring`, `--color`, `--material`, `
 `--camera`, `--zoom`, `--msaa`, `--light-az`, `--light-el`, `--seg`, `--detail`, `--invert`,
 `--esp-opacity`, `--anim-step`, `--anim-interp`.
 
+## Python API (optional)
+
+[`python/`](python/README.md) contains an optional pybind11 binding of the data layer
+(parsers, atom/bond snapshots, selection language). It links only `moleculens_entity`,
+so it imports without a GPU, and is **OFF** by default — the shipped app stays free of
+Python dependencies.
+
+```bash
+pip install pybind11 pytest pillow
+cmake -B build -S . -DMOLECULENS_BUILD_PYTHON=ON
+cmake --build build --config Release --target _native moleculens-cli
+PYTHONPATH=build/python python -m pytest python/tests -q
+```
+
+```python
+import moleculens
+
+mol = moleculens.load("data/EPI.pdb")
+mol.atoms[0].element                    # 'O'
+mol.select("within 1.9 of element O")   # global atom indices
+mol.summary()["composition"]            # {'C': 15, 'H': 14, 'O': 6}
+
+moleculens.render("data/EPI.pdb", "epi.png",
+                  rep="ballstick", style="publication", size=(1280, 720))
+moleculens.render_animation("data/md.gro", "md.gif",
+                            trajectory="data/md.xtc", frame_range="0:30")
+```
+
+Rendering is a thin wrapper around the same `moleculens-cli render` used by the GUI and
+tests, so both front-ends share one parameter table. The 54-case pytest suite includes a
+real end-to-end render pipeline (PNG/16-bit/transparency, trajectory frames, ESP, CPU ray
+tracing, GIF animation, OBJ export). Build layout, semantics and limitations:
+[`python/README.md`](python/README.md).
+
 ## Performance
 
 Measured on a GROMACS fixture (`md.gro`, 6,452 atoms / 2,042 water molecules) and a surface mesh of
@@ -183,6 +217,7 @@ src/engine/   scene graph, representations, command stream, camera, picking,
 src/app/      composition root, event bus, controllers, Aurora workbench (style · modules · layout)
 src/cli/      headless CLI: info / render / convert
 tests/        Catch2 unit and integration tests
+python/       optional pybind11 data-layer bindings (OFF by default)
 plugins/      plugin ABI sample and RPC client scripts
 data/         demo structures, trajectory fixtures, bundled font
 ```

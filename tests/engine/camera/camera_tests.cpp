@@ -57,3 +57,17 @@ TEST_CASE("OrbitCamera dolly clamps distance", "[camera]") {
     cam.dolly(1e6f);
     REQUIRE(cam.distance <= cam.farClip * 0.5f);
 }
+
+TEST_CASE("OrbitCamera zoom cannot enter the bounding sphere", "[camera]") {
+    OrbitCamera cam;
+    cam.centerOn({0.0f, 0.0f, 0.0f}, 50.0f);
+    REQUIRE(cam.minDistance == Catch::Approx(7.5f).margin(1e-4f));
+    // 无限放大：必须停在 0.15r，否则相机钻进分子、近裁面把球/键切成断面。
+    for (int i = 0; i < 64; ++i) {
+        cam.dolly(0.5f);
+    }
+    REQUIRE(cam.distance == Catch::Approx(7.5f).margin(1e-3f));
+    // 近裁面随距离收缩：镜头贴近表面时仍远小于原子尺度。
+    REQUIRE(cam.nearClip <= cam.distance * 1e-3f + 1e-6f);
+    REQUIRE(cam.nearClip >= 1e-4f);
+}

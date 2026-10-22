@@ -65,6 +65,8 @@ void buildLight() {
     p.accentHi = rgb(59, 130, 246);
     p.accentSoft = rgb(219, 234, 254);
     p.onAccent = rgb(255, 255, 255);
+    p.selection = rgb(37, 99, 235);
+    p.onSelection = rgb(255, 255, 255);
     p.ok = rgb(16, 185, 129);
     p.warn = rgb(245, 158, 11);
     p.danger = rgb(239, 68, 68);
@@ -90,6 +92,8 @@ void buildDark() {
     p.accentHi = rgb(147, 197, 253);
     p.accentSoft = rgb(30, 58, 95);
     p.onAccent = rgb(8, 15, 28);
+    p.selection = rgb(37, 99, 235);
+    p.onSelection = rgb(255, 255, 255);
     p.ok = rgb(52, 211, 153);
     p.warn = rgb(251, 191, 36);
     p.danger = rgb(248, 113, 113);
@@ -377,15 +381,23 @@ bool navButton(const char* label, bool active, const ImVec2& size, int icon) {
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    ImU32 bg = active ? col(p.accentSoft)
+    ImU32 bg = active ? col(p.selection)
                       : (hovered ? col(p.panelAlt) : IM_COL32(0, 0, 0, 0));
-    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg, 9.0f);
+    // 选中态：蓝色实心**内缩胶囊**（居中、四周留出一点底色），不是整格铺满。
+    // 用户反馈"被选择后中心部分应该是蓝色的"——留白让蓝色集中在视觉中心，
+    // 与未选中的白卡片形成清楚层次。
+    const float insetX = active ? 4.0f : 0.0f;
+    const float insetY = active ? 2.0f : 0.0f;
+    const ImVec2 bgMin(pos.x + insetX, pos.y + insetY);
+    const ImVec2 bgMax(pos.x + size.x - insetX, pos.y + size.y - insetY);
+    dl->AddRectFilled(bgMin, bgMax, bg, 9.0f);
     if (active) {
-        dl->AddRectFilled(ImVec2(pos.x + 3, pos.y + size.y * 0.30f),
-                          ImVec2(pos.x + 6, pos.y + size.y * 0.70f),
-                          col(p.accent), 2.0f);
+        // 白图标/白文字 + 蓝色实底；左侧再加一条半透明白条，深/浅主题都清楚。
+        dl->AddRectFilled(ImVec2(bgMin.x + 3.0f, bgMin.y + (bgMax.y - bgMin.y) * 0.30f),
+                          ImVec2(bgMin.x + 6.0f, bgMin.y + (bgMax.y - bgMin.y) * 0.70f),
+                          IM_COL32(255, 255, 255, 190), 2.0f);
     }
-    const ImU32 fg = col(active ? p.accent : (hovered ? p.text : p.textMuted));
+    const ImU32 fg = col(active ? p.onSelection : (hovered ? p.text : p.textMuted));
     ImFont* font = ImGui::GetFont();
     const float fs = ImGui::GetFontSize();
     const ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0.0f, label);
@@ -410,7 +422,7 @@ bool navButton(const char* label, bool active, const ImVec2& size, int icon) {
     }
     if (hovered) {
         dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
-                    col(p.border), 9.0f);
+                    active ? IM_COL32(255, 255, 255, 130) : col(p.border), 9.0f);
     }
     ImGui::PopID();
     return clicked;
@@ -421,11 +433,13 @@ bool chip(const char* label, bool active, const char* tip) {
     ImGui::PushID(label);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 5));
-    ImGui::PushStyleColor(ImGuiCol_Button, active ? p.accent : p.panelAlt);
+    ImGui::PushStyleColor(ImGuiCol_Button, active ? p.selection : p.panelAlt);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                          active ? p.accentHi : p.accentSoft);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, p.accentSoft);
-    ImGui::PushStyleColor(ImGuiCol_Text, active ? p.onAccent : p.text);
+                          active ? mixColor(p.selection, ImVec4(1, 1, 1, 1), 0.12f)
+                                 : p.accentSoft);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                          active ? p.selection : p.accentSoft);
+    ImGui::PushStyleColor(ImGuiCol_Text, active ? p.onSelection : p.text);
     const bool clicked = ImGui::Button(label);
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(2);
@@ -482,11 +496,14 @@ bool segmented(const char* id, const char* const* items, int n, int* idx) {
     ImGui::SetCursorScreenPos(ImVec2(origin.x + inset, origin.y + inset));
     for (int i = 0; i < n; ++i) {
         const bool sel = (i == cur);
-        ImGui::PushStyleColor(ImGuiCol_Button, sel ? p.accent : ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              sel ? p.selection : ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              sel ? p.accentHi : p.accentSoft);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, p.accentSoft);
-        ImGui::PushStyleColor(ImGuiCol_Text, sel ? p.onAccent : p.textMuted);
+                              sel ? mixColor(p.selection, ImVec4(1, 1, 1, 1), 0.12f)
+                                  : p.accentSoft);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              sel ? p.selection : p.accentSoft);
+        ImGui::PushStyleColor(ImGuiCol_Text, sel ? p.onSelection : p.textMuted);
         if (i > 0) {
             ImGui::SameLine(0.0f, gap);
         }

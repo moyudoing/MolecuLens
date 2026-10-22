@@ -46,6 +46,12 @@ namespace moleculens::engine {
             // 视觉上就像"一条链只有一种颜色"。拆半后按原子名/元素配色才分得开。
             const glm::vec3 pa = pos[ga];
             const glm::vec3 pb = pos[gb];
+            {
+                const glm::vec3 bd = pb - pa;
+                if (glm::dot(bd, bd) > 3.2f * 3.2f) {
+                    continue;   // 跨盒伪键
+                }
+            }
             const glm::vec3 mid = (pa + pb) * 0.5f;
 
             LineInst first{};

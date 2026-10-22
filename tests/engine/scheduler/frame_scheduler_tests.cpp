@@ -6,6 +6,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+
 #include "engine/scheduler/frame_scheduler.h"
 
 using namespace moleculens::engine;
@@ -140,6 +142,29 @@ TEST_CASE("FrameScheduler playback rate is independent of physical dt",
     REQUIRE(fast.frame() == 30);  // 与物理 dt 无关
 }
 
+// 默认：播放帧率 = 0 表示跟随渲染刷新率，每个渲染帧推进一帧；
+// 速度倍率仍然生效（0.5× 每两帧一帧、2× 每帧两帧）。
+TEST_CASE("FrameScheduler refresh-synced playback", "[scheduler]") {
+    FrameScheduler s;
+    s.setFrameCount(100);
+    s.setLoop(false);
+    REQUIRE(s.refreshSynced());       // 默认就是刷新率同步
+    s.play();
+    REQUIRE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.frame() == 1);
+    REQUIRE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.frame() == 2);
+
+    s.setSpeed(0.5f);
+    REQUIRE_FALSE(s.advance(1.0f / 120.0f));   // 半速：两次渲染帧才走一帧
+    REQUIRE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.frame() == 3);
+
+    s.setSpeed(2.0f);
+    REQUIRE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.frame() == 5);                   // 2×：一个渲染帧两帧
+}
+
 TEST_CASE("FrameScheduler selection loop wraps inside [in, out]",
           "[scheduler]") {
     FrameScheduler s;
@@ -193,3 +218,148 @@ TEST_CASE("FrameScheduler edge cases", "[scheduler]") {
     single.step(5);
     REQUIRE(single.frame() == 0);
 }
+
+// =============================================================================
+// v2.19 动态 FPS：播放间隔由真实渲染 dt（EMA）决定，目标帧率是上限，
+// 每渲染帧最多推进 maxCatchUp 帧。
+// =============================================================================
+
+// 目标 0 = 跟随渲染帧率：120Hz 与 30Hz 下都是每个渲染帧恰好推进一帧。
+TEST_CASE("FrameScheduler dynamic follows the render rate", "[scheduler]") {
+    const auto run = [](float dt, int calls) {
+        FrameScheduler s;
+        s.setFrameCount(1000);
+        s.setPlaybackMode(PlaybackMode::Dynamic);
+        s.setPlaybackTargetFps(0.0f);
+        s.setLoop(false);
+        s.play();
+        for (int i = 0; i < calls; ++i) {
+            REQUIRE(s.advance(dt));
+        }
+        return s.frame();
+    };
+    REQUIRE(run(1.0f / 120.0f, 5) == 5);
+    REQUIRE(run(1.0f / 30.0f, 5) == 5);
+}
+
+// 目标帧率是"上限"：120Hz 渲染 + 目标 30 → 4 个渲染帧推进 1 帧，且节奏稳定。
+TEST_CASE("FrameScheduler dynamic target fps caps the rate", "[scheduler]") {
+    FrameScheduler s;
+    s.setFrameCount(1000);
+    s.setPlaybackMode(PlaybackMode::Dynamic);
+    s.setPlaybackTargetFps(30.0f);
+    s.setLoop(false);
+    s.play();
+    REQUIRE_FALSE(s.advance(1.0f / 120.0f));
+    REQUIRE_FALSE(s.advance(1.0f / 120.0f));
+    REQUIRE_FALSE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.frame() == 1);
+    // 再来一组：不积累浮点偏移，仍然 4 个渲染帧一帧
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE_FALSE(s.advance(1.0f / 120.0f));
+    }
+    REQUIRE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.frame() == 2);
+}
+
+// 卡顿 500ms：Dynamic 每渲染帧最多推进 maxCatchUp 帧，多余预算丢弃（不积累 backlog）。
+TEST_CASE("FrameScheduler dynamic catch-up cap", "[scheduler]") {
+    FrameScheduler s;
+    s.setFrameCount(1000);
+    s.setPlaybackMode(PlaybackMode::Dynamic);
+    s.setPlaybackTargetFps(0.0f);
+    s.setMaxCatchUp(2);
+    s.setLoop(false);
+    s.play();
+    for (int i = 0; i < 10; ++i) {
+        s.advance(1.0f / 120.0f);   // 让 EMA 收敛到 ~1/120
+    }
+    const uint64_t before = s.frame();
+    REQUIRE(s.advance(0.5f));       // 卡顿 500ms
+    REQUIRE(s.frame() - before <= 2u);
+
+    // 上限可配，且被夹在 1–8
+    s.setMaxCatchUp(99);
+    REQUIRE(s.maxCatchUp() == 8);
+    s.setMaxCatchUp(0);
+    REQUIRE(s.maxCatchUp() == 1);
+    const uint64_t before2 = s.frame();
+    s.advance(0.5f);
+    REQUIRE(s.frame() - before2 <= 1u);
+    // 卡顿后不残留 backlog：下一帧的推进量同样受上限约束
+    const uint64_t before3 = s.frame();
+    s.advance(1.0f / 120.0f);
+    REQUIRE(s.frame() - before3 <= 1u);
+}
+
+// 切模式清零 accumulator：固定 60 FPS 攒下的半拍不能带到动态模式里多走一帧。
+TEST_CASE("FrameScheduler switching mode clears the accumulator", "[scheduler]") {
+    FrameScheduler s;
+    s.setFrameCount(1000);
+    s.setPlaybackFps(60.0f);        // FixedFps：间隔 1/60
+    s.setLoop(false);
+    s.play();
+    REQUIRE_FALSE(s.advance(1.0f / 120.0f));   // 攒半拍，不推进
+    REQUIRE(s.frame() == 0);
+
+    s.setPlaybackMode(PlaybackMode::Dynamic);
+    s.setPlaybackTargetFps(0.0f);              // 跟随渲染：间隔 1/120
+    // 半拍已清零 → 这一个渲染帧只推一帧；若继承旧累积量会变成两帧。
+    REQUIRE(s.advance(1.0f / 120.0f));
+    REQUIRE(s.frame() == 1);
+}
+
+// Dynamic 的间隔夹在 [1/maxFps, 1/minFps]：极慢帧按 minFps 补、极快帧按 maxFps 限。
+TEST_CASE("FrameScheduler dynamic interval bounds", "[scheduler]") {
+    FrameScheduler slow;
+    slow.setFrameCount(1000);
+    slow.setPlaybackMode(PlaybackMode::Dynamic);
+    slow.setPlaybackTargetFps(0.0f);
+    slow.setDynamicFpsRange(10.0f, 144.0f);
+    slow.setLoop(false);
+    slow.play();
+    // 200ms/帧：间隔被 minFps=10 夹到 100ms → 每渲染帧 2 帧（且不超过 maxCatchUp=2）
+    REQUIRE(slow.advance(0.2f));
+    REQUIRE(slow.frame() == 2);
+
+    FrameScheduler fast;
+    fast.setFrameCount(1000);
+    fast.setPlaybackMode(PlaybackMode::Dynamic);
+    fast.setPlaybackTargetFps(0.0f);
+    fast.setDynamicFpsRange(10.0f, 144.0f);
+    fast.setLoop(false);
+    fast.play();
+    // 1000Hz 渲染：间隔被 maxFps=144 夹到 ~6.94ms → 7 个渲染帧才推进 1 帧
+    for (int i = 0; i < 6; ++i) {
+        REQUIRE_FALSE(fast.advance(0.001f));
+    }
+    REQUIRE(fast.advance(0.001f));
+    REQUIRE(fast.frame() == 1);
+    REQUIRE(std::fabs(fast.effectiveFps() - 144.0f) < 1.0f);
+}
+
+// effectiveFps 供 UI 显示"实际 xx FPS"：跟随渲染时≈渲染帧率，固定时=固定帧率。
+TEST_CASE("FrameScheduler reports effective playback fps", "[scheduler]") {
+    FrameScheduler dyn;
+    dyn.setFrameCount(1000);
+    dyn.setPlaybackMode(PlaybackMode::Dynamic);
+    dyn.setPlaybackTargetFps(0.0f);
+    dyn.play();
+    dyn.advance(1.0f / 120.0f);
+    REQUIRE(dyn.effectiveFps() > 100.0f);
+    REQUIRE(dyn.effectiveFps() < 150.0f);
+
+    FrameScheduler fixed;
+    fixed.setFrameCount(100);
+    fixed.setPlaybackFps(60.0f);
+    fixed.play();
+    fixed.advance(1.0f / 120.0f);
+    REQUIRE(std::fabs(fixed.effectiveFps() - 60.0f) < 0.5f);
+
+    // 固定帧率也要能正确切换成刷新同步
+    fixed.setPlaybackFps(0.0f);
+    REQUIRE(fixed.refreshSynced());
+    REQUIRE(fixed.advance(1.0f / 120.0f));
+}
+

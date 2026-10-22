@@ -213,8 +213,12 @@
 
 ### 3.1 pybind11（MOLECULENS_BUILD_PYTHON=ON 时）
 
-- **vcpkg**：`pybind11`；**用法**：绑定函数/类导出 Python 模块 `moleculens`
-  （主方案 §11.1）；CMake：`find_package(pybind11 CONFIG)` → `pybind11::module`
+- **安装**：`python -m pip install pybind11`（推荐）；或 vcpkg 安装后自行加入
+  `vcpkg.json`。默认 manifest **不含** pybind11，避免默认构建拉取 Python 依赖。
+- **查找顺序**：`find_package(pybind11 CONFIG)` → 未找到时执行
+  `Python3_EXECUTABLE -m pybind11 --cmakedir` 回退到 pip 安装的配置。
+- **用法**：绑定函数/类导出 Python 模块，源码在 `python/module/pybind_module.cpp`，
+  产物为 `build/python/moleculens/_native.*.pyd`（详见 `python/README.md`）。
 
 ### 3.2 cppzmq / libzmq（MOLECULENS_ENABLE_ZMQ=ON 时，非 Windows）
 

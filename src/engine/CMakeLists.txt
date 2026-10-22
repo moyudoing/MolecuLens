@@ -45,6 +45,7 @@ add_library(moleculens_engine STATIC
     vulkan/backend/draw_list.h vulkan/backend/decode.h vulkan/backend/decode.cpp
     vulkan/draw/draw_geometry.h vulkan/draw/draw_geometry.cpp
     vulkan/device/device.h vulkan/device/device.cpp
+    vulkan/raytracing/gpu_ray_tracer.h vulkan/raytracing/gpu_ray_tracer.cpp
     vulkan/memory/buffer.h vulkan/memory/buffer.cpp vulkan/memory/vma_impl.cpp
     vulkan/pipeline/pipeline.h vulkan/pipeline/pipeline.cpp
     vulkan/renderpass/render_pass.h vulkan/renderpass/render_pass.cpp

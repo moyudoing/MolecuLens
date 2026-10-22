@@ -36,6 +36,7 @@ namespace moleculens::app {
 
 class DataManager;
 class MolScene;
+class MultiView;
 class SceneController;
 class RenderController;
 class RepresentationController;
@@ -50,6 +51,7 @@ struct WorkbenchServices {
     engine::Renderer* renderer = nullptr;
     DataManager* data = nullptr;
     MolScene* viewport = nullptr;
+    MultiView* multiView = nullptr;   // 多视图（1/2/4 分屏；可为空 = 不支持）
     entity::SceneStructure* scene = nullptr;
     SceneController* sceneCtl = nullptr;
     RenderController* renderCtl = nullptr;
@@ -64,7 +66,8 @@ struct WorkbenchServices {
     std::function<void()> minimizeWindow;
     std::function<void()> toggleMaximize;
     std::function<bool()> isMaximized;
-    std::function<void(float, float)> dragWindow;
+    // 拖动标题栏：进入系统原生移动循环（阻塞到松开鼠标）；无参。
+    std::function<void()> dragWindow;
 
     // 原生文件对话框（返回空串 = 用户取消）
     std::function<std::string(const char* filter, const char* defExt)> dlgOpen;
@@ -129,11 +132,25 @@ public:
     void frameCamera();
     void resetCamera();
     void openFileDialog();
+    // 把新文件加载到指定视图并只在该视图显示它（多视图标题条「打开…」）。
+    // 解析是异步的：MultiView 会在体系出现后把该视图筛选取景切到新体系。
+    void openFileDialogForPane(int pane);
+    // 多视图布局：0 单视图 / 1 左右双视图 / 2 上下双视图 / 3 四视图
+    void setViewLayout(int layout);
+    [[nodiscard]] int viewLayout() const;
     void saveSceneDialog();
     void importTrajectoryDialog();
     void exportPngDialog();
     // 原生文件对话框（模块用；工作台未注入 dlgOpen 时返回空串）
     [[nodiscard]] std::string chooseFile(const char* filter, const char* defExt);
+    // 原生"另存为"（模块导出 CSV/Excel 用）。返回空串 = 用户取消。
+    [[nodiscard]] std::string chooseSaveFile(const char* defaultName,
+                                             const char* filter,
+                                             const char* defExt);
+    // 多视图辅助：同步相机（任一视图的旋转/缩放应用到全部）、全部取景
+    [[nodiscard]] bool syncCameras() const;
+    void setSyncCameras(bool on);
+    void frameAllViews();
     void toggleTheme();
 
     // 检查器宽度（右栏；拖拽或设置页调整，纯运行期状态）
@@ -144,6 +161,29 @@ public:
     [[nodiscard]] bool railCollapsed() const { return railCollapsed_; }
     void setRailCollapsed(bool on);
     void toggleRailCollapsed();
+
+    // —— 左侧工具栏（v2.17）——
+    // 工具条夹在左导航与视口之间。前四项是**互斥模式**（同一时刻只有一个），
+    // 其余按钮是立即执行的动作或显示开关。
+    enum class ViewTool : int {
+        Inspect = 0,   // 浏览：左键拖拽旋转（默认，无工具）
+        Measure = 1,   // 测量：点两个原子 → 两点距离（Å）
+        Label = 2,     // 标注：点一个原子 → 在该点写文字
+        Arrow = 3,     // 箭头：点两个原子 → 从第一个指到第二个
+    };
+    [[nodiscard]] ViewTool viewTool() const { return tool_; }
+    void setViewTool(ViewTool tool);
+    [[nodiscard]] bool toolShelfVisible() const { return shelfVisible_; }
+    void setToolShelfVisible(bool on);
+    void toggleToolShelf();
+    // 距离测量结果（两个原子世界坐标 + 距离 Å）；由「测量」工具产生。
+    struct Measurement {
+        glm::vec3 a{0.0f};
+        glm::vec3 b{0.0f};
+        float distance = 0.0f;   // Å
+    };
+    [[nodiscard]] const std::vector<Measurement>& measurements() const { return measures_; }
+    void clearMeasurements();
 
     [[nodiscard]] bool hasDocument() const;
     [[nodiscard]] std::string documentName() const;
@@ -231,7 +271,12 @@ public:
         kHoukMol = 2,
         kIQmol = 3,
         kClearStyle = 4,
-        kPresetCount = 5,
+        // 参考图风格（2026-10-22）：深色轨道、出版级卡通、MOF 多面体、干净出图
+        kOrbitalDark = 5,
+        kPublicationCartoon = 6,
+        kMofPolyhedra = 7,
+        kCleanFigure = 8,
+        kPresetCount = 9,
     };
 
 private:
@@ -239,6 +284,7 @@ private:
     void renderMenuBar(const ImVec2& pos, const ImVec2& size);
     void renderFileBar(const ImVec2& pos, const ImVec2& size);
     void renderRail(const ImVec2& pos, const ImVec2& size);
+    void renderToolShelf(const ImVec2& pos, const ImVec2& size);
     void renderViewport(const ImVec2& pos, const ImVec2& size);
     void renderInspector(const ImVec2& pos, const ImVec2& size);
     void renderQuickBar(const ImVec2& pos, const ImVec2& size);
@@ -261,6 +307,18 @@ private:
                            const ImVec2& imgMax, ImVec2* out) const;
     void drawSceneOverlay(const ImVec2& imgMin, const ImVec2& imgMax);
 
+    // —— 左侧工具栏（v2.17）——
+    // 一次"点击"（已排除相机拖拽）→ 按当前工具拾取原子并执行动作。
+    void handleToolClick(const ImVec2& mouse, const ImVec2& imgMin, const ImVec2& imgMax);
+    // 屏幕空间最近原子拾取：比 CPU 射线更宽容（命中半径按像素算），
+    // 球棍/卡通下也点得中。返回 false = 附近没有原子。
+    bool pickAtomAt(const ImVec2& mouse, const ImVec2& imgMin, const ImVec2& imgMax,
+                    glm::vec3* outPos, std::string* outLabel) const;
+    // 测量线 / 待选点 / 工具提示语（叠加层，画在 3D 画面之上）
+    void drawToolOverlay(const ImVec2& imgMin, const ImVec2& imgMax);
+    // 清掉"已选第一个点"的中间状态（Esc / 切换工具时调用）
+    void cancelToolPending();
+
     WorkbenchServices svc_;
     std::vector<std::unique_ptr<IInspectorModule>> modules_;
     std::string activeId_ = "visualize";
@@ -274,6 +332,18 @@ private:
     int themeDarkCached_ = -1;         // 主题明暗缓存（-1 = 尚未同步过背景色）
     float inspectorW_ = 500.0f;   // 与 aurora::metrics::kInspector 一致（可拖动分隔条改）
     bool railCollapsed_ = false;  // 左导航收起态（92 → 46 px，只剩图标）
+
+    // —— 左侧工具栏（v2.17；纯运行期状态，与 railCollapsed_ 同一取舍）——
+    ViewTool tool_ = ViewTool::Inspect;   // 当前互斥工具
+    bool shelfVisible_ = true;            // 工具栏是否显示（Ctrl+T）
+    std::vector<Measurement> measures_;   // 已完成的距离测量
+    bool hasPendingPick_ = false;         // 测量/箭头：第一个点是否已选
+    glm::vec3 pendingPick_{0.0f};
+    std::string pendingPickLabel_;
+    bool labelPopupPending_ = false;      // 本帧要弹出「新建标注」输入框
+    bool labelPopupOpen_ = false;         // 输入框是否开着（开着时不算一次拾取）
+    glm::vec3 labelAnchor_{0.0f};         // 新标注的锚点（世界坐标）
+    char labelText_[128] = "";            // 新标注的初始文字（原子描述）
     bool hideHydrogen_ = false;
     int32_t selMolecule_ = -1;
     std::map<int32_t, std::string> savedSelections_;
@@ -295,6 +365,15 @@ private:
     int exportWidth_ = 1920;
     int exportHeight_ = 1080;
     bool exportTransparent_ = false;
+    bool exportRayTrace_ = true;   // 图片导出默认光追（仅导出，视口保持光栅化）
+    // 动画导出（轨迹 / 相机旋转 / 两者）
+    int animSource_ = 0;
+    int animCodec_ = 3;             // 0 PNG序列 1 APNG 2 GIF 3 MP4 4 WebM
+    float animFps_ = 30.0f;
+    uint64_t animInFrame_ = 0;
+    uint64_t animOutFrame_ = 0;     // 0 = 到轨迹末帧；相机源时是旋转帧数
+    uint32_t animStep_ = 1;
+    char animPath_[512] = "";
 
     // 保存场景对话框（双模式）：0 = 链接式（默认），1 = 嵌入式。
     // 选择会写入 settings.json 的 sceneSaveMode，下次打开对话框时沿用。

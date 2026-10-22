@@ -25,7 +25,28 @@ endif()
 
 if(MOLECULENS_BUILD_PYTHON)
     find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
-    find_package(pybind11 CONFIG REQUIRED)
+    # 优先用 vcpkg / 系统安装的 pybind11；缺省时回退到 pip 包自带的 CMake 配置
+    # （pybind11 是 header-only，`python -m pybind11 --cmakedir` 即可定位）。
+    find_package(pybind11 CONFIG QUIET)
+    if(NOT pybind11_FOUND)
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+            OUTPUT_VARIABLE _moleculens_pybind11_dir
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE _moleculens_pybind11_rc)
+        if(_moleculens_pybind11_rc EQUAL 0 AND _moleculens_pybind11_dir)
+            list(APPEND CMAKE_PREFIX_PATH "${_moleculens_pybind11_dir}")
+            find_package(pybind11 CONFIG QUIET)
+        endif()
+    endif()
+    if(NOT pybind11_FOUND)
+        message(FATAL_ERROR
+            "MOLECULENS_BUILD_PYTHON=ON 需要 pybind11。安装方式：\n"
+            "  pip:   \"${Python3_EXECUTABLE}\" -m pip install pybind11\n"
+            "  vcpkg: 在 vcpkg.json 加入 pybind11 后重新安装依赖")
+    endif()
+    message(STATUS "MolecuLens Python bindings: Python ${Python3_VERSION}, pybind11 ${pybind11_VERSION}")
 endif()
 
 if(MOLECULENS_ENABLE_ZMQ)

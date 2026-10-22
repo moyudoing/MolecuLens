@@ -45,9 +45,25 @@ public:
     // QuickSurf 参数（等值面阈值 / 网格间距）
     bool setSurfIsovalue(int32_t repId, float v);
     bool setSurfGridSpacing(int32_t repId, float s);
+    // 表面平滑次数（0–3）：vdW 标量场 3×3×3 盒式平滑，消除溶剂盒的"水分子疙瘩"。
+    bool setSurfSmooth(int32_t repId, int iterations);
 
     // 体系级表面：整体系（含溶剂分子）一个整体表面（Surface/QuickSurf 用）
     bool setSystemSurface(int32_t repId, bool on);
+
+    // —— 表面绘制模式（v2.19）——
+    // 0 实心 / 1 线框 / 2 半透明。写入后 touch() 重建命令流（渲染器按它发射
+    // RenderMode）。与体系渲染模式（Solid/Wireframe/…）是不同的开关：前者只影响
+    // 这一条表面表示，后者影响整个体系。
+    bool setSurfaceDrawMode(int32_t repId, uint8_t mode);
+
+    // —— 实例级类型范围（v2.19）——
+    // 语义见 engine/rep/representation.h 的 rangeMode 注释。四个 setter 都写字段 +
+    // touch()；UI 每帧拖动滑块时只在值变化时调用（touch 会重建命令流）。
+    bool setInstanceRangeMode(int32_t repId, uint8_t mode);
+    bool setInstanceRangeType(int32_t repId, const std::string& typeName);
+    bool setInstanceRangeFraction(int32_t repId, float fraction);
+    bool setInstanceRangeStride(int32_t repId, uint32_t stride, uint32_t offset);
 
     // —— ESP 映射表面参数（type == EspSurface 时生效）——
     // 字段语义见 engine/style/espsurface/esp_surface.h；与 surfGridSpacing 等同模式：
@@ -72,6 +88,8 @@ public:
                            float metallic, float roughness, float opacity);
 
     [[nodiscard]] const std::vector<engine::Representation>& representations() const;
+    // 表示修订号：多视图的副视图渲染器每帧用它与表示列表重新绑定（零拷贝共享）。
+    [[nodiscard]] uint64_t revision() const { return revision_; }
 
     // —— UI 编辑目标（样式面板 / 材质面板共用）——
     // 放在控制器而不是各面板：两个面板必须编辑**同一个**表示，各自持一份"选中

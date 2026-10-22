@@ -1,0 +1,136 @@
+// =============================================================================
+// MolecuLens · shaders/rt_prim.rint —— 程序化球/胶囊求交（AABB 几何的解析求交）
+// 规格来源：任务 E（GPU 光追模块）
+// 说明：球/键保持解析精度：BLAS 只装 AABB（VkAccelerationStructureGeometryAabbs
+//       DataKHR），真正的求交在这里按 CPU hitSphere/hitCapsule 的同一公式完成。
+//       半透明图元不投射实心阴影（与 CPU occluded() 的 opacity > 0.9 一致）。
+// =============================================================================
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#define MOLECULENS_RT_INTERSECTION 1   // 交集阶段不能声明 rayPayloadEXT
+#include "rt_common.glsl"
+
+hitAttributeEXT vec2 gHitAttrib;
+
+// 光线-球求交（返回最近正 t；未命中 < 0）
+float rtHitSphereT(vec3 o, vec3 d, vec3 c, float r, out vec3 n) {
+    n = vec3(0.0, 1.0, 0.0);
+    const vec3 oc = o - c;
+    const float b = dot(oc, d);
+    const float cc = dot(oc, oc) - r * r;
+    const float disc = b * b - cc;
+    if (disc < 0.0) {
+        return -1.0;
+    }
+    const float sq = sqrt(disc);
+    float t = -b - sq;
+    if (t < kRtEps) {
+        t = -b + sq;
+    }
+    if (t < kRtEps) {
+        return -1.0;
+    }
+    n = normalize(o + t * d - c);
+    return t;
+}
+
+// 光线-胶囊（圆柱面 + 两端球形帽；与 CPU hitCapsule 同式）
+float rtHitCapsuleT(vec3 o, vec3 d, vec3 a, vec3 b, float r, out vec3 n) {
+    float bestT = 1e30;
+    vec3 bestN = vec3(0.0, 1.0, 0.0);
+    const vec3 axis = b - a;
+    const float len = length(axis);
+    if (len > 1e-8) {
+        const vec3 au = axis / len;
+        const vec3 e = o - a;
+        const vec3 pe = e - au * dot(e, au);
+        const vec3 pd = d - au * dot(d, au);
+        const float A = dot(pd, pd);
+        if (A > 1e-8) {
+            const float B = dot(pe, pd);
+            const float C = dot(pe, pe) - r * r;
+            const float disc = B * B - A * C;
+            if (disc >= 0.0) {
+                const float sq = sqrt(disc);
+                const float t0 = (-B - sq) / A;
+                const float t1 = (-B + sq) / A;
+                const float uu0 = dot(e + t0 * d, au);
+                if (t0 > kRtEps && t0 < bestT && uu0 >= 0.0 && uu0 <= len) {
+                    const vec3 p = o + t0 * d;
+                    bestN = normalize(p - (a + au * uu0));
+                    bestT = t0;
+                }
+                const float uu1 = dot(e + t1 * d, au);
+                if (t1 > kRtEps && t1 < bestT && uu1 >= 0.0 && uu1 <= len) {
+                    const vec3 p = o + t1 * d;
+                    bestN = normalize(p - (a + au * uu1));
+                    bestT = t1;
+                }
+            }
+        }
+    } else {
+        // 退化（a == b）：当球处理
+        vec3 nn;
+        const float ts = rtHitSphereT(o, d, a, r, nn);
+        if (ts > 0.0) {
+            bestT = ts;
+            bestN = nn;
+        }
+    }
+    // 两端球形帽
+    {
+        vec3 nn;
+        const float ts = rtHitSphereT(o, d, a, r, nn);
+        if (ts > 0.0 && ts < bestT) {
+            bestT = ts;
+            bestN = nn;
+        }
+    }
+    {
+        vec3 nn;
+        const float ts = rtHitSphereT(o, d, b, r, nn);
+        if (ts > 0.0 && ts < bestT) {
+            bestT = ts;
+            bestN = nn;
+        }
+    }
+    if (bestT >= 1e29) {
+        return -1.0;
+    }
+    n = bestN;
+    return bestT;
+}
+
+void main() {
+    const int custom = gl_InstanceCustomIndexEXT;
+    if (custom != 0 && custom != 1) {
+        return;   // 三角形几何由固定功能求交
+    }
+    const int sphereCount = int(ubo.counts.x + 0.5);
+    const int primCount = int(ubo.counts.x + ubo.counts.y + 0.5);
+    const int idx = ((custom == 0) ? 0 : sphereCount) + gl_PrimitiveID;
+    if (idx < 0 || idx >= primCount) {
+        return;
+    }
+    const RtPrimRec pr = prims[idx];
+
+    // 阴影射线：半透明图元不遮挡（与 CPU occluded() 一致）
+    const bool shadowRay =
+        (gl_IncomingRayFlagsEXT & gl_RayFlagsTerminateOnFirstHitEXT) != 0;
+    if (shadowRay && pr.params.w <= 0.9) {
+        return;
+    }
+
+    const vec3 o = gl_WorldRayOriginEXT;
+    const vec3 d = gl_WorldRayDirectionEXT;
+    vec3 n;
+    const float t = (custom == 0)
+                        ? rtHitSphereT(o, d, pr.geom0.xyz, pr.geom0.w, n)
+                        : rtHitCapsuleT(o, d, pr.geom0.xyz, pr.geom1.xyz,
+                                        pr.geom0.w, n);
+    if (t <= gl_RayTminEXT || t >= gl_RayTmaxEXT) {
+        return;
+    }
+    gHitAttrib = vec2(0.0);
+    reportIntersectionEXT(t, 0u);
+}

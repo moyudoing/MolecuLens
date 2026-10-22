@@ -11,6 +11,7 @@
 
 #include "engine/scheduler/frame_scheduler.h"
 #include "entity/scene/scene.h"
+#include "persist/settings/settings.h"
 #include "spdlog/spdlog.h"
 
 namespace moleculens::app {
@@ -19,6 +20,9 @@ TimelineController::TimelineController(AppServices& svc) : svc_(svc) {
     if (svc_.bus) {
         svc_.bus->subscribe(this);
     }
+    // 启动即应用 settings.json 里的播放节奏（动态 FPS / 固定 / 同步 + 倍速 +
+    // 追帧上限）——不依赖 Workbench 先把设置面板画一遍。
+    applyPlaybackSettings();
 }
 
 void TimelineController::setActive(uint32_t instanceIndex) {
@@ -152,7 +156,66 @@ void TimelineController::setPlaybackFps(float fps) {
 }
 
 float TimelineController::playbackFps() const {
-    return svc_.scheduler ? svc_.scheduler->playbackFps() : 30.0f;
+    return svc_.scheduler ? svc_.scheduler->playbackFps() : 0.0f;
+}
+
+void TimelineController::applyPlaybackSettings() {
+    if (!svc_.scheduler) {
+        return;
+    }
+    // 读不到配置（首次启动/文件损坏）就用默认值：动态 FPS + 目标 60。
+    persist::Settings settings;
+    if (auto loaded = persist::SettingsStore::load(); loaded) {
+        settings = *loaded;
+    }
+    auto* sch = svc_.scheduler;
+    sch->setSpeed(std::clamp(settings.playbackSpeed, 0.0f, 64.0f));
+    sch->setMaxCatchUp(settings.playbackMaxCatchUp);
+    const float fps = static_cast<float>(std::clamp(settings.playbackFps, 0, 240));
+    if (settings.playbackMode == "refresh") {
+        sch->setPlaybackMode(engine::PlaybackMode::RefreshSync);
+    } else if (settings.playbackMode == "fixed") {
+        // 固定帧率不能是 0（0 = 刷新同步），坏配置退回 60 FPS。
+        sch->setPlaybackFps(fps > 0.0f ? fps : 60.0f);
+    } else {
+        sch->setPlaybackMode(engine::PlaybackMode::Dynamic);
+        sch->setPlaybackTargetFps(fps);
+    }
+}
+
+void TimelineController::setPlaybackMode(engine::PlaybackMode mode) {
+    if (svc_.scheduler) {
+        svc_.scheduler->setPlaybackMode(mode);
+    }
+}
+
+engine::PlaybackMode TimelineController::playbackMode() const {
+    return svc_.scheduler ? svc_.scheduler->playbackMode()
+                          : engine::PlaybackMode::RefreshSync;
+}
+
+void TimelineController::setPlaybackTargetFps(float fps) {
+    if (svc_.scheduler) {
+        svc_.scheduler->setPlaybackTargetFps(fps);
+    }
+}
+
+float TimelineController::playbackTargetFps() const {
+    return svc_.scheduler ? svc_.scheduler->playbackTargetFps() : 0.0f;
+}
+
+void TimelineController::setPlaybackMaxCatchUp(int frames) {
+    if (svc_.scheduler) {
+        svc_.scheduler->setMaxCatchUp(frames);
+    }
+}
+
+int TimelineController::playbackMaxCatchUp() const {
+    return svc_.scheduler ? svc_.scheduler->maxCatchUp() : 2;
+}
+
+float TimelineController::effectiveFps() const {
+    return svc_.scheduler ? svc_.scheduler->effectiveFps() : 0.0f;
 }
 
 float TimelineController::speed() const {

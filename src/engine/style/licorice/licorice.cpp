@@ -34,6 +34,13 @@ void drawLicorice(const RepContext& ctx, SceneCommandList& out) {
             !(*ctx.mask)[ga] || !(*ctx.mask)[gb]) {
             continue;
         }
+        // PBC 残留长键保护：>3.2 Å 视为跨盒伪键，不画。
+        {
+            const glm::vec3 bd = pos[gb] - pos[ga];
+            if (glm::dot(bd, bd) > 3.2f * 3.2f) {
+                continue;
+            }
+        }
 
         // 整键双色分段：A→中点、中点→B
         const glm::vec3 dir = pos[gb] - pos[ga];

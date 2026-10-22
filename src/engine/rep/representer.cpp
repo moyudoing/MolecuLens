@@ -131,30 +131,45 @@ inline glm::vec4 srgbToLinear(const glm::vec4& c) {
 } // namespace
 
 glm::vec4 Representer::colorForAtom(const RepContext& ctx, uint32_t globalAtomIndex) {
-    return srgbToLinear(colorForAtomSrgb(ctx, globalAtomIndex));
+    // 旧行为不变：全局下标 − 当前实例首原子 = 实例内下标。这里显式传三元组，而
+    // 不是让取色核心去读 ctx.instance —— 整体系表面的 ctx 里它是空指针（历史崩溃点）。
+    const bool inInstance = ctx.instance != nullptr && globalAtomIndex >= ctx.globalAtomBase;
+    return colorForAtomAt(ctx,
+                          ctx.instance != nullptr ? ctx.instance->structureIndex : UINT32_MAX,
+                          inInstance ? globalAtomIndex - ctx.globalAtomBase : UINT32_MAX,
+                          ctx.instanceIndex);
 }
 
-glm::vec4 Representer::colorForAtomSrgb(const RepContext& ctx, uint32_t globalAtomIndex) {
-    const auto& st = ctx.scene->structures()[ctx.instance->structureIndex];
-    const size_t localIdx = globalAtomIndex - ctx.globalAtomBase;
-    if (localIdx >= st.elements.size()) {
+glm::vec4 Representer::colorForAtomAt(const RepContext& ctx, uint32_t structureIndex,
+                                      uint32_t localAtomIndex, uint32_t instanceIndex) {
+    return srgbToLinear(colorForAtomAtSrgb(ctx, structureIndex, localAtomIndex, instanceIndex));
+}
+
+glm::vec4 Representer::colorForAtomAtSrgb(const RepContext& ctx, uint32_t structureIndex,
+                                          uint32_t localAtomIndex, uint32_t instanceIndex) {
+    if (ctx.scene == nullptr || ctx.rep == nullptr ||
+        structureIndex >= ctx.scene->structures().size()) {
+        return glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+    }
+    const auto& st = ctx.scene->structures()[structureIndex];
+    if (localAtomIndex >= st.elements.size()) {
         return glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
     }
     switch (ctx.rep->colorScheme) {
         case ColorScheme::ElementCPK: {
-            const auto& info = elementInfo(st.elements[localIdx]);
+            const auto& info = elementInfo(st.elements[localAtomIndex]);
             return glm::vec4(info.color[0], info.color[1], info.color[2], 1.0f);
         }
         case ColorScheme::Chain: {
-            const int32_t cid = st.atoms[localIdx].chainId;
-            const int32_t rid = st.atoms[localIdx].residueId;
+            const int32_t cid = st.atoms[localAtomIndex].chainId;
+            const int32_t rid = st.atoms[localAtomIndex].residueId;
             // 结构是共享的（md.gro：7 个结构 / 2042 个实例），所以链内差异必须靠
             // 实例序号 + 残基号混合，否则同种分子全部同色。
             const uint32_t mix = static_cast<uint32_t>(cid + 1);
             const float h = static_cast<float>(hash32(mix) % 3600) / 3600.0f;
             const float jitter =
                 (static_cast<float>(hash32(static_cast<uint32_t>(rid) ^
-                                           (static_cast<uint32_t>(ctx.instanceIndex) * 2654435761u)) %
+                                           (static_cast<uint32_t>(instanceIndex) * 2654435761u)) %
                                     1000) /
                      1000.0f - 0.5f) * 0.20f;
             const float lightness = std::clamp(0.55f + jitter, 0.15f, 0.9f);
@@ -162,22 +177,22 @@ glm::vec4 Representer::colorForAtomSrgb(const RepContext& ctx, uint32_t globalAt
             return glm::vec4(rgb, 1.0f);
         }
         case ColorScheme::Residue: {
-            const int32_t rid = st.atoms[localIdx].residueId;
+            const int32_t rid = st.atoms[localAtomIndex].residueId;
             // 同上：结构共享时，残基差异靠 实例序号 + 残基号 共同决定。
             const uint32_t key = static_cast<uint32_t>(rid) ^
-                                 (static_cast<uint32_t>(ctx.instanceIndex) * 2246822519u);
+                                 (static_cast<uint32_t>(instanceIndex) * 2246822519u);
             const float h = static_cast<float>(hash32(key) % 3600) / 3600.0f;
             const glm::vec3 rgb = hslToRgb(h, 0.35f, 0.62f);
             return glm::vec4(rgb, 1.0f);
         }
         case ColorScheme::BFactor: {
-            const float b = std::clamp(static_cast<float>(st.atoms[localIdx].bfactor) /
+            const float b = std::clamp(static_cast<float>(st.atoms[localAtomIndex].bfactor) /
                                            20000.0f, 0.0f, 1.0f);
             return glm::vec4(bfactorColor(b), 1.0f);
         }
         case ColorScheme::AtomName: {
             // 原子名（Name）观感：碳青、氮蓝、氧红、氢白、硫黄、磷橙；其余回落元素色。
-            const auto& info = elementInfo(st.elements[localIdx]);
+            const auto& info = elementInfo(st.elements[localAtomIndex]);
             const char* sym = info.symbol != nullptr ? info.symbol : "";
             if (sym[0] == 'C') {
                 return glm::vec4(0.55f, 0.85f, 0.88f, 1.0f);
@@ -209,6 +224,15 @@ glm::vec4 Representer::colorForAtomSrgb(const RepContext& ctx, uint32_t globalAt
     }
 }
 
+glm::vec4 Representer::colorForAtomSrgb(const RepContext& ctx, uint32_t globalAtomIndex) {
+    // 兼容入口（旧私有实现）：按当前实例换算局部下标后走无实例依赖的核心。
+    const bool inInstance = ctx.instance != nullptr && globalAtomIndex >= ctx.globalAtomBase;
+    return colorForAtomAtSrgb(ctx,
+                             ctx.instance != nullptr ? ctx.instance->structureIndex : UINT32_MAX,
+                             inInstance ? globalAtomIndex - ctx.globalAtomBase : UINT32_MAX,
+                             ctx.instanceIndex);
+}
+
 void Representer::generate(const Representation& rep,
                            const entity::SceneStructure& scene,
                            const entity::MoleculeInstance& mi,
@@ -236,6 +260,17 @@ void Representer::generate(const Representation& rep,
         if (si != UINT32_MAX) {
             ctx.renderMode = static_cast<uint8_t>(scene.systems()[si].renderMode);
         }
+    }
+
+    // 表面自身的绘制模式（v2.19）：实心/线框/半透明覆盖体系渲染模式。只有表面类
+    // 表示读这个字段 —— 其值是 0 时保持体系模式，其他表示完全不受影响（逐位一致
+    // 约束：非表面路径的输出不得变化）。逐分子路径走这里；整体系路径由 renderer
+    // 的体系表面分支发射对应 RenderMode。
+    if (rep.surfaceDrawMode != 0 &&
+        (rep.type == RepresentationType::Surface ||
+         rep.type == RepresentationType::QuickSurf ||
+         rep.type == RepresentationType::EspSurface)) {
+        ctx.renderMode = std::min<uint8_t>(rep.surfaceDrawMode, 2);
     }
 
     // 体系渲染模式命令：后端解码后切换到对应管线（实心/线框/透明/点）

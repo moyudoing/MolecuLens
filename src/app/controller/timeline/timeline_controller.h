@@ -10,6 +10,7 @@
 
 #include "app/events/event_bus.h"
 #include "app/shell/application.h"
+#include "engine/scheduler/frame_scheduler.h"
 
 namespace moleculens::app {
 
@@ -29,9 +30,24 @@ public:
     void gotoLast();
     void setSpeed(float speed);
     void setDt(float dt);
-    // 实时播放帧率（与物理 dt 解耦；默认 30 FPS）。速度倍率×该帧率 = 实际推进率。
+    // 实时播放帧率（与物理 dt 解耦）。0 = 刷新同步；>0 = 固定帧率。
+    // 这是旧入口：内部会把播放模式切到 FixedFps / RefreshSync。
     void setPlaybackFps(float fps);
     float playbackFps() const;
+
+    // —— 播放节奏（v2.19 动态 FPS）——
+    // 构造时从 settings.json 读一次并应用（启动即生效，不依赖 Workbench 先跑 UI）。
+    void applyPlaybackSettings();
+    void setPlaybackMode(engine::PlaybackMode mode);
+    engine::PlaybackMode playbackMode() const;
+    // Dynamic 的目标帧率上限；0 = 跟随渲染帧率。
+    void setPlaybackTargetFps(float fps);
+    float playbackTargetFps() const;
+    // 每渲染帧最多推进几帧（1–8），卡顿后不积累 backlog。
+    void setPlaybackMaxCatchUp(int frames);
+    int playbackMaxCatchUp() const;
+    // 最近一次推进的等效轨迹帧率（UI 显示"实际 58 FPS"）。
+    float effectiveFps() const;
     float speed() const;
     uint64_t frame() const;
     uint64_t frameCount() const;

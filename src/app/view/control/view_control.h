@@ -20,6 +20,7 @@
 #include "app/data/log_buffer.h"   // LogRecord（日志面板快照成员，完整类型）
 #include "app/view/chrome/window_chrome.h"      // MaximizeState（成员，完整类型）
 #include "app/view/container/main_view.h"
+#include "app/view/container/multi_view.h"
 #include "app/view/overlay/loading_overlay.h"   // LoadingState（成员，完整类型）
 #include "app/view/timeline/time_axis.h"        // TimeAxis 值成员（完整类型）
 #include "app/view/tool/tool_registry.h"
@@ -188,6 +189,7 @@ private:
 
     MainView mainView_;
     MolScene molScene_;
+    MultiView multiView_;   // 多视图（1/2/4 分屏；默认单视图，不改变历史行为）
     TimeAxis timeAxis_;
     ToolRegistry tools_;
     Workbench workbench_;   // v2 Aurora 工作台（固定五区 + 检查器模块）

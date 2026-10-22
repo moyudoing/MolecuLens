@@ -25,6 +25,12 @@ public:
     float orthoScale = 1.0f;   // 正交缩放（世界单位/像素比例系数）
     float nearClip = 0.01f;
     float farClip = 10000.0f;
+    // 自动取景得到的包围球半径与缩放边界（dolly 用）。
+    // 旧实现把最近距离绑在 nearClip*10 上：nearClip 只由场景半径的 1e-3 决定，
+    // 放大时相机可以一路钻进分子内部，近裁剪面把球/键切成碎片，表现为“分子翻形”。
+    float boundRadius = 40.0f;
+    float minDistance = 1.0f;
+    float maxDistance = 5000.0f;
 
     // 相机位置（轨道推导）
     [[nodiscard]] glm::vec3 position() const;

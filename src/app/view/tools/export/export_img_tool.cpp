@@ -20,6 +20,47 @@
 
 namespace moleculens::app {
 
+namespace {
+
+// GUI 导出的默认落点：用户「图片」目录（不存在则 Documents / 临时目录）。
+// 与 ViewControl::saveFileDialogEx 的初始目录保持同一策略，避免“相对路径 +
+// 进程 cwd 不可写”导致的“没有权限”。
+std::string defaultOutputPath(const char* leaf) {
+#ifdef _WIN32
+    const char* home = std::getenv("USERPROFILE");
+    if (home != nullptr && *home != '\0') {
+        std::filesystem::path base(home);
+        for (const char* sub : {"Pictures", "Documents"}) {
+            std::filesystem::path dir = base / sub / "MolecuLens";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            if (!ec && std::filesystem::is_directory(dir)) {
+                return (dir / leaf).string();
+            }
+        }
+    }
+#endif
+    std::error_code ec;
+    std::filesystem::path dir =
+        std::filesystem::temp_directory_path(ec) / "MolecuLens";
+    std::filesystem::create_directories(dir, ec);
+    return (dir / leaf).string();
+}
+
+std::string resolveOutputPath(const std::string& path, const char* leaf) {
+    if (path.empty()) {
+        return defaultOutputPath(leaf);
+    }
+    const std::filesystem::path p(path);
+    if (p.is_relative()) {
+        // 相对路径按默认的用户目录解析，而不是按进程 cwd
+        return (std::filesystem::path(defaultOutputPath("")) / p).string();
+    }
+    return path;
+}
+
+}   // namespace
+
 ExportImgTool::~ExportImgTool() {
     // 后台导出线程 join（应用关闭时确保导出完成后再销毁 MolScene/渲染器）
     if (exportThread_.joinable()) {
@@ -29,7 +70,6 @@ ExportImgTool::~ExportImgTool() {
 
 void ExportImgTool::render(DataManager* dm, MolScene* scene) {
     (void)dm;
-    (void)scene;
     if (ImGui::BeginTabBar("export_tabs")) {
         // —— 高 DPI 图像页签（主方案 §12.5）——
         if (ImGui::BeginTabItem(tr("高 DPI 图像"))) {
@@ -48,6 +88,12 @@ void ExportImgTool::render(DataManager* dm, MolScene* scene) {
                 opts.rayTraced = (renderModeIdx_ == 1);
             }
             if (opts.rayTraced) {
+                if (scene != nullptr) {
+                    ImGui::TextDisabled("%s",
+                        scene->rayTraceSupported()
+                            ? tr("GPU 光追扩展可用（导出后端仍为 CPU，结果一致）")
+                            : tr("未检测到 GPU 光追扩展，使用 CPU 光追"));
+                }
                 ImGui::SliderInt(tr("RT 采样"), &opts.rtSamples, 1, 8, "%d");
                 UITheme::helpMarker(tr("光线追踪：方向光软阴影 + 球体反射；采样数越高越平滑、"
                                        "越慢（推荐 4-8）"));
@@ -173,8 +219,14 @@ void ExportImgTool::render(DataManager* dm, MolScene* scene) {
                              trItems({"PNG 序列", "APNG", "GIF", "MP4 (ffmpeg)", "WebM (ffmpeg)"}).c_str())) {
                 opts.codec = static_cast<Codec>(codec);
             }
-            ImGui::InputScalar(tr("起始帧"), ImGuiDataType_U64, &opts.inFrame);
-            ImGui::InputScalar(tr("结束帧"), ImGuiDataType_U64, &opts.outFrame);
+            // 帧范围只对轨迹有意义；纯相机旋转用“旋转帧数”（复用结束帧字段）。
+            if (opts.source == 1) {
+                ImGui::InputScalar(tr("旋转帧数"), ImGuiDataType_U64, &opts.outFrame);
+                ImGui::TextDisabled("%s", tr("0 = 默认 120 帧；绕当前视轴转一整圈"));
+            } else {
+                ImGui::InputScalar(tr("起始帧"), ImGuiDataType_U64, &opts.inFrame);
+                ImGui::InputScalar(tr("结束帧"), ImGuiDataType_U64, &opts.outFrame);
+            }
             ImGui::InputFloat("fps", &opts.fps);
             ImGui::Checkbox(tr("循环"), &opts.loop);
             ImGui::InputScalar(tr("宽度倍数"), ImGuiDataType_U32, &opts.scale);
@@ -188,9 +240,50 @@ void ExportImgTool::render(DataManager* dm, MolScene* scene) {
             }
             UITheme::helpMarker(tr("逐帧导出与单帧导出共用同一抗锯齿/位深链路；" "帧数多时 SSAA 会成倍拉长导出时间"));
             ImGui::InputText(tr("输出路径"), animPath_, sizeof(animPath_));
+            if (opts.codec != Codec::PngSequence) {
+                ImGui::SameLine();
+                if (ImGui::Button(tr("浏览..."))) {
+                    const char* filter = nullptr;
+                    const char* ext = "mp4";
+                    switch (opts.codec) {
+                    case Codec::Apng:
+                        filter = "APNG (*.apng)\0*.apng\0所有文件 (*.*)\0*.*\0";
+                        ext = "apng";
+                        break;
+                    case Codec::Gif:
+                        filter = "GIF (*.gif)\0*.gif\0所有文件 (*.*)\0*.*\0";
+                        ext = "gif";
+                        break;
+                    case Codec::Webm:
+                        filter = "WebM (*.webm)\0*.webm\0所有文件 (*.*)\0*.*\0";
+                        ext = "webm";
+                        break;
+                    case Codec::Mp4:
+                    case Codec::PngSequence:
+                    default:
+                        filter = "MP4 (*.mp4)\0*.mp4\0所有文件 (*.*)\0*.*\0";
+                        ext = "mp4";
+                        break;
+                    }
+                    const std::filesystem::path current(animPath_);
+                    std::string name = current.filename().string();
+                    if (name.empty()) {
+                        name = std::string("trajectory.") + ext;
+                    }
+                    const std::string chosen =
+                        ViewControl::saveFileDialogEx(name.c_str(), filter, ext);
+                    if (!chosen.empty()) {
+                        std::snprintf(animPath_, sizeof(animPath_), "%s", chosen.c_str());
+                    }
+                }
+            }
+            UITheme::helpMarker(tr("视频/GIF 用系统“另存为”选择目标文件；PNG 序列填目录。"
+                                   "留空时自动写到“图片/MolecuLens”。"));
             ImGui::BeginDisabled(exportRunning_);
             if (UITheme::primaryButton(tr("导出动画"))) {
-                opts.outPath = animPath_;
+                opts.outPath = resolveOutputPath(
+                    animPath_, opts.codec == Codec::PngSequence ? "trajectory_frames"
+                                                                : "trajectory.mp4");
                 startAnimationExport(opts, scene);   // 后台线程，不阻塞主视图
             }
             ImGui::EndDisabled();
@@ -255,26 +348,24 @@ bool ExportImgTool::exportAnimation(const AnimationExportOptions& opts, MolScene
     // 尺寸：以视口逻辑尺寸 × scale 为准（与图像导出的"视口倍数"一致）
     const uint32_t w = std::max(1u, scene->displayWidth() * std::max(1u, opts.scale));
     const uint32_t h = std::max(1u, scene->displayHeight() * std::max(1u, opts.scale));
-    // 轨迹帧动画针对"当前激活实例"；动画源 1（纯相机旋转）当前未实现，
-    // 因为相机运动需要逐帧改相机——留待后续（此处仅支持轨迹源）。
-    if (opts.source == 1) {
-        spdlog::error("[io] export(anim): 动画源「相机旋转」尚未实现");
-        return false;
-    }
+    // 纯相机旋转不依赖轨迹帧；轨迹+相机仍按轨迹帧推进，同时叠加相机环绕。
+    const uint32_t orbitFrames = static_cast<uint32_t>(
+        opts.outFrame == 0 ? 120 : std::min<uint64_t>(opts.outFrame, 10000));
     uint32_t frames = 0;
     // PNG 序列：直接写目标目录（文件名按顺序 0000.png 递增）
     if (opts.codec == Codec::PngSequence) {
-        return scene->exportAnimationToPng(w, h, opts.outPath, /*instanceIndex=*/0,
-                                           opts.inFrame, opts.outFrame, opts.step,
-                                           /*bgOverride=*/nullptr, opts.ssaa,
-                                           opts.colorDepth, &frames);
+        return scene->exportAnimationToPng(
+            w, h, opts.outPath, /*instanceIndex=*/0, opts.inFrame, opts.outFrame,
+            opts.step, /*bgOverride=*/nullptr, opts.ssaa, opts.colorDepth, &frames,
+            opts.source, orbitFrames);
     }
 
     // 视频/动图：先写临时帧目录，再交给 ffmpeg 封装；成功后清掉帧目录。
     const std::string framesDir = opts.outPath + ".frames";
     if (!scene->exportAnimationToPng(w, h, framesDir, /*instanceIndex=*/0, opts.inFrame,
                                      opts.outFrame, opts.step, /*bgOverride=*/nullptr,
-                                     opts.ssaa, opts.colorDepth, &frames)) {
+                                     opts.ssaa, opts.colorDepth, &frames, opts.source,
+                                     orbitFrames)) {
         return false;
     }
     engine::AnimEncodeOptions enc;
@@ -323,8 +414,10 @@ void ExportImgTool::startAnimationExport(const AnimationExportOptions& opts, Mol
     const bool ok = ExportImgTool::exportAnimation(opts, scene);
     {
         std::lock_guard<std::mutex> lk(msgMutex_);
-        exportMsg_ = ok ? (tr("动画导出完成: ") + opts.outPath)
-                        : (tr("动画导出失败: ") + opts.outPath);
+        exportMsg_ =
+            ok ? (tr("动画导出完成: ") + opts.outPath)
+               : (tr("动画导出失败: ") + opts.outPath +
+                  tr("（请检查目标目录是否可写；ffmpeg 编解码器需在 PATH 中）"));
     }
     exportOk_ = ok;
     exportRunning_ = false;
@@ -346,8 +439,10 @@ void ExportImgTool::startExport(const ImageExportOptions& opts, MolScene* scene)
         const bool ok = ExportImgTool::exportImage(opts, scene);
         {
             std::lock_guard<std::mutex> lk(msgMutex_);
-            exportMsg_ = ok ? (tr("导出完成: ") + opts.outPath)
-                            : (tr("导出失败: ") + opts.outPath);
+            exportMsg_ =
+                ok ? (tr("导出完成: ") + opts.outPath)
+                   : (tr("导出失败: ") + opts.outPath +
+                      tr("（请检查目标目录是否可写；建议保存到“图片”文件夹）"));
         }
         exportOk_ = ok;
         exportRunning_ = false;

@@ -54,7 +54,11 @@ public:
     void shutdown();
 
     // 渲染（在 ImGui 窗口内调用：resize FBO → prepare → execute → Image）
-    void render(const ImVec2& size);
+    // sceneDirtyHint：多视图共享同一场景时，先渲染的视图会在 prepare 里清掉场景
+    // 脏位；其它视图必须在整帧开始时抓到同一份快照并通过本参数显式传入，否则
+    // 它们永远看不到本帧的变更（命令流不重建 → 副视图停在旧画面）。
+    // 单视图 / 首个视图传 0（默认）→ 行为与原先完全一致。
+    void render(const ImVec2& size, uint32_t sceneDirtyHint = 0);
     // 时间轴当前帧：传给 Renderer 作为表面预取缓存键（不影响渲染结果）
     void setTrajectoryFrame(uint64_t frame) { trajectoryFrame_ = frame; }
 
@@ -92,15 +96,20 @@ public:
     //   frameCountOut 返回实际写出的帧数
     // 注意：**必须在主线程调用**——逐帧改写场景坐标段（applyTrajectoryFrame）并
     // 重建命令流，与主线程的渲染循环共用同一场景/渲染器，跨线程会数据竞争。
+    //   source: 0=轨迹；1=纯相机绕当前视轴转一周；2=轨迹+相机
+    //   orbitFrames: source 含相机时转一周的帧数（0 → 120）
     bool exportAnimationToPng(uint32_t width, uint32_t height,
                               const std::string& dirPath, uint32_t instanceIndex,
                               uint64_t inFrame, uint64_t outFrame, uint32_t step,
                               const float bgOverride[3], int ssaa, int colorDepth,
-                              uint32_t* frameCountOut);
+                              uint32_t* frameCountOut, int source = 0,
+                              uint32_t orbitFrames = 120);
 
     // 视口 RT 预览开关（一.7）：开启后视口用 CPU 光线追踪低分辨率渲染
     void setRayTracePreview(bool on) { rayTracePreview_ = on; markDirty(); }
     [[nodiscard]] bool rayTracePreview() const { return rayTracePreview_; }
+    // 当前 Vulkan 设备是否暴露硬件光追扩展（不代表 CPU 光追导出可用性）
+    [[nodiscard]] bool rayTraceSupported() const;
 
     // 分子显示视图叠加层：坐标轴方向 / 比例尺与场景尺寸。可由「显示」面板或
     // 视口「叠加」按钮分别关闭（用户要求"可选择关闭"）。
@@ -111,6 +120,18 @@ public:
             markDirty();
         }
     }
+
+    // 动态分辨率：渲染尺度（0.35–2.0）。交互/播放时可按 dynamicResolution
+    // 自动再乘一个内部系数（0.7），停手后回到设定值，从而提升流畅度。
+    void setRenderScale(float s);
+    [[nodiscard]] float renderScale() const { return renderScale_; }
+    void setDynamicResolution(bool on) { dynamicResolution_ = on; markDirty(); }
+    [[nodiscard]] bool dynamicResolution() const { return dynamicResolution_; }
+
+    // 全局网格面数（球细分 1..4、圆柱截面 8..64）。修改后重建共享网格。
+    void setMeshQuality(int detail, int segments);
+    [[nodiscard]] int meshDetail() const { return meshDetail_; }
+    [[nodiscard]] int meshSegments() const { return meshSegments_; }
 
     // 视口 FBO 纹理（ImGui Image 用）
     [[nodiscard]] ImTextureID textureId() const;
@@ -168,6 +189,10 @@ private:
     ImTextureID texture_ = ImTextureID(0);
     bool showAxes_ = true;
     bool showScaleBar_ = true;
+    float renderScale_ = 1.0f;          // 用户设定的渲染分辨率比例
+    bool dynamicResolution_ = true;      // 交互/播放时自动降分辨率
+    int meshDetail_ = 3;                // 球细分档（1=80 面 … 4=5120 面）
+    int meshSegments_ = 24;             // 圆柱截面段数
 
     // 播放/拖时间轴时的动态细节：坐标版本变化后 350 ms 内用低细分球/柱并跳过
     // 阴影 pass —— 轨迹播放每帧要重画 6000+ 个原子，高细分网格下会明显掉帧。

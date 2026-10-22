@@ -188,11 +188,71 @@ bool RepresentationController::setSurfGridSpacing(int32_t repId, float s) {
     return true;
 }
 
+bool RepresentationController::setSurfSmooth(int32_t repId, int iterations) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].surfSmooth = std::clamp(iterations, 0, 3);
+    touch();
+    return true;
+}
+
 bool RepresentationController::setSystemSurface(int32_t repId, bool on) {
     if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
         return false;
     }
     reps_[static_cast<size_t>(repId)].systemSurface = on;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setSurfaceDrawMode(int32_t repId, uint8_t mode) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].surfaceDrawMode = std::min<uint8_t>(mode, 2);
+    touch();
+    return true;
+}
+
+bool RepresentationController::setInstanceRangeMode(int32_t repId, uint8_t mode) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].rangeMode = std::min<uint8_t>(
+        mode, static_cast<uint8_t>(engine::Representation::InstanceRangeMode::Stride));
+    touch();
+    return true;
+}
+
+bool RepresentationController::setInstanceRangeType(int32_t repId,
+                                                    const std::string& typeName) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].rangeType = typeName;
+    touch();
+    return true;
+}
+
+bool RepresentationController::setInstanceRangeFraction(int32_t repId, float fraction) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size() ||
+        !std::isfinite(fraction)) {
+        return false;
+    }
+    reps_[static_cast<size_t>(repId)].rangeFraction = std::clamp(fraction, 0.0f, 1.0f);
+    touch();
+    return true;
+}
+
+bool RepresentationController::setInstanceRangeStride(int32_t repId, uint32_t stride,
+                                                      uint32_t offset) {
+    if (repId < 0 || static_cast<size_t>(repId) >= reps_.size()) {
+        return false;
+    }
+    auto& rep = reps_[static_cast<size_t>(repId)];
+    rep.rangeStride = std::max(1u, stride);
+    rep.rangeOffset = offset % rep.rangeStride;
     touch();
     return true;
 }

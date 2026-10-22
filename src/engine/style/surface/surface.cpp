@@ -315,18 +315,27 @@ void drawSystemSurface(const RepContext& ctx, SceneCommandList& out) {
     std::vector<glm::vec4> atomColors;   // 与 centers 并行：逐顶点着色
     const auto& insts = ctx.scene->instances();
     const size_t total = ctx.frame && ctx.frame->positions ? ctx.frame->positions->size() : 0;
-    // 遍历全部实例（体系）的全部原子；排除隐藏实例/隐藏体系
+    // 遍历全部实例（体系）的全部原子；排除隐藏实例/隐藏体系。
+    // 取色必须走 colorForAtomAt（显式传入原子**真实所属**的实例）：本上下文的
+    // ctx.instance 是空的（一个整体系表面覆盖多个实例），旧实现用 colorForAtom
+    // → 读 ctx.instance->structureIndex → 空指针崩溃，正是 --system-surface 必崩的原因。
     size_t globalBase = 0;
-    for (const auto& inst : insts) {
+    for (uint32_t ii = 0; ii < static_cast<uint32_t>(insts.size()); ++ii) {
+        const auto& inst = insts[ii];
         uint32_t sysIdx = UINT32_MAX;
         if (inst.systemId != UINT32_MAX) {
             sysIdx = ctx.scene->systemIndexById(inst.systemId);
         }
         const bool hidden = !inst.visible ||
                             (sysIdx != UINT32_MAX && !ctx.scene->systems()[sysIdx].visible);
+        // 实例级类型范围掩码（v2.19）：被「作用分子范围」过滤掉的实例不参与整体系
+        // 表面，否则“只渲染一半溶剂”时整表面里溶剂一个不少。
+        const bool outOfRange = ctx.instanceMask != nullptr &&
+                                ii < ctx.instanceMask->size() &&
+                                (*ctx.instanceMask)[ii] == 0;
         const auto& st = ctx.scene->structures()[inst.structureIndex];
         const size_t n = st.elements.size();
-        if (hidden) {
+        if (hidden || outOfRange) {
             globalBase += n;
             continue;
         }
@@ -337,7 +346,8 @@ void drawSystemSurface(const RepContext& ctx, SceneCommandList& out) {
             }
             centers.push_back(pos[static_cast<size_t>(g)]);
             radii.push_back(elementInfo(st.elements[i]).vdwRadius * ctx.rep->radiusScale);
-            atomColors.push_back(Representer::colorForAtom(ctx, g));
+            atomColors.push_back(Representer::colorForAtomAt(
+                ctx, inst.structureIndex, static_cast<uint32_t>(i), ii));
         }
         globalBase += n;
     }

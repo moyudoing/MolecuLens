@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 
 #include <glm/gtc/matrix_transform.hpp>   // lookAt / ortho（光源正交矩阵）
 
@@ -17,11 +19,13 @@
 
 #include "engine/async/surface_jobs.h"
 #include "engine/rep/representer.h"
+#include "engine/raytrace/ray_tracer.h"          // RtScene/RtCamera/RtLight（GPU RT 入口）
 #include "engine/style/espsurface/esp_surface.h"   // espOverlayReset（视口色标/极值标注）
 #include "engine/style/quicksurf/quicksurf.h"
 #include "engine/style/style_registry.h"   // styleFor（坐标重放直接调样式）
 #include "engine/style/surface/surface.h"
 #include "engine/vulkan/realtime/vulkan_renderer.h"
+#include "engine/vulkan/raytracing/gpu_ray_tracer.h"
 #include "entity/element/element.h"
 #include "entity/scene/scene.h"
 #include "entity/selection/selection.h"
@@ -121,7 +125,104 @@ bool sceneMeshReplaySafe(const std::vector<Representation>& reps, bool freezeSur
     }
     return true;
 }
+
+// 实例的"分子类型"token（v2.19 类型范围）：实例名形如 "SOL #12" / "molecule_3"。
+// 取 '#' 之前的部分并 trim —— 同一类型的分子只有序号不同，范围过滤必须按类型分组，
+// 否则"50% 的 SOL"无从谈起。无 '#' 时整个名字就是类型（"molecule_3" 的 3 是下标，
+// 但名字本身仍是稳定的分组键，调用方/UI 给出的就是这串 token）。
+std::string instanceTypeToken(const std::string& name) {
+    const size_t hash = name.find('#');
+    const std::string head = name.substr(0, hash);
+    size_t b = 0;
+    size_t e = head.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(head[b])) != 0) {
+        ++b;
+    }
+    while (e > b && std::isspace(static_cast<unsigned char>(head[e - 1])) != 0) {
+        --e;
+    }
+    return head.substr(b, e - b);
+}
+
+// 规格里的 rangeType 可能带用户输入的空白，比较前同样 trim。
+std::string trimToken(const std::string& s) {
+    size_t b = 0;
+    size_t e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b])) != 0) {
+        ++b;
+    }
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1])) != 0) {
+        --e;
+    }
+    return s.substr(b, e - b);
+}
 } // namespace
+
+// 实例级类型范围掩码（v2.19）。语义见 representation.h 的 rangeMode 注释：
+//   · 先按 rangeType 过滤（空 = 全部类型）；
+//   · 匹配实例**按场景顺序**编号 p（0 起），Fraction 取前 ceil(fraction*N) 个，
+//     Stride 取 p % stride == offset % stride 的实例。
+// 纯函数 + 顺序确定：同一份场景/表示每次得到同一结果（命令流重放才可能逐位一致）。
+void buildInstanceRangeMask(const Representation& rep,
+                            const std::vector<entity::MoleculeInstance>& instances,
+                            std::vector<uint8_t>& out) {
+    const uint8_t modeId = std::min<uint8_t>(
+        rep.rangeMode,
+        static_cast<uint8_t>(Representation::InstanceRangeMode::Stride));
+    const Representation::InstanceRangeMode mode =
+        static_cast<Representation::InstanceRangeMode>(modeId);
+    const std::string wantType = trimToken(rep.rangeType);
+    const bool typeFilter = !wantType.empty();
+
+    // 1) 类型匹配：记录匹配实例的**场景下标**（匹配位置 = 该表中的顺序）
+    std::vector<uint32_t> matched;
+    matched.reserve(instances.size());
+    for (uint32_t i = 0; i < instances.size(); ++i) {
+        if (typeFilter && instanceTypeToken(instances[i].name) != wantType) {
+            continue;
+        }
+        matched.push_back(i);
+    }
+
+    out.assign(instances.size(), 0u);
+    if (matched.empty()) {
+        return;   // 无匹配实例：全空（调用方据此不渲染任何实例）
+    }
+
+    switch (mode) {
+        case Representation::InstanceRangeMode::Fraction: {
+            const float f = std::isfinite(rep.rangeFraction)
+                                ? std::clamp(rep.rangeFraction, 0.0f, 1.0f)
+                                : 1.0f;
+            // ceil(f*N)：0 → 0 个，1 → N 个；0.5 的 4 个 SOL → 前 2 个。
+            // 用 double 计算避免 float 乘法在 f*N 恰为整数时向下误差（0.5*4=2.0）。
+            const size_t keep = static_cast<size_t>(
+                std::ceil(static_cast<double>(f) * static_cast<double>(matched.size())));
+            for (size_t k = 0; k < keep && k < matched.size(); ++k) {
+                out[matched[k]] = 1u;
+            }
+            break;
+        }
+        case Representation::InstanceRangeMode::Stride: {
+            const uint32_t stride = std::max(1u, rep.rangeStride);
+            const uint32_t offset = rep.rangeOffset % stride;
+            for (size_t k = 0; k < matched.size(); ++k) {
+                if ((static_cast<uint32_t>(k) % stride) == offset) {
+                    out[matched[k]] = 1u;
+                }
+            }
+            break;
+        }
+        case Representation::InstanceRangeMode::All:
+        default:
+            for (uint32_t idx : matched) {
+                out[idx] = 1u;
+            }
+            break;
+    }
+}
+
+Renderer::Renderer() = default;
 
 Renderer::~Renderer() {
     // 恢复样式层默认（同步生成），再停止后台工作线程：否则进程退出/下一个
@@ -146,6 +247,19 @@ void Renderer::unbindRepresentations() {
     repsRevision_ = 0;
 }
 
+void Renderer::setPaneFilter(std::vector<uint8_t> instanceMask,
+                             std::vector<uint8_t> repMask) {
+    if (paneInstanceMask_ == instanceMask && paneRepMask_ == repMask) {
+        return;
+    }
+    paneInstanceMask_ = std::move(instanceMask);
+    paneRepMask_ = std::move(repMask);
+    std::lock_guard<std::mutex> prepareLock(prepareMutex_);
+    // 筛选只影响命令流内容（不改场景数据）；必须立即重建，不能等 DIRTY_*。
+    needsRebuild_ = true;
+    needsCoords_ = false;
+}
+
 const std::vector<Representation>& Renderer::representations() const {
     static const std::vector<Representation> kNone;
     return representations_ ? *representations_ : kNone;
@@ -160,6 +274,13 @@ void Renderer::refreshFrameData() {
 }
 
 void Renderer::update(float dt) {
+    if (scene_ == nullptr) {
+        return;
+    }
+    updateWithDirty(dt, scene_->dirtyBits());
+}
+
+void Renderer::updateWithDirty(float dt, uint32_t dirty) {
     (void)dt;
     if (scene_ == nullptr) {
         return;
@@ -167,7 +288,6 @@ void Renderer::update(float dt) {
     // 与 prepare 共用锁：导出线程可能同时调用 update/prepare（见 header）；
     // 串行化后两条路径不会交错改写 needsRebuild_/commandList_。
     std::lock_guard<std::mutex> prepareLock(prepareMutex_);
-    const uint32_t dirty = scene_->dirtyBits();
     // 诊断（仅在脏位**取值变化**时打印，避免拖拽相机时逐帧刷屏）：
     // 本行不出现 = MolScene 的门控从未打开（它看到的 sceneDirty 恒为假）；
     // 出现且 dirty 非 0 = 门控打开了且脏位已传到渲染器 —— 那问题就在 prepare。
@@ -414,8 +534,16 @@ bool Renderer::rebuildCommandList(bool replay) {
 
     // 每 (表示, 实例) 生成段（P10 并行；此处串行实现，M2 接入 TaskPool）——
     // Selection 掩码对整个场景求值一次（与实例无关），本表示全部实例复用。
-    for (const auto& rep : representations()) {
+    const std::vector<Representation>& reps = representations();
+    for (size_t repIdx = 0; repIdx < reps.size(); ++repIdx) {
+        const Representation& rep = reps[repIdx];
         if (!rep.visible) {
+            continue;
+        }
+        // 多视图：该视图没有勾选这条表示 → 不生成它的任何命令（重放路径同样跳过，
+        // 否则命令序列与全量重建对不上，重放游标会错位）。
+        if (!paneRepMask_.empty() &&
+            (repIdx >= paneRepMask_.size() || paneRepMask_[repIdx] == 0)) {
             continue;
         }
         // Selection 求值（跨实例全局掩码）
@@ -433,6 +561,23 @@ bool Renderer::rebuildCommandList(bool replay) {
             }
         }
 
+        // 实例级类型范围（v2.19）：每条表示只算一次，逐实例与整体系表面共用同一份
+        // 结果（"只渲染一半溶剂"必须对两条路径一致生效）。
+        std::vector<uint8_t> instanceRangeMask;
+        buildInstanceRangeMask(rep, scene_->instances(), instanceRangeMask);
+
+        // 多视图：再叠加本视图的实例筛选（文件/体系）。两者都通过才渲染；
+        // 整体系表面走同一份掩码 → 被筛掉的体系不会混进该视图的表面。
+        // 视图掩码之外的实例一律视为隐藏（掩码按当前场景实例数生成，正常等长）。
+        if (!paneInstanceMask_.empty()) {
+            const size_t n = instanceRangeMask.size();
+            for (size_t i = 0; i < n; ++i) {
+                const bool keep = i < paneInstanceMask_.size() &&
+                                  paneInstanceMask_[i] != 0;
+                instanceRangeMask[i] = (instanceRangeMask[i] != 0 && keep) ? 1u : 0u;
+            }
+        }
+
         // 体系级表面（G5）：整体系（含溶剂分子）一个整体表面，只发射一次（而非
         // 每分子一个独立小表面）。surface/quicksurf 表示设置 rep.systemSurface 时生效。
         // 该分支发射 TriMesh（顶点数随坐标变化）→ 记录期即置 hasMesh_，重放被拒，
@@ -447,12 +592,13 @@ bool Renderer::rebuildCommandList(bool replay) {
                 commandList_.skipReplayMesh();
                 continue;
             }
-            // 整体表面是单一 TriMesh，恒以体系渲染模式「实心」(mode0) 绘制；
-            // 必须先重置 RenderMode 与材质：若此前其它表示的最后一条 RenderMode/
-            // MaterialBlock 命令残留，表面网格会继承错误的管线（线框/透明）或全零
-            // 默认材质（diffuse=0）→ 烘焙后顶点色全黑 → 表面不可见。
+            // 整体表面是单一 TriMesh；必须先重置 RenderMode 与材质：若此前其它表示的
+            // 最后一条 RenderMode/MaterialBlock 命令残留，表面网格会继承错误的管线
+            // （线框/透明）或全零默认材质（diffuse=0）→ 烘焙后顶点色全黑 → 表面不可见。
+            // v2.19：重置值改由表示自己的 surfaceDrawMode 决定（0 实心/1 线框/2 半透明），
+            // 否则用户永远拿不到"表面绘制模式"这个开关。
             RenderModeInst rmi0;
-            rmi0.mode = 0;
+            rmi0.mode = std::min<uint8_t>(rep.surfaceDrawMode, 2u);
             rmi0.pad[0] = rmi0.pad[1] = rmi0.pad[2] = 0;
             fresh.append(Cmd::RenderMode, &rmi0, sizeof(rmi0));
             MaterialBlock mat0;
@@ -468,11 +614,27 @@ bool Renderer::rebuildCommandList(bool replay) {
             mat0.opacity = rep.opacity;
             fresh.append(Cmd::MaterialBlock, &mat0, sizeof(mat0));
 
+            const auto& surfInstances = scene_->instances();
             RepContext sctx;
             sctx.scene = scene_;
             sctx.frame = &frameData_;
             sctx.rep = &rep;
             sctx.mask = &mask;
+            sctx.instanceMask = &instanceRangeMask;
+            // 整体系表面没有"单一实例"，但样式层历史上有读 ctx.instance 的路径
+            // （colorForAtom 空指针解引用崩溃）；防御性地指向首个实例。取第一个
+            // 未被类型范围过滤的实例优先，全被过滤时退回第 0 个（不作为取色依据）。
+            if (!surfInstances.empty()) {
+                uint32_t first = 0;
+                for (uint32_t k = 0; k < surfInstances.size(); ++k) {
+                    if (k < instanceRangeMask.size() && instanceRangeMask[k] != 0) {
+                        first = k;
+                        break;
+                    }
+                }
+                sctx.instance = &surfInstances[first];
+                sctx.instanceIndex = first;
+            }
             sctx.frameIndex = frameIndex_;
             if (rep.type == RepresentationType::Surface) {
                 drawSystemSurface(sctx, fresh);
@@ -487,6 +649,11 @@ bool Renderer::rebuildCommandList(bool replay) {
         const auto& instances = scene_->instances();
         for (uint32_t instIdx = 0; instIdx < instances.size(); ++instIdx) {
             const auto& inst = instances[instIdx];
+            // 实例级类型范围（v2.19）：被过滤的实例不参与本表示。重放路径同样跳过
+            // ——命令序列与全量重建必须逐条对应，否则重放游标错位会回退全量重建。
+            if (instIdx < instanceRangeMask.size() && instanceRangeMask[instIdx] == 0) {
+                continue;
+            }
             if (!inst.visible) {
                 continue;
             }
@@ -508,6 +675,7 @@ bool Renderer::rebuildCommandList(bool replay) {
                 ctx.frame = &frameData_;
                 ctx.rep = &rep;
                 ctx.mask = &mask;
+                ctx.instanceMask = &instanceRangeMask;
                 ctx.instanceIndex = instIdx;
                 ctx.globalAtomBase = atomBases[instIdx];
                 ctx.frameIndex = frameIndex_;
@@ -667,6 +835,42 @@ bool Renderer::sceneBounds(glm::vec3* outCenter, float* outRadius) const {
     }
     *outRadius = std::max(radius, minRadius);
     return true;
+}
+
+// —— GPU 光追（懒初始化；无 RT 设备返回 false，调用方回退 CPU）——
+bool Renderer::gpuRayTraceAvailable() {
+    std::lock_guard<std::mutex> lock(gpuRtMutex_);
+    if (!gpuRt_) {
+        gpuRt_ = std::make_unique<GpuRayTracer>();
+    }
+    if (gpuRt_->available()) {
+        return true;
+    }
+    // 有主设备（GUI）就复用；没有（CLI/测试）则由 GpuRayTracer 自建 headless。
+    VulkanDevice* dev = (vulkan_ != nullptr) ? &vulkan_->device() : nullptr;
+    std::string err;
+    const bool ok = gpuRt_->init(dev, &err);
+    if (!ok) {
+        spdlog::info("[rt] GPU ray tracing unavailable: {}", err);
+    }
+    return ok;
+}
+
+bool Renderer::gpuRayTrace(const RtScene& scene, const RtCamera& camera,
+                           const RtLight& light, const glm::vec3& backgroundColor,
+                           int samplesPerPixel, std::vector<uint8_t>& outRgba) {
+    std::lock_guard<std::mutex> lock(gpuRtMutex_);
+    if (!gpuRt_) {
+        gpuRt_ = std::make_unique<GpuRayTracer>();
+    }
+    if (!gpuRt_->available()) {
+        VulkanDevice* dev = (vulkan_ != nullptr) ? &vulkan_->device() : nullptr;
+        if (!gpuRt_->init(dev, nullptr)) {
+            return false;
+        }
+    }
+    return gpuRt_->render(scene, camera, light, backgroundColor, samplesPerPixel,
+                          outRgba);
 }
 
 } // namespace moleculens::engine

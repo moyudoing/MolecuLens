@@ -5,6 +5,7 @@
 
 #include "persist/settings/settings.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -28,6 +29,12 @@ nlohmann::json Settings::toJson() const {
                    {"fov", fov},
                    {"ambient", ambient}};
     j["timeline"] = {{"loop", timelineLoop}, {"dt", timelineDt}, {"speed", timelineSpeed}};
+    // 轨迹播放节奏（v2.19 动态 FPS）：顶层键，与 sceneSaveMode 同一取舍
+    // —— 键名 = 字段名，手工排查 settings.json 时能直接对上。
+    j["playbackMode"] = playbackMode;
+    j["playbackFps"] = playbackFps;
+    j["playbackSpeed"] = playbackSpeed;
+    j["playbackMaxCatchUp"] = playbackMaxCatchUp;
     j["recentFiles"] = recentFiles;
     j["camera"] = {{"target", {cameraTarget[0], cameraTarget[1], cameraTarget[2]}},
                    {"distance", cameraDistance},
@@ -62,7 +69,47 @@ void Settings::fromJson(const nlohmann::json& j) {
         const auto& t = j["timeline"];
         if (t.contains("loop")) timelineLoop = t["loop"].get<bool>();
         if (t.contains("dt")) timelineDt = t["dt"].get<float>();
-        if (t.contains("speed")) timelineSpeed = t["speed"].get<float>();
+        if (t.contains("speed")) {
+            timelineSpeed = t["speed"].get<float>();
+            // 旧配置只有 timeline.speed：作为播放倍速的回退值（下面 playback 段优先）。
+            playbackSpeed = std::clamp(timelineSpeed, 0.1f, 4.0f);
+        }
+    }
+    // 轨迹播放节奏（v2.19 动态 FPS）：顶层 playbackMode / playbackFps /
+    // playbackSpeed / playbackMaxCatchUp；缺键走默认值。早期内部构建曾写成嵌套
+    // playback 对象，这里继续接受（顶层键更具体，最后覆盖）。
+    if (j.contains("playback") && j["playback"].is_object()) {
+        const auto& p = j["playback"];
+        if (p.contains("mode") && p["mode"].is_string()) {
+            const auto v = p["mode"].get<std::string>();
+            if (v == "dynamic" || v == "fixed" || v == "refresh") {
+                playbackMode = v;
+            }
+        }
+        if (p.contains("fps") && p["fps"].is_number_integer()) {
+            playbackFps = std::clamp(p["fps"].get<int>(), 0, 240);
+        }
+        if (p.contains("speed") && p["speed"].is_number()) {
+            playbackSpeed = std::clamp(p["speed"].get<float>(), 0.1f, 4.0f);
+        }
+        if (p.contains("maxCatchUp") && p["maxCatchUp"].is_number_integer()) {
+            playbackMaxCatchUp = std::clamp(p["maxCatchUp"].get<int>(), 1, 8);
+        }
+    }
+    if (j.contains("playbackMode") && j["playbackMode"].is_string()) {
+        const auto v = j["playbackMode"].get<std::string>();
+        if (v == "dynamic" || v == "fixed" || v == "refresh") {
+            playbackMode = v;
+        }
+    }
+    if (j.contains("playbackFps") && j["playbackFps"].is_number_integer()) {
+        playbackFps = std::clamp(j["playbackFps"].get<int>(), 0, 240);
+    }
+    if (j.contains("playbackSpeed") && j["playbackSpeed"].is_number()) {
+        playbackSpeed = std::clamp(j["playbackSpeed"].get<float>(), 0.1f, 4.0f);
+    }
+    if (j.contains("playbackMaxCatchUp") && j["playbackMaxCatchUp"].is_number_integer()) {
+        playbackMaxCatchUp = std::clamp(j["playbackMaxCatchUp"].get<int>(), 1, 8);
     }
     if (j.contains("recentFiles")) {
         recentFiles = j["recentFiles"].get<std::vector<std::string>>();

@@ -14,7 +14,8 @@ include(${CMAKE_SOURCE_DIR}/cmake/shaders.cmake)
 # 这与"陈旧 .obj 导致类布局错位"是同一类坑，故显式登记依赖。
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/global_ubo.glsl
-    ${CMAKE_CURRENT_SOURCE_DIR}/material_shading.glsl)
+    ${CMAKE_CURRENT_SOURCE_DIR}/material_shading.glsl
+    ${CMAKE_CURRENT_SOURCE_DIR}/rt_common.glsl)
 
 # 清屏测试着色器（M0）
 moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/triangle.vert
@@ -54,3 +55,16 @@ moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/point.frag
 # 方向光阴影的深度 pass（片元阶段无输出；顶点阶段复用 sphere/cylinder/mesh.vert）
 moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/shadow.frag
                       ${CMAKE_BINARY_DIR}/gen/shaders/shadow_frag.h)
+# GPU 光追（任务 E）：raygen / miss / shadow miss / triangle closest-hit /
+# 程序化求交（球+胶囊 AABB）；--target-env vulkan1.2 由 cmake/shaders.cmake
+# 按扩展名自动附加，栅格化着色器命令不变。
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/rt_raygen.rgen
+                      ${CMAKE_BINARY_DIR}/gen/shaders/rt_raygen_rgen.h)
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/rt_miss.rmiss
+                      ${CMAKE_BINARY_DIR}/gen/shaders/rt_miss_rmiss.h)
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/rt_shadow.rmiss
+                      ${CMAKE_BINARY_DIR}/gen/shaders/rt_shadow_rmiss.h)
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/rt_tri.rchit
+                      ${CMAKE_BINARY_DIR}/gen/shaders/rt_tri_rchit.h)
+moleculens_add_shader(moleculens_engine ${CMAKE_CURRENT_SOURCE_DIR}/rt_prim.rint
+                      ${CMAKE_BINARY_DIR}/gen/shaders/rt_prim_rint.h)

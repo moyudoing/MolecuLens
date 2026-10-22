@@ -1,4 +1,4 @@
-﻿# =============================================================================
+# =============================================================================
 # MolecuLens · tests —— 单元 / 集成测试
 # 规格来源：M0 工程脚手架 §4.5 / 主方案 §14.3
 # =============================================================================
@@ -21,7 +21,9 @@ add_executable(moleculens_tests
     engine/espsurface/esp_surface_tests.cpp
     engine/raytrace/ray_tracer_tests.cpp
     engine/rep/render_mode_tests.cpp
+    engine/rep/instance_range_tests.cpp
     engine/render/coord_replay_tests.cpp
+    engine/render/pane_filter_tests.cpp
     engine/render/scene_bounds_tests.cpp
     engine/serialize/scene_bridge_tests.cpp
     engine/scheduler/frame_scheduler_tests.cpp
@@ -34,6 +36,7 @@ add_executable(moleculens_tests
     vulkan/line_smoke.cpp
     vulkan/mesh_smoke.cpp
     vulkan/offscreen_smoke.cpp
+    vulkan/rt_smoke.cpp
     vulkan/single_atom_smoke.cpp
     view/layout_serialize_tests.cpp
 )

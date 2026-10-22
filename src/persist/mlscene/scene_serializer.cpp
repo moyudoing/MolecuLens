@@ -203,6 +203,7 @@ entity::Result<void> MlSceneSerializer::save(const SceneSnapshot& snap,
                             {"systemSurface", r.systemSurface},
                             {"surfIsovalue", r.surfIsovalue},
                             {"surfGridSpacing", r.surfGridSpacing},
+                            {"surfSmooth", r.surfSmooth},
                             {"espDensityCubePath", r.espDensityCubePath},
                             {"espPotentialCubePath", r.espPotentialCubePath},
                             {"espIsovalue", r.espIsovalue},
@@ -218,7 +219,14 @@ entity::Result<void> MlSceneSerializer::save(const SceneSnapshot& snap,
                             {"shininess", r.shininess},
                             {"metallic", r.metallic},
                             {"roughness", r.roughness},
-                            {"opacity", r.opacity}});
+                            {"opacity", r.opacity},
+                            // v2.19 可选新增键（旧读侧忽略未知键，新读侧缺键取默认值）
+                            {"surfaceDrawMode", r.surfaceDrawMode},
+                            {"rangeMode", r.rangeMode},
+                            {"rangeType", r.rangeType},
+                            {"rangeFraction", r.rangeFraction},
+                            {"rangeStride", r.rangeStride},
+                            {"rangeOffset", r.rangeOffset}});
         }
         meta["representations"] = reps;
     }
@@ -556,6 +564,7 @@ entity::Result<SceneSnapshot> MlSceneSerializer::load(const std::filesystem::pat
                 rep.systemSurface = r.value("systemSurface", false);
                 rep.surfIsovalue = r.value("surfIsovalue", 0.5f);
                 rep.surfGridSpacing = r.value("surfGridSpacing", 0.5f);
+                rep.surfSmooth = std::clamp(r.value("surfSmooth", 1), 0, 3);
                 rep.espDensityCubePath = r.value("espDensityCubePath", std::string());
                 rep.espPotentialCubePath = r.value("espPotentialCubePath", std::string());
                 rep.espIsovalue = r.value("espIsovalue", 0.001f);
@@ -572,6 +581,14 @@ entity::Result<SceneSnapshot> MlSceneSerializer::load(const std::filesystem::pat
                 rep.metallic = r.value("metallic", 0.0f);
                 rep.roughness = r.value("roughness", 0.40f);
                 rep.opacity = r.value("opacity", 1.0f);
+                // v2.19 可选键：旧 .mlscene 没有这些键 → 取默认值（全部实例、实心），
+                // 载入行为与旧版一致。用 value() 而非 operator[] 才能区分"缺键"。
+                rep.surfaceDrawMode = static_cast<uint8_t>(r.value("surfaceDrawMode", 0));
+                rep.rangeMode = static_cast<uint8_t>(r.value("rangeMode", 0));
+                rep.rangeType = r.value("rangeType", std::string());
+                rep.rangeFraction = r.value("rangeFraction", 1.0f);
+                rep.rangeStride = r.value("rangeStride", 1u);
+                rep.rangeOffset = r.value("rangeOffset", 0u);
                 snap.representations.push_back(std::move(rep));
             }
         }

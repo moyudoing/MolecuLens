@@ -37,6 +37,41 @@ const std::vector<const char*> kOptionalDeviceExtensions = {
     VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,
 };
 
+// 校验层/调试扩展可用性（缺失时退回"无校验层"而不是让 vkCreateInstance 失败：
+// 校验层只是开发者工具，不应该让应用/测试在没装 SDK 的机器上起不来）。
+bool instanceLayerAvailable(const char* name) {
+    uint32_t count = 0;
+    if (vkEnumerateInstanceLayerProperties(&count, nullptr) != VK_SUCCESS) {
+        return false;
+    }
+    std::vector<VkLayerProperties> layers(count);
+    vkEnumerateInstanceLayerProperties(&count, layers.data());
+    for (const auto& l : layers) {
+        if (std::strcmp(l.layerName, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool instanceExtensionAvailable(const char* name) {
+    uint32_t count = 0;
+    if (vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr) !=
+        VK_SUCCESS) {
+        return false;
+    }
+    std::vector<VkExtensionProperties> exts(count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &count, exts.data());
+    for (const auto& e : exts) {
+        if (std::strcmp(e.extensionName, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+VkDebugUtilsMessengerCreateInfoEXT makeDebugMessengerInfo();
+
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT severity,
     VkDebugUtilsMessageTypeFlagsEXT type,
@@ -50,6 +85,18 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
         spdlog::debug("[backend] Vulkan validation: {}", data->pMessage);
     }
     return VK_FALSE;
+}
+
+VkDebugUtilsMessengerCreateInfoEXT makeDebugMessengerInfo() {
+    VkDebugUtilsMessengerCreateInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = debugCallback;
+    return info;
 }
 
 // 设备评分（主方案 §6.3：离散 GPU > 集成；支持 1.2）
@@ -102,6 +149,10 @@ VulkanDevice::~VulkanDevice() {
     if (surface_ != VK_NULL_HANDLE) {
         vkDestroySurfaceKHR(instance_, surface_, nullptr);
     }
+    if (debugMessenger_ != VK_NULL_HANDLE) {
+        vkDestroyDebugUtilsMessengerEXT(instance_, debugMessenger_, nullptr);
+        debugMessenger_ = VK_NULL_HANDLE;
+    }
     if (instance_ != VK_NULL_HANDLE) {
         vkDestroyInstance(instance_, nullptr);
     }
@@ -141,18 +192,15 @@ bool VulkanDevice::init(WindowHandle window, const RenderConfig& cfg,
     createInfo.ppEnabledExtensionNames = extensions.data();
 
     VkDebugUtilsMessengerCreateInfoEXT dbgInfo{};
+    if (validationEnabled_ && !instanceLayerAvailable(kValidationLayers[0])) {
+        // 没装校验层（非开发机）：降级为无校验层，而不是让应用起不来
+        validationEnabled_ = false;
+    }
     if (validationEnabled_) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         createInfo.enabledLayerCount = static_cast<uint32_t>(kValidationLayers.size());
         createInfo.ppEnabledLayerNames = kValidationLayers.data();
-        dbgInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-        dbgInfo.messageSeverity =
-            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        dbgInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                              VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-                              VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
-        dbgInfo.pfnUserCallback = debugCallback;
+        dbgInfo = makeDebugMessengerInfo();
         createInfo.pNext = &dbgInfo;
     }
 
@@ -161,6 +209,15 @@ bool VulkanDevice::init(WindowHandle window, const RenderConfig& cfg,
         return false;
     }
     volkLoadInstance(instance_);
+    // 运行期校验消息回调（此前只把 messenger 挂在 pNext 上，实例创建完成后
+    // 就再也没有回调了 → 真正的资源错误看不到）。
+    if (validationEnabled_ && vkCreateDebugUtilsMessengerEXT != nullptr) {
+        VkDebugUtilsMessengerCreateInfoEXT runtimeInfo = makeDebugMessengerInfo();
+        if (vkCreateDebugUtilsMessengerEXT(instance_, &runtimeInfo, nullptr,
+                                           &debugMessenger_) != VK_SUCCESS) {
+            debugMessenger_ = VK_NULL_HANDLE;
+        }
+    }
 
     // 表面
     if (glfwCreateWindowSurface(instance_, window_, nullptr, &surface_) != VK_SUCCESS) {
@@ -218,15 +275,31 @@ bool VulkanDevice::initHeadless(const RenderConfig& cfg, std::string* outError) 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pApplicationInfo = &appInfo;
-    if (validationEnabled_) {
+    std::vector<const char*> headlessExts;
+    if (validationEnabled_ && !instanceLayerAvailable(kValidationLayers[0])) {
+        validationEnabled_ = false;   // 非开发机：降级而不是失败
+    }
+    if (validationEnabled_ && instanceExtensionAvailable(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+        headlessExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         createInfo.enabledLayerCount = static_cast<uint32_t>(kValidationLayers.size());
         createInfo.ppEnabledLayerNames = kValidationLayers.data();
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(headlessExts.size());
+        createInfo.ppEnabledExtensionNames = headlessExts.data();
     }
     if (vkCreateInstance(&createInfo, nullptr, &instance_) != VK_SUCCESS) {
         if (outError) *outError = "vkCreateInstance failed";
         return false;
     }
     volkLoadInstance(instance_);
+    // headless 也挂运行期校验回调：GPU 光追资源错误（无头 CLI/rt_smoke）
+    // 只有在这里才能被观察到。
+    if (validationEnabled_ && vkCreateDebugUtilsMessengerEXT != nullptr) {
+        VkDebugUtilsMessengerCreateInfoEXT runtimeInfo = makeDebugMessengerInfo();
+        if (vkCreateDebugUtilsMessengerEXT(instance_, &runtimeInfo, nullptr,
+                                           &debugMessenger_) != VK_SUCCESS) {
+            debugMessenger_ = VK_NULL_HANDLE;
+        }
+    }
     surface_ = VK_NULL_HANDLE;
 
     // 物理设备：只需 graphics 队列
@@ -393,7 +466,14 @@ bool VulkanDevice::createLogicalDevice() {
     features.largePoints = VK_TRUE;        // 点模式：gl_PointSize > 1（体系点模式）
 
     // 启用列表 = 必需项 + 设备支持的可选项（见 kOptionalDeviceExtensions 注释）
-    std::vector<const char*> enabledExts = kDeviceExtensions;
+    // 无窗口（headless）设备没有 surface：VK_KHR_swapchain 依赖 VK_KHR_surface，
+    // 带 swapchain 会触发 VUID-vkCreateDevice-ppEnabledExtensionNames-01387。
+    std::vector<const char*> enabledExts;
+    if (surface_ != VK_NULL_HANDLE) {
+        enabledExts = kDeviceExtensions;
+    }
+    // —— 硬件光追（可选；扩展与 feature 都支持才启用，否则设备照旧）——
+    bool hasAs = false, hasRtPipeline = false, hasDeferred = false, hasBda = false;
     {
         uint32_t extCount = 0;
         vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extCount, nullptr);
@@ -408,6 +488,58 @@ bool VulkanDevice::createLogicalDevice() {
                 }
             }
         }
+        for (const auto& a : avail) {
+            if (std::strcmp(a.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0) {
+                hasAs = true;
+            } else if (std::strcmp(a.extensionName,
+                                    VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) == 0) {
+                hasRtPipeline = true;
+            } else if (std::strcmp(a.extensionName,
+                                    VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0) {
+                hasDeferred = true;
+            } else if (std::strcmp(a.extensionName,
+                                    VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME) == 0) {
+                hasBda = true;
+            }
+        }
+        gpuRayTracingAvailable_ = hasAs && hasRtPipeline;
+    }
+
+    // 光追 feature 链：光追管线要求 bufferDeviceAddress + accelerationStructure。
+    // 先查询（vkGetPhysicalDeviceFeatures2），确认支持后再放进 pNext 启用 —— 不支持的
+    // 设备绝不能带 pNext 创建（vkCreateDevice 会失败 → 整个应用起不来）。
+    VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures{};
+    bdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
+    asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtFeatures{};
+    rtFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+    bdaFeatures.pNext = &asFeatures;
+    asFeatures.pNext = &rtFeatures;
+    rtFeatures.pNext = nullptr;
+
+    bool rtRequested = false;
+    const std::vector<const char*> baseExts = enabledExts;   // 回退用（不含 RT）
+    if (hasAs && hasRtPipeline && hasBda) {
+        VkPhysicalDeviceFeatures2 query{};
+        query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        query.pNext = &bdaFeatures;
+        vkGetPhysicalDeviceFeatures2(physicalDevice_, &query);
+        if (bdaFeatures.bufferDeviceAddress && asFeatures.accelerationStructure &&
+            rtFeatures.rayTracingPipeline) {
+            enabledExts.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+            enabledExts.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+            if (hasDeferred) {
+                enabledExts.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+            }
+            if (hasBda) {
+                enabledExts.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+            }
+            bdaFeatures.bufferDeviceAddress = VK_TRUE;
+            asFeatures.accelerationStructure = VK_TRUE;
+            rtFeatures.rayTracingPipeline = VK_TRUE;
+            rtRequested = true;
+        }
     }
 
     VkDeviceCreateInfo createInfo{};
@@ -417,8 +549,23 @@ bool VulkanDevice::createLogicalDevice() {
     createInfo.pEnabledFeatures = &features;
     createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExts.size());
     createInfo.ppEnabledExtensionNames = enabledExts.data();
+    if (rtRequested) {
+        createInfo.pNext = &bdaFeatures;
+    }
 
-    if (vkCreateDevice(physicalDevice_, &createInfo, nullptr, &device_) != VK_SUCCESS) {
+    VkResult devResult = vkCreateDevice(physicalDevice_, &createInfo, nullptr, &device_);
+    if (devResult != VK_SUCCESS && rtRequested) {
+        // 驱动报告支持却创建失败（老驱动/模拟层）：退回无 RT 设备，保证可用性
+        spdlog::warn("[rt] vkCreateDevice with ray tracing failed ({}), retrying without",
+                     static_cast<int>(devResult));
+        rtRequested = false;
+        enabledExts = baseExts;
+        createInfo.pNext = nullptr;
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExts.size());
+        createInfo.ppEnabledExtensionNames = enabledExts.data();
+        devResult = vkCreateDevice(physicalDevice_, &createInfo, nullptr, &device_);
+    }
+    if (devResult != VK_SUCCESS) {
         return false;
     }
     volkLoadDevice(device_);
@@ -429,6 +576,43 @@ bool VulkanDevice::createLogicalDevice() {
             memoryBudgetEnabled_ = true;
             break;
         }
+    }
+    // 光追属性（SBT 句柄大小/对齐、递归深度、AS 上限）：创建管线/加速结构要用
+    rtEnabled_ = rtRequested;
+    if (rtEnabled_) {
+        VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtProps{};
+        rtProps.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{};
+        asProps.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+        asProps.pNext = &rtProps;
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props2.pNext = &asProps;
+        vkGetPhysicalDeviceProperties2(physicalDevice_, &props2);
+        rtProps_.shaderGroupHandleSize = rtProps.shaderGroupHandleSize;
+        rtProps_.shaderGroupBaseAlignment = rtProps.shaderGroupBaseAlignment;
+        rtProps_.shaderGroupHandleAlignment = rtProps.shaderGroupHandleAlignment;
+        rtProps_.maxRayRecursionDepth = rtProps.maxRayRecursionDepth;
+        // VkPhysicalDeviceAccelerationStructurePropertiesKHR 只暴露计数上限
+        // （maxGeometryCount/maxInstanceCount/maxPrimitiveCount）；没有
+        // "maxGeometrySize" 字段（部分旧代码/旧头文件里有这个误记，编译不过）。
+        // 结构体字段按 32 位计数保存，显式窄化避免 C4244。
+        rtProps_.maxGeometryCount = static_cast<uint32_t>(asProps.maxGeometryCount);
+        rtProps_.maxInstanceCount = static_cast<uint32_t>(asProps.maxInstanceCount);
+        rtProps_.maxPrimitiveCount = static_cast<uint32_t>(asProps.maxPrimitiveCount);
+        rtProps_.minScratchOffsetAlignment =
+            static_cast<uint32_t>(asProps.minAccelerationStructureScratchOffsetAlignment);
+        rtProps_.accelerationStructureFormat = VK_FORMAT_UNDEFINED;
+        spdlog::info(
+            "[rt] device RT enabled: handleSize={} handleAlign={} baseAlign={} "
+            "maxRecursion={} maxPrimitives={}",
+            rtProps_.shaderGroupHandleSize, rtProps_.shaderGroupHandleAlignment,
+            rtProps_.shaderGroupBaseAlignment, rtProps_.maxRayRecursionDepth,
+            rtProps_.maxPrimitiveCount);
+    } else if (gpuRayTracingAvailable_) {
+        spdlog::warn("[rt] device advertises ray tracing but features are unavailable");
     }
     vkGetDeviceQueue(device_, graphicsFamily_, 0, &graphicsQueue_);
     vkGetDeviceQueue(device_, presentFamily_, 0, &presentQueue_);

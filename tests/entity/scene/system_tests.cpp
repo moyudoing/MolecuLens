@@ -85,6 +85,26 @@ TEST_CASE("Periodic box: molecule split across the boundary is unwrapped", "[ent
     REQUIRE(glm::length(p[1] - p[0]) == Catch::Approx(1.0f).margin(1e-3f));
 }
 
+TEST_CASE("Periodic box: each molecule is unwrapped around its own anchor",
+          "[entity][scene][pbc]") {
+    // 回归：全体系共用一个锚原子时，靠近半个盒长处的分子会被拆成一根长棍
+    // （锚在 0.5，B 分子 19.0/20.2 各自选到相反的镜像）。必须按分子连通
+    // 分量分别锚定，B 分子也要保持 1.2 Å 键长。
+    std::array<float, 9> box{};
+    box[0] = box[4] = box[8] = 40.0f;
+    SceneStructure scene;
+    const uint32_t sysId = scene.addSystem("P2");
+    addDiatomic(scene, glm::vec3(0.5f, 0, 0), glm::vec3(1.5f, 0, 0), box, sysId);
+    const uint32_t instB = addDiatomic(scene, glm::vec3(19.0f, 0, 0),
+                                      glm::vec3(20.2f, 0, 0), box, sysId);
+    REQUIRE(scene.applyTrajectoryFrame(instB, 0));
+
+    const auto& p = scene.coordsSoA().positions;
+    REQUIRE(p.size() == 4);
+    REQUIRE(glm::length(p[1] - p[0]) == Catch::Approx(1.0f).margin(1e-3f));
+    REQUIRE(glm::length(p[3] - p[2]) == Catch::Approx(1.2f).margin(1e-3f));
+}
+
 TEST_CASE("Periodic box: no box means coordinates are left untouched", "[entity][scene][pbc]") {
     // 回归护栏：非周期数据（box 全 0）绝不能被位移 —— 常见情形，静默改动最危险
     std::array<float, 9> noBox{};

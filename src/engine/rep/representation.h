@@ -63,6 +63,33 @@ struct Representation {
     // QuickSurf 参数（参考 other/QuickSurf：radscale 复用 radiusScale）
     float            surfIsovalue = 0.5f;   // 等值面阈值（密度）
     float            surfGridSpacing = 0.5f;  // 网格间距（Å）
+    // 表面平滑（v2.20）：对 vdW 标量场做 N 次 3×3×3 盒式平滑后再抽等值面。
+    // 纯 vdW 并集在溶剂盒上会生成"每个水分子一个疙瘩"的粗糙壳（用户截图反馈
+    // "云雾状方盒"）；平滑 1–3 次能把水分子尺度的高频起伏抹掉，得到接近
+    // QuickSurf/SES 的连续表面。0 = 关闭（逐位兼容旧输出）。
+    int              surfSmooth = 1;
+
+    // —— 表面绘制模式（v2.19）——
+    // 0 实心 / 1 线框 / 2 半透明。此前体系表面在渲染器里被**强制**以实心（mode 0）
+    // 发射（为了绕开“继承到上一条表示的 RenderMode → 表面进错管线不可见”），
+    // 结果用户完全没有可用的“表面绘图模式”。现在把选择显式记录在表示上，
+    // 由渲染器发射对应的 RenderMode，两条表面路径（逐分子 / 整体系）都生效。
+    uint8_t          surfaceDrawMode = 0;
+
+    // —— 实例级类型范围（v2.19）——
+    // 与 Selection（原子级）正交：这里按“分子实例”过滤，用来做“只渲染一半溶剂”
+    // 这类需求。rangeType 为空 = 不按类型过滤（全部实例）；非空时只渲染实例名
+    // 的类型部分（"SOL #12" → "SOL"）与之相同的实例。
+    // Fraction：匹配实例按出现顺序取前 ceil(fraction*N) 个（确定性，不随机）；
+    // Stride  ：匹配实例中第 p 个，若 p % stride == offset % stride 则渲染。
+    // 三个字段都存在 Representation 里（而不是全局设置），因为“只显示部分溶剂”
+    // 通常只该影响某一条表面/球棍表示，其余表示仍要完整显示。
+    enum class InstanceRangeMode : uint8_t { All = 0, Fraction = 1, Stride = 2 };
+    uint8_t          rangeMode = 0;          // InstanceRangeMode
+    std::string      rangeType;              // 分子类型（如 "SOL"）；空 = 全部类型
+    float            rangeFraction = 1.0f;   // 0..1
+    uint32_t         rangeStride = 1;        // 每 N 个取一个
+    uint32_t         rangeOffset = 0;        // 起始偏移
 
     // —— ESP 映射表面参数（type == EspSurface 时生效）——
     // 数据来源：Gaussian / Multiwfn 导出的 cube 文件。density 定等值面几何，

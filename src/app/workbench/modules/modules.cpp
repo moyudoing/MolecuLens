@@ -8,9 +8,11 @@
 // =============================================================================
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,6 +26,8 @@
 #include "app/data/data_manager.h"
 #include "app/i18n/language.h"
 #include "app/view/viewport/mol_scene.h"
+#include "app/workbench/analysis/molecule_stats.h"
+#include "app/workbench/analysis/xlsx_writer.h"
 #include "app/workbench/style/aurora.h"
 #include "app/workbench/workbench.h"
 #include "engine/render/render_parameter.h"
@@ -501,6 +505,39 @@ void applyUniformColor(RepresentationController* ctl, int32_t id,
 // 定义在下面「表面」段；VisualizeModule 里以折叠区调用
 void renderSurfaceSection(Workbench& wb);
 
+// 渲染质量（分辨率 / 动态分辨率 / 网格面数）。放在「渲染视图」顶部，
+// 避免被长表单压到折叠区以下；导出分辨率不受这里影响。
+void renderRenderQuality(Workbench& wb) {
+    if (wb.viewport() == nullptr) {
+        return;
+    }
+    aurora::sectionLabel(tr("渲染质量"), tr("影响流畅度与清晰度"));
+    float rs = wb.viewport()->renderScale();
+    if (aurora::sliderRow(tr("渲染分辨率"), &rs, 0.50f, 2.00f, "%.2fx",
+                          tr("离屏渲染分辨率相对视口的比例；降低可明显提升"
+                             "大体系播放帧率"))) {
+        wb.viewport()->setRenderScale(rs);
+    }
+    bool dyn = wb.viewport()->dynamicResolution();
+    if (aurora::toggleRow(tr("动态分辨率"), &dyn,
+                          tr("拖动/播放时自动降到 0.7×，停手 350 ms 后恢复；"
+                             "只影响视口，不影响导出"))) {
+        wb.viewport()->setDynamicResolution(dyn);
+    }
+    static const char* kMeshItems = "低 (80 面)\0中 (320 面)\0高 (1280 面)\0"
+                                    "极高 (5120 面)\0";
+    int meshIdx = wb.viewport()->meshDetail() - 1;
+    if (aurora::comboRow(tr("网格面数"), &meshIdx, kMeshItems,
+                         tr("球体细分档；面数越高越圆润，也越吃 GPU"))) {
+        static const int kDetail[4] = {1, 2, 3, 4};
+        static const int kSegments[4] = {8, 12, 24, 48};
+        const int i = std::clamp(meshIdx, 0, 3);
+        wb.viewport()->setMeshQuality(kDetail[i], kSegments[i]);
+    }
+    ImGui::TextDisabled("%s", tr("光追：仅导出图片时使用（CPU 回退）"));
+    aurora::spacer(4.0f);
+}
+
 // v2.10：分子列表按「体系」分组（体系 = 一次导入；导入时各自居中并横向错开）。
 // 体系内再按结构聚合：同构实例（如 2032 个 SOL）只占一行，避免几千行同名条目；
 // 分组也避免两个文件里同名的 SOL 被合并成同一行。
@@ -661,8 +698,14 @@ static void renderMoleculeSection(Workbench& wb) {
 // v2.9：表示表格（图形表示对话框的对照布局）。
 // 一屏列出「名称 / 样式 / 配色 / 选择」，点行切换当前编辑对象，行尾 × 直接删除；
 // 比「下拉选一个再编辑」更适合 3 条以上表示的场合。
-// 「作用分子」编辑器（v2.9）：顶部三个快捷按钮 + 按结构勾选。
-// 表格「选择」列弹层与显示面板的折叠区共用。
+// =============================================================================
+// 「作用分子」编辑器（v2.19）
+// 表格「选择」列弹层与显示面板的折叠区共用。这里有两块**正交**的选择：
+//   · 类型勾选 → 改写 resname 表达式（原子级 Selection，引擎按原子过滤）；
+//   · 类型范围 → 按分子**实例**过滤（比例 / 步长，引擎在 prepare 里消费）。
+// 两者取交集；"只渲染一半溶剂"这类需求用表达式做不到（resname 是全有/全无），
+// 所以范围必须落在实例层，且随 .mlscene 持久化。
+// =============================================================================
 static void renderMolScopeEditor(Workbench& wb, int32_t repId, const std::string& curSel) {
     DataManager* dm = wb.data();
     RepresentationController* ctl = wb.reps();
@@ -670,11 +713,19 @@ static void renderMolScopeEditor(Workbench& wb, int32_t repId, const std::string
         ImGui::TextDisabled("%s", tr("数据未就绪"));
         return;
     }
+    const auto& reps = ctl->representations();
+    if (repId < 0 || static_cast<size_t>(repId) >= reps.size()) {
+        ImGui::TextDisabled("%s", tr("表示不存在"));
+        return;
+    }
+    const Representation rep = reps[static_cast<size_t>(repId)];   // 本帧快照
     const std::vector<RepMolGroup> groups = collectRepMolGroups(dm);
     if (groups.empty()) {
         ImGui::TextDisabled("%s", tr("场景为空"));
         return;
     }
+    ImGui::PushID(static_cast<int>(repId) + 1000);
+
     std::vector<std::string> all;
     for (const RepMolGroup& g : groups) {
         all.push_back(g.name);
@@ -684,6 +735,16 @@ static void renderMolScopeEditor(Workbench& wb, int32_t repId, const std::string
     };
     auto isSolventName = [](const std::string& n) {
         return n == "SOL" || n == "WAT" || n == "HOH" || n == "TIP3" || n == "TIP3P" || n == "H2O";
+    };
+    // 只做 ASCII 小写：类型名是 SOL / PROA / HOH 这类符号，统一小写即可让搜索
+    // "sol"/"SOL" 都能命中（不引入 <cctype> 与 locale 依赖）。
+    auto lowerAscii = [](std::string s) {
+        for (char& c : s) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return s;
     };
 
     const float bw = std::max((ImGui::GetContentRegionAvail().x - 12.0f) / 3.0f, 52.0f);
@@ -706,9 +767,25 @@ static void renderMolScopeEditor(Workbench& wb, int32_t repId, const std::string
     }
     aurora::spacer(2.0f);
     ImGui::TextDisabled("%s", curSel.empty() ? tr("当前：全部分子") : curSel.c_str());
+
+    // 搜索：类型多起来（蛋白 + 溶剂 + 离子）后逐行找 SOL 太费眼。
+    // static：两个调用点编辑的是同一个表示编辑器，共用一份搜索词是预期行为。
+    static char scopeFilter[64] = {};
     aurora::spacer(2.0f);
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##mol_scope_filter", tr("搜索类型（如 SOL）"), scopeFilter,
+                             sizeof(scopeFilter));
+    const std::string filterLower = lowerAscii(scopeFilter);
+
+    aurora::spacer(2.0f);
+    size_t visibleTypes = 0;
     for (size_t gi = 0; gi < groups.size(); ++gi) {
         const RepMolGroup& g = groups[gi];
+        if (!filterLower.empty() &&
+            lowerAscii(g.name).find(filterLower) == std::string::npos) {
+            continue;
+        }
+        ++visibleTypes;
         bool on = selectionIncludesGroup(curSel, g.name);
         ImGui::PushID(static_cast<int>(gi));
         const std::string lbl = g.name + "##mg";
@@ -724,11 +801,144 @@ static void renderMolScopeEditor(Workbench& wb, int32_t repId, const std::string
             applyIncluded(inc);
         }
         ImGui::SameLine();
-        char info[96];
-        std::snprintf(info, sizeof(info), "×%zu (%zu)", g.instances, g.atoms);
+        char info[128];
+        const size_t perInst = g.instances > 0 ? g.atoms / g.instances : 0;
+        std::snprintf(info, sizeof(info), "×%zu（%zu 原子/实例 · 共 %zu 原子）",
+                      g.instances, perInst, g.atoms);
         ImGui::TextDisabled("%s", info);
         ImGui::PopID();
     }
+    if (visibleTypes == 0) {
+        ImGui::TextDisabled("%s", tr("没有匹配的类型"));
+    }
+
+    // —— 类型范围（实例级，v2.19）——
+    aurora::spacer(6.0f);
+    aurora::hline();
+    aurora::sectionLabel(tr("类型范围"), tr("按类型筛选实例；与上面的原子选择取交集"));
+
+    // 类型下拉：全部类型 + 场景中实际出现的类型；旧文件/手工写的类型也要能回显
+    std::vector<std::string> typeChoices;
+    typeChoices.emplace_back();   // 0 = 全部类型
+    for (const RepMolGroup& g : groups) {
+        typeChoices.push_back(g.name);
+    }
+    if (!rep.rangeType.empty() &&
+        std::find(typeChoices.begin() + 1, typeChoices.end(), rep.rangeType) ==
+            typeChoices.end()) {
+        typeChoices.push_back(rep.rangeType);
+    }
+    int typeIdx = 0;
+    for (size_t i = 1; i < typeChoices.size(); ++i) {
+        if (typeChoices[i] == rep.rangeType) {
+            typeIdx = static_cast<int>(i);
+        }
+    }
+    std::string typeItems = tr("全部类型");
+    typeItems.push_back('\0');
+    for (size_t i = 1; i < typeChoices.size(); ++i) {
+        typeItems += typeChoices[i];
+        typeItems.push_back('\0');
+    }
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##range_type", &typeIdx, typeItems.c_str())) {
+        ctl->setInstanceRangeType(repId, typeIdx == 0 ? std::string()
+                                                      : typeChoices[static_cast<size_t>(typeIdx)]);
+    }
+
+    int mode = std::clamp<int>(rep.rangeMode, 0, 2);
+    const std::string modeItems = trItems({"全部实例", "按比例", "每隔 N 个"});
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::Combo("##range_mode", &mode, modeItems.c_str())) {
+        ctl->setInstanceRangeMode(repId, static_cast<uint8_t>(mode));
+    }
+
+    if (mode == 1) {
+        float fracPct = std::clamp(rep.rangeFraction, 0.0f, 1.0f) * 100.0f;
+        if (aurora::sliderNum(tr("渲染比例"), &fracPct, 0.0f, 100.0f, "%.0f%%", 1.0f,
+                              tr("按该类型内的实例顺序取前 N%（确定性，不随机）"))) {
+            ctl->setInstanceRangeFraction(repId, fracPct / 100.0f);
+        }
+        static const int kQuickPct[] = {25, 50, 75, 100};
+        for (int i = 0; i < 4; ++i) {
+            if (i > 0) {
+                ImGui::SameLine();
+            }
+            char lbl[16];
+            std::snprintf(lbl, sizeof(lbl), "%d%%", kQuickPct[i]);
+            const bool active = std::fabs(fracPct - static_cast<float>(kQuickPct[i])) < 0.5f;
+            if (aurora::chip(lbl, active)) {
+                ctl->setInstanceRangeFraction(repId,
+                                              static_cast<float>(kQuickPct[i]) / 100.0f);
+            }
+        }
+    } else if (mode == 2) {
+        int stride = static_cast<int>(std::max(1u, rep.rangeStride));
+        int offset = static_cast<int>(rep.rangeOffset);
+        const bool strideChanged =
+            aurora::stepper(tr("每隔 N 个"), &stride, 1, 1, 4096,
+                            tr("按该类型内的实例顺序，每 N 个取一个"));
+        const bool offsetChanged =
+            aurora::stepper(tr("取第 M 个"), &offset, 1, 0, std::max(0, stride - 1),
+                            tr("偏移从 0 开始；超出 N-1 会自动折回"));
+        if (strideChanged || offsetChanged) {
+            ctl->setInstanceRangeStride(repId,
+                                        static_cast<uint32_t>(std::max(1, stride)),
+                                        static_cast<uint32_t>(std::max(0, offset)));
+        }
+    }
+
+    // 预览：按当前范围统计"实际会参与渲染的实例/原子"。
+    // 走 DataManager 的分子顺序（与场景实例顺序一致），不触发任何渲染/脏位。
+    const std::string wantType = rep.rangeType;
+    auto typeMatches = [&](size_t i) {
+        return wantType.empty() || groupBaseName(dm->moleculeName(i)) == wantType;
+    };
+    size_t matchInst = 0;
+    for (size_t i = 0; i < dm->moleculeCount(); ++i) {
+        if (typeMatches(i)) {
+            ++matchInst;
+        }
+    }
+    size_t shownInst = 0;
+    size_t shownAtoms = 0;
+    size_t matchedPos = 0;
+    const size_t keepCount =
+        mode == 1
+            ? static_cast<size_t>(std::ceil(std::clamp(rep.rangeFraction, 0.0f, 1.0f) *
+                                            static_cast<double>(matchInst)))
+            : matchInst;
+    const uint32_t strideNow = std::max(1u, rep.rangeStride);
+    const uint32_t offsetNow = rep.rangeOffset % strideNow;
+    for (size_t i = 0; i < dm->moleculeCount(); ++i) {
+        if (!typeMatches(i)) {
+            continue;
+        }
+        bool keep = true;
+        if (mode == 1) {
+            keep = matchedPos < keepCount;
+        } else if (mode == 2) {
+            keep = (static_cast<uint32_t>(matchedPos) % strideNow) == offsetNow;
+        }
+        if (keep) {
+            ++shownInst;
+            shownAtoms += dm->atomCount(i);
+        }
+        ++matchedPos;
+    }
+    const char* typeLabel = wantType.empty() ? tr("全部类型") : rep.rangeType.c_str();
+    if (matchInst == 0) {
+        ImGui::TextColored(aurora::palette().warn, "%s", tr("该类型在场景里没有实例"));
+    } else if (shownInst >= matchInst) {
+        ImGui::Text(tr("将渲染全部 %zu 个 %s 实例（共 %zu 原子）"), shownInst, typeLabel,
+                    shownAtoms);
+    } else {
+        ImGui::Text(tr("将渲染 %zu / %zu 个 %s 实例（共 %zu 原子）"), shownInst, matchInst,
+                    typeLabel, shownAtoms);
+    }
+    aurora::helpTip(
+        tr("表达式选原子、类型范围选实例，两者取交集：被范围过滤掉的实例即使表达式命中也不渲染。"));
+    ImGui::PopID();
 }
 // v2.13：表示切换改为**列表**（点击选中、下方表单编辑），不再用表格里的
 // 样式/配色/选择单元格弹层。用户明确要求"不使用表格选择渲染类型、作用分子和
@@ -746,15 +956,11 @@ static void renderRepList(Workbench& wb) {
         const Representation rep = reps[i];   // 按值：本帧可能增删
         ImGui::PushID(static_cast<int>(i));
         const bool sel = (static_cast<int32_t>(i) == active);
-        // 选中行的底色由我们自己画：把主题主色向正文墨色压暗，
-        // 浅粉/浅蓝在白面板上也能形成清楚的中等饱和底色。
+        // v2.14：选中行统一高饱和蓝底 + 白字，和左侧导航一致；
+        // 旧实现把主色压暗后当底色，浅色主题下仍像一块浅灰。
         const auto& pal = aurora::palette();
-        const ImVec4 selBg(pal.accent.x * 0.72f + pal.text.x * 0.28f,
-                           pal.accent.y * 0.72f + pal.text.y * 0.28f,
-                           pal.accent.z * 0.72f + pal.text.z * 0.28f, 1.0f);
-        const ImVec4 selEdge(pal.accent.x * 0.45f + pal.text.x * 0.55f,
-                             pal.accent.y * 0.45f + pal.text.y * 0.55f,
-                             pal.accent.z * 0.45f + pal.text.z * 0.55f, 1.0f);
+        const ImVec4 selBg = pal.selection;
+        const ImVec4 selEdge = pal.onSelection;
         if (sel) {
             const ImVec2 p0 = ImGui::GetCursorScreenPos();
             const float w = ImGui::GetContentRegionAvail().x;
@@ -771,8 +977,9 @@ static void renderRepList(Workbench& wb) {
                       rep.name.empty() ? tr("未命名") : rep.name.c_str(),
                       tr(typeLabel(rep.type)), engine::colorSchemeZh(rep.colorScheme),
                       rep.visible ? "" : tr("   · 隐藏"));
-        if (!rep.visible) {
-            ImGui::PushStyleColor(ImGuiCol_Text, aurora::palette().textMuted);
+        if (sel || !rep.visible) {
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  aurora::col(sel ? pal.onSelection : pal.textMuted));
         }
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered,
@@ -784,14 +991,14 @@ static void renderRepList(Workbench& wb) {
         }
         ImGui::PopStyleColor(2);
         if (sel) {
-            // 4px 深色竖条 + 1px 描边，保证即使底色被主题调淡也能看出当前表示。
+            // 4px 白色竖条 + 1px 白描边，在蓝色实底上保持清晰。
             const ImVec2 a = ImGui::GetItemRectMin();
             const ImVec2 b = ImGui::GetItemRectMax();
             auto* dl = ImGui::GetWindowDrawList();
             dl->AddRectFilled(a, ImVec2(a.x + 4.0f, b.y), aurora::col(selEdge), 2.0f);
             dl->AddRect(a, b, aurora::col(selEdge), 2.0f, 0, 1.0f);
         }
-        if (!rep.visible) {
+        if (sel || !rep.visible) {
             ImGui::PopStyleColor();
         }
         ImGui::PopID();
@@ -1136,7 +1343,7 @@ static void styleCombo(Workbench& wb, int32_t id, const Representation& r) {
 class VisualizeModule : public IInspectorModule {
 public:
     const char* id() const override { return "visualize"; }
-    const char* label() const override { return "渲染视图"; }
+    const char* label() const override { return "渲染"; }
     const char* subtitle() const override { return "选择或新建表示，在下方编辑"; }
 
     void render(Workbench& wb) override {
@@ -1165,6 +1372,8 @@ public:
         // （复现：有 1 个表示时点「新建」，日志 4×event type=3 后 CRASH）。
         const Representation r = wb.representations()[static_cast<size_t>(id)];
         bool removed = false;
+
+        renderRenderQuality(wb);
 
 
         auto drawReps = [&]() {
@@ -1400,72 +1609,53 @@ public:
                              ImGuiInputTextFlags_EnterReturnsTrue);
         if (entered || ImGui::IsItemDeactivatedAfterEdit()) {
             entity::Selection probe;
+            const bool empty = selBuf_[0] == '\0';
             const bool ok =
-                selBuf_[0] == '\0' ||
-                probe.parse(selBuf_, entity::ParseTable::defaultTable());
+                empty || probe.parse(selBuf_, entity::ParseTable::defaultTable());
             if (ok) {
                 ctl->setSelection(id, selBuf_);
                 selSource_ = selBuf_;
+                selValid_ = true;
+                // 只读预校验：立即统计命中原子数（evaluate 不改场景、不置脏位），
+                // 用户才能立刻知道表达式是否真的圈到了原子 —— 否则只有"没变化"的
+                // 错觉（比如类型名拼错时选择框里是全选态，但画面毫无反应）。
+                selStatus_.clear();
+                if (!empty && wb.scene() != nullptr) {
+                    entity::FrameData frame;
+                    frame.positions = &wb.scene()->coordsSoA().positions;
+                    probe.evaluate(*wb.scene(), frame, 0);
+                    size_t hits = 0;
+                    for (bool in : probe.mask()) {
+                        if (in) {
+                            ++hits;
+                        }
+                    }
+                    selStatus_ = std::string(tr("已应用 · 命中 ")) +
+                                 std::to_string(hits) + tr(" 原子");
+                }
             } else {
                 selValid_ = false;
             }
         }
         if (!selValid_) {
             ImGui::PushStyleColor(ImGuiCol_Text, aurora::palette().danger);
-            ImGui::TextWrapped("%s", tr("表达式无法解析，未应用"));
+            ImGui::TextWrapped("%s", tr("表达式无法解析，未应用（保留上一个有效表达式）"));
             ImGui::PopStyleColor();
             selValid_ = true;
+        } else if (!selStatus_.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, aurora::palette().ok);
+            ImGui::TextWrapped("%s", selStatus_.c_str());
+            ImGui::PopStyleColor();
         }
         ImGui::TextDisabled("%s", tr("例：not element H · resid 1-20 · within 4 of element Fe"));
 
-        // 作用分子（v2.9，勾选式）：直接勾分子，自动改写上面的选择表达式
+        // 作用分子（v2.19）：完整编辑器（快捷按钮 / 搜索 / 类型计数 / 类型范围）
+        // 与表示表格的「选择」弹层共用同一份实现，避免两处行为漂移。
         if (wb.data() != nullptr &&
             ImGui::TreeNodeEx(tr("作用分子（多选）"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
-            DataManager* dm = wb.data();
-            std::vector<std::string> names;
-            for (size_t i = 0; i < dm->moleculeCount(); ++i) {
-                const std::string nm = groupBaseName(dm->moleculeName(i));
-                if (!nm.empty() && std::find(names.begin(), names.end(), nm) == names.end()) {
-                    names.push_back(nm);
-                }
-            }
-            std::vector<bool> on(names.size(), false);
-            for (size_t i = 0; i < names.size(); ++i) {
-                on[i] = r.selection.find("resname " + names[i]) != std::string::npos;
-            }
-            bool changed = false;
-            for (size_t i = 0; i < names.size(); ++i) {
-                bool v = on[i];
-                ImGui::PushID(static_cast<int>(i) + 7000);
-                if (ImGui::Checkbox(names[i].c_str(), &v)) {
-                    changed = true;
-                    on[i] = v;
-                }
-                ImGui::PopID();
-                if ((i % 2) == 0 && i + 1 < names.size()) {
-                    ImGui::SameLine(0.0f, 18.0f);
-                }
-            }
-            if (changed) {
-                std::string expr;
-                for (size_t i = 0; i < names.size(); ++i) {
-                    if (!on[i]) {
-                        continue;
-                    }
-                    if (!expr.empty()) {
-                        expr += " or ";
-                    }
-                    expr += "resname " + names[i];
-                }
-                ctl->setSelection(id, expr);
-                selSource_ = expr;
-                std::snprintf(selBuf_, sizeof(selBuf_), "%s", expr.c_str());
-            }
-            if (names.empty()) {
-                ImGui::TextDisabled("%s", tr("场景里还没有分子"));
-            } else {
-                ImGui::TextDisabled("%s", tr("勾选的分子会拼成 resname A or resname B 表达式"));
-            }
+            ImGui::Indent();
+            renderMolScopeEditor(wb, id, r.selection);
+            ImGui::Unindent();
             ImGui::TreePop();
         }
 
@@ -1483,6 +1673,7 @@ private:
     int32_t selRep_ = -2;
     std::string selSource_;
     bool selValid_ = true;
+    std::string selStatus_;   // 合法表达式的命中统计（"已应用 · 命中 N 原子"）
 };
 
 // =============================================================================
@@ -1540,15 +1731,23 @@ void renderSurfaceSection(Workbench& wb) {
             return;
         }
         const auto& reps = wb.representations();
-        int32_t id = -1;
+        const auto isSurfaceRep = [](RepresentationType t) {
+            return t == RepresentationType::Surface || t == RepresentationType::QuickSurf;
+        };
+        // 编辑**当前选中**的表面表示，而不是永远第一条：同时开着「分子表面」与
+        // 「快速表面」时，面板改的必须是用户正在看的那条，否则改动像没生效。
+        std::vector<int32_t> surfaceIds;
         for (int32_t i = 0; i < static_cast<int32_t>(reps.size()); ++i) {
-            const auto t = reps[static_cast<size_t>(i)].type;
-            if (t == RepresentationType::Surface || t == RepresentationType::QuickSurf) {
-                id = i;
-                break;
+            if (isSurfaceRep(reps[static_cast<size_t>(i)].type)) {
+                surfaceIds.push_back(i);
             }
         }
-        if (id < 0) {
+        int32_t id = -1;
+        const int32_t act = activeId(wb);
+        if (act >= 0 && isSurfaceRep(reps[static_cast<size_t>(act)].type)) {
+            id = act;
+        }
+        if (surfaceIds.empty()) {
             ImGui::TextWrapped("%s", tr("尚未创建表面表示。"));
             aurora::spacer(6.0f);
             if (aurora::chip(tr("创建快速表面"), true)) {
@@ -1572,11 +1771,46 @@ void renderSurfaceSection(Workbench& wb) {
                                 tr("表面样式会覆盖分子外观；通常配合半透明球棍一起使用。"));
             return;
         }
+        // 当前表示不是表面（或还没选）→ 列出现有表面供点选；点选即切换 activeRepIndex。
+        if (id < 0) {
+            id = surfaceIds.front();
+        }
+        if (surfaceIds.size() > 1) {
+            const std::string preview = repLabel(reps, static_cast<size_t>(id));
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("##surface_pick", preview.c_str())) {
+                for (int32_t sid : surfaceIds) {
+                    ImGui::PushID(sid);
+                    const std::string label = repLabel(reps, static_cast<size_t>(sid));
+                    if (ImGui::Selectable(label.c_str(), sid == id)) {
+                        wb.setActiveRepIndex(sid);
+                        id = sid;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+        }
         const Representation& r = reps[static_cast<size_t>(id)];
         ImGui::TextColored(aurora::palette().textMuted, "%s",
                            tr("正在编辑：") );
         ImGui::SameLine();
         ImGui::TextUnformatted(repLabel(reps, static_cast<size_t>(id)).c_str());
+
+        aurora::sectionLabel(tr("绘制模式"));
+        int drawMode = std::clamp<int>(r.surfaceDrawMode, 0, 2);
+        std::string drawModeItems;
+        drawModeItems += tr("实心");
+        drawModeItems.push_back('\0');
+        drawModeItems += tr("线框");
+        drawModeItems.push_back('\0');
+        drawModeItems += tr("半透明");
+        drawModeItems.push_back('\0');
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo("##surface_draw_mode", &drawMode, drawModeItems.c_str())) {
+            ctl->setSurfaceDrawMode(id, static_cast<uint8_t>(drawMode));
+        }
+        aurora::helpTip(tr("实心 = 填充三角面；线框 = 只画网格边；半透明 = 混合管线，便于看到内部球棍。"));
 
         aurora::sectionLabel(tr("网格质量"));
         static const struct { const char* name; float spacing; } kQuality[] = {
@@ -1967,38 +2201,105 @@ public:
                       last);
         ImGui::TextDisabled("%s", info);
 
-        aurora::sliderNum(tr("播放速度"), &speed_, 0.1f, 10.0f, "%.2f×", 0.1f);
-        if (speed_ != lastSpeed_) {
+        // 启动时沿用 settings.json 的播放倍速（lastSpeed_ 初值 -1：首帧只同步滑块
+        // 显示，不调用 setter）；否则滑块默认 1.0 会在第一帧把用户设置覆盖掉。
+        // setter 只在控件真的返回值变化时调用（不每帧 toast/touch 调度器）。
+        if (lastSpeed_ < 0.0f) {
+            speed_ = std::clamp(tl->speed(), 0.1f, 10.0f);
+            lastSpeed_ = speed_;
+        }
+        if (aurora::sliderNum(tr("播放速度"), &speed_, 0.1f, 10.0f, "%.2f×", 0.1f)) {
             tl->setSpeed(speed_);
             lastSpeed_ = speed_;
         }
-        // 播放帧率与物理 dt 分离：dt=10 ps 的轨迹若按 dt 定时会变成 10 秒一帧。
-        // 这里让用户选实时帧率（默认 30），速度倍率再乘上去。
-        static const float kPlaybackFps[] = {12.0f, 20.0f, 24.0f, 30.0f, 60.0f};
-        static const char* const kPlaybackFpsNames[] = {"12 FPS", "20 FPS", "24 FPS",
-                                                         "30 FPS", "60 FPS"};
-        int fpsIdx = 3;
-        for (int i = 0; i < 5; ++i) {
-            if (std::fabs(tl->playbackFps() - kPlaybackFps[i]) < 0.5f) {
-                fpsIdx = i;
-                break;
+        // 播放节奏（v2.19）：默认「动态 FPS」= 播放间隔跟随真实渲染帧率（渲染 dt 的
+        // EMA），再用目标帧率上限与追帧上限夹住；高刷屏不会把轨迹"加速播放"，掉帧
+        // 也不会一次性追几十帧。固定 12/20/24/30/60/120 FPS 可降低 QuickSurf 预计算压力。
+        static const char* const kPlaybackModes[] = {
+            u8"动态 FPS", u8"刷新率同步", "12 FPS", "20 FPS",
+            "24 FPS",     "30 FPS",     "60 FPS", "120 FPS"};
+        static const float kPlaybackFps[] = {0.0f, 0.0f, 12.0f, 20.0f,
+                                            24.0f, 30.0f, 60.0f, 120.0f};
+        constexpr int kPlaybackCount = 8;
+        int fpsIdx = 0;
+        if (tl->playbackMode() == engine::PlaybackMode::Dynamic) {
+            fpsIdx = 0;
+        } else if (tl->playbackMode() == engine::PlaybackMode::RefreshSync ||
+                   tl->playbackFps() <= 0.0f) {
+            fpsIdx = 1;
+        } else {
+            // 自定义帧率（设置卡片里拉过滑块）→ 显示最接近的预设项
+            float best = 1e9f;
+            for (int i = 2; i < kPlaybackCount; ++i) {
+                const float d = std::fabs(tl->playbackFps() - kPlaybackFps[i]);
+                if (d < best) {
+                    best = d;
+                    fpsIdx = i;
+                }
             }
         }
         std::string fpsItems;
-        for (const char* n : kPlaybackFpsNames) {
+        for (const char* n : kPlaybackModes) {
             fpsItems += n;
             fpsItems.push_back('\0');
         }
         fpsItems.push_back('\0');
         if (aurora::comboRow(tr("播放帧率"), &fpsIdx, fpsItems.c_str(),
-                             tr("实时动画每秒推进多少轨迹帧（与轨迹 dt 无关）"))) {
-            tl->setPlaybackFps(kPlaybackFps[std::clamp(fpsIdx, 0, 4)]);
+                             tr("动态 FPS = 跟随真实渲染帧率（受目标帧率上限约束）；"
+                                "刷新率同步 = 每个渲染帧一帧，最顺滑"))) {
+            if (fpsIdx == 0) {
+                tl->setPlaybackMode(engine::PlaybackMode::Dynamic);
+            } else if (fpsIdx == 1) {
+                tl->setPlaybackMode(engine::PlaybackMode::RefreshSync);
+            } else {
+                tl->setPlaybackFps(kPlaybackFps[std::clamp(fpsIdx, 2, kPlaybackCount - 1)]);
+            }
+            // 记忆到 settings.json（load → 改 → save：不持有第二份设置状态）。
+            persist::Settings settings;
+            auto loaded = persist::SettingsStore::load();
+            if (loaded) {
+                settings = *loaded;
+            }
+            switch (tl->playbackMode()) {
+            case engine::PlaybackMode::Dynamic:
+                settings.playbackMode = "dynamic";
+                break;
+            case engine::PlaybackMode::FixedFps:
+                settings.playbackMode = "fixed";
+                break;
+            default:
+                settings.playbackMode = "refresh";
+                break;
+            }
+            settings.playbackFps = static_cast<int>(std::lround(
+                tl->playbackMode() == engine::PlaybackMode::FixedFps ? tl->playbackFps()
+                                                                     : tl->playbackTargetFps()));
+            settings.playbackSpeed = tl->speed();
+            settings.playbackMaxCatchUp = tl->playbackMaxCatchUp();
+            (void)persist::SettingsStore::save(settings);
         }
-        char rate[96];
-        std::snprintf(rate, sizeof(rate), "%s %.0f × %.2f = %.0f FPS", tr("实际推进"),
-                      static_cast<double>(tl->playbackFps()),
-                      static_cast<double>(tl->speed()),
-                      static_cast<double>(tl->playbackFps() * tl->speed()));
+        char rate[128];
+        if (tl->playbackMode() == engine::PlaybackMode::Dynamic) {
+            if (tl->playbackTargetFps() <= 0.0f) {
+                std::snprintf(rate, sizeof(rate), "%s × %.2f · %s · %s %.0f FPS", tr("动态"),
+                              static_cast<double>(tl->speed()), tr("目标 跟随渲染"),
+                              tr("实际"), static_cast<double>(tl->effectiveFps()));
+            } else {
+                std::snprintf(rate, sizeof(rate), "%s × %.2f · %s %d FPS · %s %.0f FPS",
+                              tr("动态"), static_cast<double>(tl->speed()), tr("目标"),
+                              static_cast<int>(std::lround(tl->playbackTargetFps())),
+                              tr("实际"), static_cast<double>(tl->effectiveFps()));
+            }
+        } else if (tl->playbackMode() == engine::PlaybackMode::FixedFps &&
+                   tl->playbackFps() > 0.0f) {
+            std::snprintf(rate, sizeof(rate), "%s %.0f × %.2f = %.0f FPS", tr("实际推进"),
+                          static_cast<double>(tl->playbackFps()),
+                          static_cast<double>(tl->speed()),
+                          static_cast<double>(tl->playbackFps() * tl->speed()));
+        } else {
+            std::snprintf(rate, sizeof(rate), "%s × %.2f", tr("刷新率同步"),
+                          static_cast<double>(tl->speed()));
+        }
         ImGui::TextDisabled("%s", rate);
         bool loop = tl->loop();
         if (aurora::toggleRow(tr("循环播放"), &loop)) {
@@ -2036,7 +2337,16 @@ private:
     float speed_ = 1.0f;
     float lastSpeed_ = -1.0f;
 };
-// 7. 分析（Analysis）—— 场景统计（只读）
+// 7. 分析（Analysis）—— 场景统计 + 逐分子统计（只读）
+// =============================================================================
+// 设计要点（2026-10-22 用户反馈）：
+//   · 2042 个分子不能一次性全部展开——逐分子列表默认折叠，内部用 clipper 只画
+//     可见行，并支持搜索 / 只看有轨迹的分子；
+//   · 先给"能一眼看完"的汇总（总览 + 体系统计 + Rg/RMSE/RMSF 的均值/极值），
+//     详细表按需展开；
+//   · 统计结果可整表导出为 CSV（Excel 直接打开）或真正的 .xlsx 工作簿；
+//   · 统计基于轨迹**第 0 帧**为参考（内存中的当前帧不影响结果），长轨迹按
+//     200 帧等间隔抽样，界面上标明实际统计帧数。
 // =============================================================================
 class AnalysisModule : public IInspectorModule {
 public:
@@ -2044,49 +2354,447 @@ public:
     const char* label() const override { return "分析"; }
     const char* subtitle() const override { return "场景统计与结构信息"; }
 
+    void onActivate(Workbench& wb) override {
+        ensureStats(wb, false);
+    }
+
     void render(Workbench& wb) override {
         DataManager* dm = wb.data();
-        if (dm == nullptr) {
+        entity::SceneStructure* scene = wb.scene();
+        if (dm == nullptr || scene == nullptr) {
             ImGui::TextDisabled("%s", tr("数据未就绪"));
             return;
         }
-        size_t atoms = 0;
-        size_t bonds = 0;
-        size_t frames = 0;
-        for (size_t i = 0; i < dm->moleculeCount(); ++i) {
-            atoms += dm->atomCount(i);
-            bonds += dm->bondCount(i);
-            frames = std::max(frames, dm->frameCount(i));
+        // 首次进入/数据形状变化（分子数、体系数、帧数）时自动算一次；播放时
+        // 场景 serial 每帧变，但这里**不**看 serial，避免播放中反复重算。
+        const uint64_t sig = sceneSignature(scene);
+        if (!computed_ || sig != lastSignature_) {
+            ensureStats(wb, true);
         }
+
+        renderOverview(wb);
+        renderSystemsTable();
+        renderActions(wb);
+        renderPerMolecule(wb);
+        renderQuantumChemistry();
+    }
+
+private:
+    static uint64_t sceneSignature(const entity::SceneStructure* scene) {
+        if (scene == nullptr) {
+            return 0;
+        }
+        uint64_t maxFrames = 0;
+        for (const auto& inst : scene->instances()) {
+            if (inst.trajectory) {
+                maxFrames =
+                    std::max<uint64_t>(maxFrames, inst.trajectory->frames.size());
+            }
+        }
+        uint64_t sig = 1469598103934665603ull;
+        const uint64_t parts[4] = {
+            static_cast<uint64_t>(scene->instances().size()),
+            static_cast<uint64_t>(scene->systems().size()),
+            maxFrames,
+            static_cast<uint64_t>(scene->coordsSoA().positions.size()),
+        };
+        for (uint64_t v : parts) {
+            sig ^= v;
+            sig *= 1099511628211ull;
+        }
+        return sig;
+    }
+
+    void ensureStats(Workbench& wb, bool force) {
+        entity::SceneStructure* scene = wb.scene();
+        if (scene == nullptr) {
+            stats_ = MoleculeStats{};
+            computed_ = false;
+            return;
+        }
+        const uint64_t sig = sceneSignature(scene);
+        if (!force && computed_ && sig == lastSignature_) {
+            return;
+        }
+        stats_ = computeMoleculeStats(*scene);
+        lastSignature_ = sig;
+        computed_ = true;
+    }
+
+    void renderOverview(Workbench& wb) {
+        const auto& s = stats_.summary;
         aurora::sectionLabel(tr("总览"));
-        aurora::kvRow(tr("分子数"), std::to_string(dm->moleculeCount()).c_str());
-        aurora::kvRow(tr("体系数"), std::to_string(dm->systemCount()).c_str());
-        aurora::kvRow(tr("原子数"), std::to_string(atoms).c_str());
-        aurora::kvRow(tr("键数"), std::to_string(bonds).c_str());
-        aurora::kvRow(tr("帧数"), std::to_string(frames).c_str());
+        aurora::kvRow(tr("分子数"), std::to_string(s.molecules).c_str());
+        aurora::kvRow(tr("体系数"), std::to_string(s.systems).c_str());
+        aurora::kvRow(tr("原子数"), std::to_string(s.atoms).c_str());
+        aurora::kvRow(tr("键数"), std::to_string(s.bonds).c_str());
+        aurora::kvRow(tr("最大帧数"), std::to_string(s.maxFrames).c_str());
         aurora::kvRow(tr("表示数"),
                       std::to_string(wb.representations().size()).c_str());
 
         aurora::spacer(6.0f);
-        char summary[512];
-        std::snprintf(summary, sizeof(summary),
-                      "MolecuLens v2 场景统计\n分子 %zu · 体系 %zu · 原子 %zu · 键 %zu · 帧 %zu",
-                      dm->moleculeCount(), dm->systemCount(), atoms, bonds, frames);
-        if (aurora::chip(tr("复制统计到剪贴板"), false)) {
-            ImGui::SetClipboardText(summary);
+        aurora::sectionLabel(tr("结构统计"));
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "%.1f", s.totalMass);
+        aurora::kvRow(tr("总质量 (u)"), buf);
+        std::snprintf(buf, sizeof(buf), "%.1f", s.meanAtoms);
+        aurora::kvRow(tr("平均原子数 / 分子"), buf);
+        std::snprintf(buf, sizeof(buf), "%.1f", s.meanBonds);
+        aurora::kvRow(tr("平均键数 / 分子"), buf);
+        std::snprintf(buf, sizeof(buf), "%zu", s.withTrajectory);
+        aurora::kvRow(tr("含轨迹分子数"), buf);
+
+        aurora::spacer(6.0f);
+        aurora::sectionLabel(tr("轨迹统计（以第 0 帧为参考）"));
+        std::snprintf(buf, sizeof(buf), "%.3f", s.meanRadiusOfGyration);
+        aurora::kvRow(tr("平均回转半径 Rg (Å)"), buf);
+        std::snprintf(buf, sizeof(buf), "%.3f", s.maxRadiusOfGyration);
+        aurora::kvRow(tr("最大回转半径 Rg (Å)"), buf);
+        std::snprintf(buf, sizeof(buf), "%.4f", s.meanRmse);
+        aurora::kvRow(tr("平均 RMSE (Å)"), buf);
+        std::snprintf(buf, sizeof(buf), "%.4f", s.maxRmse);
+        aurora::kvRow(tr("最大 RMSE (Å)"), buf);
+        if (!s.maxRmseName.empty()) {
+            std::string name = s.maxRmseName;
+            if (name.size() > 26) {
+                name = name.substr(0, 25) + "…";
+            }
+            aurora::kvRow(tr("最大 RMSE 分子"), name.c_str());
+        }
+        std::snprintf(buf, sizeof(buf), "%.4f", s.meanRmsf);
+        aurora::kvRow(tr("平均 RMSF (Å)"), buf);
+        aurora::helpTip(tr("RMSE 为轨迹相对首帧的坐标均方根误差（未做叠合/最优旋转）；"
+                           "RMSF 为原子相对自身时间平均位置的涨落。长轨迹按 200 帧"
+                           "等间隔抽样，逐分子表中的「统计帧数」是实际参与计算的帧数。"));
+    }
+
+    struct SystemAgg {
+        std::string name;
+        size_t molecules = 0;
+        size_t atoms = 0;
+        size_t bonds = 0;
+        uint64_t maxFrames = 0;
+        double rgSum = 0.0;
+        double rmseSum = 0.0;
+    };
+
+    void renderSystemsTable() {
+        if (stats_.molecules.empty()) {
+            return;
+        }
+        std::vector<SystemAgg> aggs;
+        auto findAgg = [&aggs](const std::string& name) -> SystemAgg& {
+            for (auto& a : aggs) {
+                if (a.name == name) {
+                    return a;
+                }
+            }
+            aggs.push_back(SystemAgg{});
+            aggs.back().name = name;
+            return aggs.back();
+        };
+        for (const auto& m : stats_.molecules) {
+            SystemAgg& a = findAgg(m.system);
+            ++a.molecules;
+            a.atoms += m.atoms;
+            a.bonds += m.bonds;
+            a.maxFrames = std::max(a.maxFrames, m.frames);
+            a.rgSum += m.radiusOfGyration;
+            a.rmseSum += m.rmse;
+        }
+        if (aggs.size() <= 1) {
+            return;   // 单体系时上面的总览已经给出同样信息，不再重复
+        }
+        aurora::spacer(6.0f);
+        aurora::sectionLabel(tr("体系统计"));
+        if (ImGui::BeginTable("##analysis_systems", 6,
+                              ImGuiTableFlags_SizingStretchProp |
+                                  ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_NoSavedSettings)) {
+            ImGui::TableSetupColumn(tr("体系"));
+            ImGui::TableSetupColumn(tr("分子"));
+            ImGui::TableSetupColumn(tr("原子"));
+            ImGui::TableSetupColumn(tr("键"));
+            ImGui::TableSetupColumn("Rg (Å)");
+            ImGui::TableSetupColumn("RMSE (Å)");
+            ImGui::TableHeadersRow();
+            for (const auto& a : aggs) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(a.name.empty() ? tr("未归组") : a.name.c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%zu", a.molecules);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%zu", a.atoms);
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text("%zu", a.bonds);
+                ImGui::TableSetColumnIndex(4);
+                ImGui::Text("%.2f", a.molecules > 0 ? a.rgSum / a.molecules : 0.0);
+                ImGui::TableSetColumnIndex(5);
+                ImGui::Text("%.3f", a.molecules > 0 ? a.rmseSum / a.molecules : 0.0);
+            }
+            ImGui::EndTable();
+        }
+    }
+
+    void renderActions(Workbench& wb) {
+        aurora::spacer(6.0f);
+        if (aurora::chip(tr("重新计算"), false,
+                         tr("按当前场景重新统计（轨迹涨落按 200 帧抽样）"))) {
+            ensureStats(wb, true);
+            wb.notify(tr("统计已更新"));
+        }
+        ImGui::SameLine(0, 6);
+        if (aurora::chip(tr("复制统计"), false, tr("把总览文本复制到剪贴板"))) {
+            ImGui::SetClipboardText(summaryText().c_str());
             wb.notify(tr("统计已复制"));
         }
+        ImGui::SameLine(0, 6);
+        if (aurora::chip(tr("导出 CSV"), false,
+                         tr("导出全部分子统计，Excel 可直接打开"))) {
+            exportCsv(wb);
+        }
+        ImGui::SameLine(0, 6);
+        if (aurora::chip(tr("导出 Excel"), false,
+                         tr("导出全部分子统计为 .xlsx 工作簿"))) {
+            exportXlsx(wb);
+        }
+    }
 
-        aurora::sectionLabel(tr("逐分子"));
-        for (size_t i = 0; i < dm->moleculeCount(); ++i) {
-            const std::string name = dm->moleculeName(i);
-            char row[160];
-            std::snprintf(row, sizeof(row), "%s  (%zu 原子 / %zu 键)",
-                          name.empty() ? tr("未命名") : name.c_str(), dm->atomCount(i),
-                          dm->bondCount(i));
-            ImGui::BulletText("%s", row);
+    std::string summaryText() const {
+        const auto& s = stats_.summary;
+        char buf[1024];
+        std::snprintf(
+            buf, sizeof(buf),
+            "MolecuLens 场景统计\n分子 %zu · 体系 %zu · 原子 %zu · 键 %zu · 帧 %zu\n"
+            "总质量 %.1f u · 平均 Rg %.3f Å · 最大 Rg %.3f Å\n"
+            "平均 RMSE %.4f Å · 最大 RMSE %.4f Å · 平均 RMSF %.4f Å",
+            s.molecules, s.systems, s.atoms, s.bonds, s.maxFrames, s.totalMass,
+            s.meanRadiusOfGyration, s.maxRadiusOfGyration, s.meanRmse, s.maxRmse,
+            s.meanRmsf);
+        return buf;
+    }
+
+    static bool containsCaseInsensitive(const std::string& haystack,
+                                        const std::string& needle) {
+        if (needle.empty()) {
+            return true;
+        }
+        if (needle.size() > haystack.size()) {
+            return false;
+        }
+        for (size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+            bool match = true;
+            for (size_t k = 0; k < needle.size(); ++k) {
+                const auto a = static_cast<unsigned char>(haystack[i + k]);
+                const auto b = static_cast<unsigned char>(needle[k]);
+                if (std::tolower(a) != std::tolower(b)) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void renderPerMolecule() {
+        aurora::spacer(6.0f);
+        const std::string header =
+            std::string(tr("逐分子统计")) + " (" +
+            std::to_string(stats_.molecules.size()) + ")";
+        if (!ImGui::CollapsingHeader(header.c_str(),
+                                     ImGuiTreeNodeFlags_NoSavedSettings)) {
+            return;
+        }
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##analysis_filter", tr("按分子名 / 体系名搜索"),
+                                 filter_, sizeof(filter_));
+        ImGui::Checkbox(tr("只显示有轨迹的分子"), &onlyTrajectory_);
+        const auto rows = visibleRows();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s: %zu", tr("匹配"), rows.size());
+        if (stats_.molecules.empty()) {
+            ImGui::TextDisabled("%s", tr("场景为空"));
+            return;
         }
 
+        constexpr float kTableH = 300.0f;
+        const ImGuiTableFlags flags = ImGuiTableFlags_Borders |
+                                      ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_ScrollY |
+                                      ImGuiTableFlags_SizingFixedFit |
+                                      ImGuiTableFlags_NoSavedSettings;
+        if (ImGui::BeginTable("##analysis_molecules", 9, flags,
+                              ImVec2(0.0f, kTableH))) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn(tr("分子"), ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn(tr("体系"), ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGui::TableSetupColumn(tr("原子"), ImGuiTableColumnFlags_WidthFixed, 46.0f);
+            ImGui::TableSetupColumn(tr("键"), ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGui::TableSetupColumn(tr("帧"), ImGuiTableColumnFlags_WidthFixed, 44.0f);
+            ImGui::TableSetupColumn("Rg", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+            ImGui::TableSetupColumn("RMSE", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+            ImGui::TableSetupColumn("RMSF", ImGuiTableColumnFlags_WidthFixed, 54.0f);
+            ImGui::TableSetupColumn(tr("最大位移"),
+                                    ImGuiTableColumnFlags_WidthFixed, 62.0f);
+            ImGui::TableHeadersRow();
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(rows.size()));
+            while (clipper.Step()) {
+                for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+                    const MoleculeStat& m =
+                        stats_.molecules[rows[static_cast<size_t>(r)]];
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(m.name.empty() ? tr("未命名")
+                                                          : m.name.c_str());
+                    if (ImGui::IsItemHovered() && !m.system.empty()) {
+                        ImGui::SetTooltip("%s: %s", tr("体系"), m.system.c_str());
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(m.system.empty() ? tr("未归组")
+                                                            : m.system.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%zu", m.atoms);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%zu", m.bonds);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::Text("%llu", static_cast<unsigned long long>(m.frames));
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::Text("%.2f", m.radiusOfGyration);
+                    ImGui::TableSetColumnIndex(6);
+                    ImGui::Text("%.3f", m.rmse);
+                    ImGui::TableSetColumnIndex(7);
+                    ImGui::Text("%.3f", m.rmsf);
+                    ImGui::TableSetColumnIndex(8);
+                    ImGui::Text("%.3f", m.maxDisplacement);
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::TextDisabled("%s", tr("表内滚动查看全部分子；导出按钮包含全部行（不受搜索/筛选影响）"));
+    }
+
+    std::vector<size_t> visibleRows() const {
+        std::vector<size_t> out;
+        out.reserve(stats_.molecules.size());
+        const std::string needle(filter_);
+        for (size_t i = 0; i < stats_.molecules.size(); ++i) {
+            const auto& m = stats_.molecules[i];
+            if (onlyTrajectory_ && m.frames == 0) {
+                continue;
+            }
+            if (!containsCaseInsensitive(m.name, needle) &&
+                !containsCaseInsensitive(m.system, needle)) {
+                continue;
+            }
+            out.push_back(i);
+        }
+        return out;
+    }
+
+    static std::string csvEscape(const std::string& in) {
+        if (in.find_first_of(",\"\n\r") == std::string::npos) {
+            return in;
+        }
+        std::string out = "\"";
+        for (char c : in) {
+            if (c == '"') {
+                out += "\"\"";
+            } else {
+                out.push_back(c);
+            }
+        }
+        out += "\"";
+        return out;
+    }
+
+    void exportCsv(Workbench& wb) {
+        const std::string filter =
+            trItems({"CSV 表格 (*.csv)", "*.csv", "所有文件 (*.*)", "*.*"});
+        const std::string path =
+            wb.chooseSaveFile("molecule_stats.csv", filter.c_str(), "csv");
+        if (path.empty()) {
+            return;
+        }
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            wb.notify(tr("导出失败：无法创建文件"));
+            return;
+        }
+        const auto headers = moleculeStatsCsvHeader();
+        const auto rows = moleculeStatsCsvRows(stats_);
+        f << "\xEF\xBB\xBF";   // UTF-8 BOM：Excel 双击打开不乱码
+        for (size_t i = 0; i < headers.size(); ++i) {
+            if (i > 0) {
+                f << ',';
+            }
+            f << csvEscape(headers[i]);
+        }
+        f << "\r\n";
+        for (const auto& row : rows) {
+            for (size_t i = 0; i < row.size(); ++i) {
+                if (i > 0) {
+                    f << ',';
+                }
+                f << csvEscape(row[i]);
+            }
+            f << "\r\n";
+        }
+        if (!f.good()) {
+            wb.notify(tr("导出失败：写入不完整"));
+            return;
+        }
+        wb.notify(tr("已导出 CSV：") + path);
+    }
+
+    void exportXlsx(Workbench& wb) {
+        const std::string filter =
+            trItems({"Excel 工作簿 (*.xlsx)", "*.xlsx", "所有文件 (*.*)", "*.*"});
+        const std::string path =
+            wb.chooseSaveFile("molecule_stats.xlsx", filter.c_str(), "xlsx");
+        if (path.empty()) {
+            return;
+        }
+        const auto headers = moleculeStatsCsvHeader();
+        std::vector<std::vector<xlsx::Cell>> rows;
+        rows.reserve(stats_.molecules.size());
+        for (size_t i = 0; i < stats_.molecules.size(); ++i) {
+            const auto& m = stats_.molecules[i];
+            std::vector<xlsx::Cell> row;
+            row.reserve(headers.size());
+            row.push_back(xlsx::Cell::numberCell(static_cast<double>(i + 1)));
+            row.push_back(xlsx::Cell::textCell(m.name));
+            row.push_back(xlsx::Cell::textCell(m.system));
+            row.push_back(xlsx::Cell::numberCell(static_cast<double>(m.atoms)));
+            row.push_back(xlsx::Cell::numberCell(static_cast<double>(m.bonds)));
+            row.push_back(xlsx::Cell::numberCell(static_cast<double>(m.frames)));
+            row.push_back(xlsx::Cell::numberCell(static_cast<double>(m.framesUsed)));
+            row.push_back(xlsx::Cell::numberCell(m.mass));
+            row.push_back(xlsx::Cell::numberCell(m.centroid.x));
+            row.push_back(xlsx::Cell::numberCell(m.centroid.y));
+            row.push_back(xlsx::Cell::numberCell(m.centroid.z));
+            row.push_back(xlsx::Cell::numberCell(m.radiusOfGyration));
+            row.push_back(xlsx::Cell::numberCell(m.extent.x));
+            row.push_back(xlsx::Cell::numberCell(m.extent.y));
+            row.push_back(xlsx::Cell::numberCell(m.extent.z));
+            row.push_back(xlsx::Cell::numberCell(m.rmse));
+            row.push_back(xlsx::Cell::numberCell(m.rmsf));
+            row.push_back(xlsx::Cell::numberCell(m.maxDisplacement));
+            rows.push_back(std::move(row));
+        }
+        std::string err;
+        if (!xlsx::writeSheet(path, tr("逐分子统计"), headers, rows, &err)) {
+            wb.notify(tr("导出 Excel 失败：") + err);
+            return;
+        }
+        wb.notify(tr("已导出 Excel：") + path);
+    }
+
+    static void renderQuantumChemistry() {
         aurora::spacer(6.0f);
         aurora::sectionLabel(tr("量子化学分析"));
         ImGui::BeginDisabled();
@@ -2098,6 +2806,12 @@ public:
         aurora::helpTip(tr("这些分析需要量子化学输出文件（.fchk/.log），"
                            "当前版本尚未接入；ESP 与轨道等值面请用「ESP / 轨道」面板。"));
     }
+
+    MoleculeStats stats_;
+    uint64_t lastSignature_ = 0;
+    bool computed_ = false;
+    bool onlyTrajectory_ = false;
+    char filter_[128] = "";
 };
 
 // =============================================================================
@@ -2232,6 +2946,116 @@ public:
                 s.vsync = vsyncOn;
                 (void)persist::SettingsStore::save(s);
             }
+        }
+        aurora::cardEnd();
+
+        // —— 轨迹播放（动态 FPS，v2.19）——
+        // 播放节奏以 TimelineController 为唯一事实源（构造时已应用 settings.json）：
+        // 这里只做"读当前值 → 改控制器 → 落盘"，不另存一份界面状态。
+        if (aurora::cardBegin("##set_playback", tr("轨迹播放"),
+                              tr("播放节奏跟随真实渲染帧率，卡顿后不补一大段"))) {
+            TimelineController* tl = wb.timeline();
+            int pbMode = 0;           // 0 动态 / 1 固定 / 2 刷新同步
+            int pbTargetFps = 60;     // 0 = 跟随渲染帧率
+            float pbSpeed = 1.0f;
+            int pbCatchUp = 2;
+            if (tl != nullptr) {
+                pbMode = tl->playbackMode() == engine::PlaybackMode::FixedFps
+                             ? 1
+                             : (tl->playbackMode() == engine::PlaybackMode::RefreshSync ? 2 : 0);
+                pbTargetFps = std::clamp(
+                    static_cast<int>(std::lround(pbMode == 1 ? tl->playbackFps()
+                                                             : tl->playbackTargetFps())),
+                    0, 144);
+                pbSpeed = std::clamp(tl->speed(), 0.1f, 4.0f);
+                pbCatchUp = tl->playbackMaxCatchUp();
+            }
+            auto persistPlayback = [&]() {
+                persist::Settings s;
+                auto loaded = persist::SettingsStore::load();
+                if (loaded) {
+                    s = *loaded;
+                }
+                s.playbackMode =
+                    pbMode == 1 ? "fixed" : (pbMode == 2 ? "refresh" : "dynamic");
+                s.playbackFps = pbTargetFps;
+                s.playbackSpeed = pbSpeed;
+                s.playbackMaxCatchUp = pbCatchUp;
+                (void)persist::SettingsStore::save(s);
+            };
+            aurora::sectionLabel(tr("播放节奏"), tr("动态 = 跟随渲染帧率；固定 = 指定 FPS"));
+            static const char* const kModeItems[] = {u8"动态", u8"固定", u8"同步"};
+            if (aurora::segmented("##pb_mode", kModeItems, 3, &pbMode) && tl != nullptr) {
+                if (pbMode == 1) {
+                    tl->setPlaybackFps(pbTargetFps > 0 ? static_cast<float>(pbTargetFps)
+                                                       : 60.0f);
+                } else if (pbMode == 2) {
+                    tl->setPlaybackMode(engine::PlaybackMode::RefreshSync);
+                } else {
+                    tl->setPlaybackMode(engine::PlaybackMode::Dynamic);
+                    tl->setPlaybackTargetFps(static_cast<float>(pbTargetFps));
+                }
+                persistPlayback();
+            }
+            ImGui::BeginDisabled(pbMode == 2);
+            aurora::sectionLabel(tr("目标帧率"), tr("0 = 跟随渲染帧率"));
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::SliderInt("##pb_fps", &pbTargetFps, 0, 144)) {
+                if (tl != nullptr) {
+                    if (pbMode == 1) {
+                        tl->setPlaybackFps(pbTargetFps > 0
+                                               ? static_cast<float>(pbTargetFps)
+                                               : 60.0f);
+                    } else {
+                        tl->setPlaybackTargetFps(static_cast<float>(pbTargetFps));
+                    }
+                }
+                persistPlayback();
+            }
+            ImGui::EndDisabled();
+            if (aurora::stepper(tr("追帧上限"), &pbCatchUp, 1, 1, 8,
+                                tr("卡顿后每渲染帧最多补几帧；多余时间预算直接丢弃"))) {
+                if (tl != nullptr) {
+                    tl->setPlaybackMaxCatchUp(pbCatchUp);
+                }
+                persistPlayback();
+            }
+            if (aurora::sliderRow(tr("播放倍速"), &pbSpeed, 0.1f, 4.0f, "%.2f×")) {
+                if (tl != nullptr) {
+                    tl->setSpeed(pbSpeed);
+                }
+                persistPlayback();
+            }
+            char status[128];
+            const float eff = tl != nullptr ? tl->effectiveFps() : 0.0f;
+            if (pbMode == 0) {
+                if (pbTargetFps <= 0) {
+                    std::snprintf(status, sizeof(status), "%s × %.2f · %s · %s %.0f FPS",
+                                  tr("动态"), static_cast<double>(pbSpeed),
+                                  tr("目标 跟随渲染"), tr("实际"),
+                                  static_cast<double>(eff));
+                } else {
+                    std::snprintf(status, sizeof(status),
+                                  "%s × %.2f · %s %d FPS · %s %.0f FPS", tr("动态"),
+                                  static_cast<double>(pbSpeed), tr("目标"), pbTargetFps,
+                                  tr("实际"), static_cast<double>(eff));
+                }
+            } else if (pbMode == 1) {
+                std::snprintf(status, sizeof(status), "%s %.0f × %.2f = %.0f FPS",
+                              tr("实际推进"), static_cast<double>(pbTargetFps),
+                              static_cast<double>(pbSpeed),
+                              static_cast<double>(pbTargetFps * pbSpeed));
+            } else {
+                std::snprintf(status, sizeof(status), "%s × %.2f · %s %.0f FPS",
+                              tr("刷新率同步"), static_cast<double>(pbSpeed), tr("实际"),
+                              static_cast<double>(eff));
+            }
+            ImGui::TextDisabled("%s", status);
+            ImGui::PushStyleColor(ImGuiCol_Text, aurora::palette().textFaint);
+            ImGui::TextWrapped("%s",
+                               tr("动态 FPS 用渲染 dt 的平滑值决定播放间隔：120Hz 屏 + 目标"
+                                  " 60 时每两个渲染帧推进一帧；目标 0 表示每个渲染帧一帧。"));
+            ImGui::PopStyleColor();
         }
         aurora::cardEnd();
 

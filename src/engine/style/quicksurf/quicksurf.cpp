@@ -707,16 +707,23 @@ bool buildSystemSurfaceInput(const RepContext& ctx, const glm::vec3* pos, size_t
     colors.reserve(total);
     const auto& insts = ctx.scene->instances();
     size_t globalBase = 0;
-    for (const auto& inst : insts) {
+    for (uint32_t ii = 0; ii < static_cast<uint32_t>(insts.size()); ++ii) {
+        const auto& inst = insts[ii];
         uint32_t sysIdx = UINT32_MAX;
         if (inst.systemId != UINT32_MAX) {
             sysIdx = ctx.scene->systemIndexById(inst.systemId);
         }
         const bool hidden = !inst.visible ||
                             (sysIdx != UINT32_MAX && !ctx.scene->systems()[sysIdx].visible);
+        // 实例级类型范围掩码（v2.19）：范围外的实例不进入整体系表面输入。
+        // 本函数在后台线程/未来帧路径也会被调用 —— 只用只读的实例数据，不碰
+        // ctx.instance（它属于"当前帧的某个实例"，对整体系表面没有意义）。
+        const bool outOfRange = ctx.instanceMask != nullptr &&
+                                ii < ctx.instanceMask->size() &&
+                                (*ctx.instanceMask)[ii] == 0;
         const auto& st = ctx.scene->structures()[inst.structureIndex];
         const size_t n = st.elements.size();
-        if (hidden) {
+        if (hidden || outOfRange) {
             globalBase += n;
             continue;
         }
@@ -727,8 +734,11 @@ bool buildSystemSurfaceInput(const RepContext& ctx, const glm::vec3* pos, size_t
             }
             centers.push_back(pos[static_cast<size_t>(g)]);
             radii.push_back(elementInfo(st.elements[i]).vdwRadius * ctx.rep->radiusScale);
-            const auto& el = elementInfo(st.elements[i]);
-            colors.emplace_back(el.color[0], el.color[1], el.color[2]);
+            // 与逐分子路径一致：尊重 rep.colorScheme（此前这里写死 elementInfo.color，
+            // 于是“按链/按残基/统一色”在整体系快速表面上完全不生效）。
+            const glm::vec4 c = Representer::colorForAtomAt(
+                ctx, inst.structureIndex, static_cast<uint32_t>(i), ii);
+            colors.push_back(glm::vec3(c));
         }
         globalBase += n;
     }

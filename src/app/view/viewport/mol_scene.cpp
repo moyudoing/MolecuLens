@@ -380,7 +380,7 @@ uint64_t MolScene::cameraFingerprint(const engine::OrbitCamera& cam) {
     return h;
 }
 
-void MolScene::render(const ImVec2& size) {
+void MolScene::render(const ImVec2& size, uint32_t sceneDirtyHint) {
 
     if (!renderer_ || !camera_ || !offscreen_ || !renderer_->scene()) {
         ImGui::Text(tr("3D 视口未初始化（先打开文件）"));
@@ -391,8 +391,13 @@ void MolScene::render(const ImVec2& size) {
     displayW_ = static_cast<uint32_t>(std::max(1.0f, size.x));
     displayH_ = static_cast<uint32_t>(std::max(1.0f, size.y));
     // 每帧兜底重置拖拽状态：无任何鼠标键按下时（release 帧可能无位移，main_view
-    // 不转发 → handleMouse 不被调用 → 拖拽状态残留 → 后续手势/换键全部失效）
+    // 不转发 → handleMouse 不被调用 → 拖拽状态残留 → 后续手势/换键全部失效）。
+    // 另外：拖拽键自己已经抬起（即使别的键还按着）也必须解锁，否则"左键点一下
+    // 再按右键拖"会被旧的 dragButton_=左键 一直挡住。
     if (!ImGui::IsMouseDown(0) && !ImGui::IsMouseDown(1) && !ImGui::IsMouseDown(2)) {
+        isDragging_ = false;
+        dragButton_ = -1;
+    } else if (dragButton_ >= 0 && dragButton_ <= 2 && !ImGui::IsMouseDown(dragButton_)) {
         isDragging_ = false;
         dragButton_ = -1;
     }
@@ -431,8 +436,16 @@ void MolScene::render(const ImVec2& size) {
     const ImGuiIO& io = ImGui::GetIO();
     const float fsx = io.DisplayFramebufferScale.x > 0.0f ? io.DisplayFramebufferScale.x : 1.0f;
     const float fsy = io.DisplayFramebufferScale.y > 0.0f ? io.DisplayFramebufferScale.y : 1.0f;
-    const uint32_t w = static_cast<uint32_t>(std::max(1.0f, size.x * fsx));
-    const uint32_t h = static_cast<uint32_t>(std::max(1.0f, size.y * fsy));
+    // 动态分辨率：播放/拖动窗口内再降一档（0.7×），停手 350 ms 后恢复。
+    // 只改离屏 FBO 尺寸，ImGui::Image 仍按逻辑 size 拉伸显示，因此相机比例、
+    // 拾取坐标与叠加层都不需要改。
+    const float dynamicFactor =
+        (dynamicResolution_ && dynamicDetail) ? 0.70f : 1.0f;
+    const float effectiveScale = std::clamp(renderScale_ * dynamicFactor, 0.35f, 2.0f);
+    const uint32_t w = static_cast<uint32_t>(
+        std::max(1.0f, size.x * fsx * effectiveScale));
+    const uint32_t h = static_cast<uint32_t>(
+        std::max(1.0f, size.y * fsy * effectiveScale));
 
     if (w != viewportW_ || h != viewportH_) {
         offscreen_->resize(w, h);
@@ -448,7 +461,7 @@ void MolScene::render(const ImVec2& size) {
     // 场景脏位（背景/表示变更），否则改了视角/背景视图不刷新。
     const uint64_t camFp = cameraFingerprint(*camera_);
     const bool cameraMoved = (camFp != lastCameraFp_);
-    const bool sceneDirty = renderer_->scene()->dirtyBits() != 0;
+    const bool sceneDirty = renderer_->scene()->dirtyBits() != 0 || sceneDirtyHint != 0;
     const bool gateOpen = dirty_ || cameraMoved || sceneDirty ||
                           renderer_->commandSerial() != lastSerial_ ||
                           // 异步表面在后台生成时保持出帧：否则界面空闲后 prepare 不再被调用，
@@ -495,7 +508,12 @@ void MolScene::render(const ImVec2& size) {
     // 判断变化 是否需要渲染器更新
     if (gateOpen) {
         renderer_->setTrajectoryFrame(trajectoryFrame_);
-        renderer_->update(0.0f);   // 脏位域 → needsRebuild_（prepare 阶段重建命令流）
+        // 多视图外层抓到的脏位快照优先：场景脏位可能已被先渲染的视图清掉。
+        if (sceneDirtyHint != 0) {
+            renderer_->updateWithDirty(0.0f, sceneDirtyHint);
+        } else {
+            renderer_->update(0.0f);   // 脏位域 → needsRebuild_（prepare 阶段重建命令流）
+        }
         const auto& props = renderer_->scene()->properties();
         offscreen_->setBackground(props.bgColor);
         const auto tPrepare0 = std::chrono::steady_clock::now();
@@ -872,10 +890,10 @@ void MolScene::drawViewOverlay(const ImVec2& imgMin, const ImVec2& imgSize) {
 }
 
 bool MolScene::handleMouse(float dx, float dy, int button) {
-    if (!camera_ || !cameraCtl_) {
+    if (!camera_ || !cameraCtl_ || button < 0 || button > 2) {
         return false;
     }
-    // 按钮已抬起：结束本次拖拽。release 帧可能无位移，main_view 不会调用本函数，
+    // 按钮已抬起：结束本次拖拽。release 帧可能无位移，调用方只在有输入时转发，
     // 因此还需在 render() 每帧做兜底重置（否则拖拽状态残留 → 后续手势失效）。
     if (!ImGui::IsMouseDown(button)) {
         if (dragButton_ == button) {
@@ -884,25 +902,37 @@ bool MolScene::handleMouse(float dx, float dy, int button) {
         }
         return false;
     }
-    // 首次移动：进入拖拽（点击未移动不触发）
+    // 只有真正产生位移才进入拖拽。旧实现"按下即锁定按键"：先点一下左键（无位移）
+    // 再按住右键拖动时，右键事件被 dragButton_ 拒绝 —— 用户看到的就是
+    // "右键滚转/中键缩放完全用不上"，而左键"偶尔能用"。点击不移动不该锁键。
     if (!isDragging_) {
+        if (std::fabs(dx) + std::fabs(dy) <= 0.0f) {
+            return false;
+        }
         isDragging_ = true;
         dragButton_ = button;
     }
     if (dragButton_ != button) {
         return false;   // 其它按钮的拖拽：忽略（避免多键串扰）
     }
-    // 主方案 §7.10：左键轨道旋转 / 中键缩放 / 右键绕屏幕法线滚转（Shift+右键平移）
+    // 主方案 §7.10：左键轨道旋转 / 中键 dolly / 右键绕屏幕法线滚转（Shift+右键平移）
     // 一律经 CameraController 转发 —— 它是改变相机的唯一入口（不得再直接写 camera_）
-    const float sensitivity = 0.008f;
-    if (button == 0) {
-        // 左键轨道：视角跟随鼠标拖拽方向同步转动。
-        //  水平 +dx：拖右 → yaw 增 → 相机绕到 +X（场景右侧），视角转向右侧；
-        //  竖直 -dy：拖上（dy<0）→ pitch 增 → 相机升高，看到顶面。
-        cameraCtl_->orbit(dx * sensitivity, -dy * sensitivity);
-    } else if (button == 1) {
-        cameraCtl_->dolly(1.0f + dy * sensitivity);
-    } else if (button == 2) {
+    //
+    // ⚠ ImGui 的鼠标键编号是 0=左 / 1=右 / 2=中（Vulkan/GLFW 顺序），不是
+    //   "中键=1、右键=2"。此前按后者写分支，导致右键实际走 dolly、中键走滚转，
+    //   与面板/文档（右键滚转、中键推拉）完全相反 —— 这是"鼠标手势用不上"的
+    //   根因之一。下面直接用 ImGuiMouseButton_* 常量，杜绝同类错位。
+    const float sensitivity = 0.006f;
+    if (button == ImGuiMouseButton_Left) {
+        // 左键轨道：**抓住分子拖**的手感（VMD/PyMOL 一致）：
+        //   · 水平：拖右 → 相机向左绕（分子右侧转过来），与 v2.13 用户要求一致，
+        //     所以 dx 取负；
+        //   · 垂直：ImGui 的 dy 向下为正。pitch 增大 = 相机升高（从上方看），
+        //     屏幕上分子会**向下**滑。要"分子跟着鼠标走"，拖下（dy>0）就该让
+        //     pitch 增大，因此 dy 必须取**正**。此前和 dx 一起取负 → 上下方向
+        //     相反，用户反馈"左键手势很奇怪"就是它。
+        cameraCtl_->orbit(-dx * sensitivity, dy * sensitivity);
+    } else if (button == ImGuiMouseButton_Right) {
         const bool shift = ImGui::GetIO().KeyShift;
         if (!shift) {
             // 右键：绕屏幕法线（指向屏幕外）滚转，顺时针/逆时针随拖拽方向
@@ -914,6 +944,9 @@ bool MolScene::handleMouse(float dx, float dy, int button) {
             const float h = static_cast<float>(std::max(1u, displayH_));
             cameraCtl_->pan(dx / w * 2.0f, -dy / h * 2.0f);
         }
+    } else {   // ImGuiMouseButton_Middle
+        // 中键推拉：向上拖拉近、向下拖推远（factor 与 dy 同号：dy>0 距离变大）。
+        cameraCtl_->dolly(1.0f + dy * sensitivity);
     }
     return true;
 }
@@ -1154,7 +1187,29 @@ bool MolScene::exportRayTracedToPng(uint32_t width, uint32_t height,
         bg = glm::vec3(bgOverride[0], bgOverride[1], bgOverride[2]);
     }
     std::vector<uint8_t> rgba;
-    engine::rayTrace(rtScene, rtc, rtl, bg, std::max(1, samplesPerPixel), rgba);
+    // 优先 GPU（Vulkan KHR 光追）；设备不支持/运行失败时回退 CPU（结果同契约）。
+    bool traced = false;
+    if (renderer_->gpuRayTraceAvailable()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        traced = renderer_->gpuRayTrace(rtScene, rtc, rtl, bg,
+                                        std::max(1, samplesPerPixel), rgba);
+        if (traced) {
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
+            spdlog::info("[io] export(rt): GPU 光追 {}x{} {} spp, {} ms", width, height,
+                         std::max(1, samplesPerPixel), ms);
+        } else {
+            spdlog::warn("[io] export(rt): GPU 光追失败 -> 回退 CPU 光追");
+        }
+    }
+    if (!traced) {
+        if (!engine::rayTrace(rtScene, rtc, rtl, bg, std::max(1, samplesPerPixel),
+                              rgba)) {
+            spdlog::error("[io] export(rt): CPU 光追失败");
+            return false;
+        }
+    }
     // ESP 叠加：与光栅导出同一栅格器/同一份快照（RT 路径无透明背景选项）
     {
         const float bgRgb[3] = {bg.x, bg.y, bg.z};
@@ -1175,11 +1230,59 @@ bool MolScene::exportAnimationToPng(uint32_t width, uint32_t height,
                                     const std::string& dirPath, uint32_t instanceIndex,
                                     uint64_t inFrame, uint64_t outFrame, uint32_t step,
                                     const float bgOverride[3], int ssaa, int colorDepth,
-                                    uint32_t* frameCountOut) {
+                                    uint32_t* frameCountOut, int source,
+                                    uint32_t orbitFrames) {
     if (!renderer_ || renderer_->mutableScene() == nullptr) {
         spdlog::error("[io] export(anim): 渲染器/场景未就绪");
         return false;
     }
+    if (!camera_) {
+        spdlog::error("[io] export(anim): 相机未就绪");
+        return false;
+    }
+    const bool orbit = (source == 1 || source == 2);
+    const engine::OrbitCamera savedCamera = *camera_;
+    struct CameraRestore {
+        engine::OrbitCamera* cam;
+        engine::OrbitCamera saved;
+        ~CameraRestore() { *cam = saved; }
+    } cameraRestore{camera_, savedCamera};
+
+    std::error_code dirEc;
+    std::filesystem::create_directories(dirPath, dirEc);
+    if (dirEc) {
+        spdlog::error("[io] export(anim): 无法创建输出目录 {}: {}", dirPath,
+                      dirEc.message());
+        return false;
+    }
+
+    // 纯相机旋转：不依赖轨迹，在当前静态场景上绕竖轴转一周。
+    if (source == 1) {
+        const uint32_t n = std::max(1u, orbitFrames == 0 ? 120u : orbitFrames);
+        uint32_t written = 0;
+        for (uint32_t i = 0; i < n; ++i) {
+            camera_->yaw = savedCamera.yaw +
+                           2.0f * 3.14159265358979323846f * static_cast<float>(i) /
+                               static_cast<float>(n);
+            renderer_->update(0.0f);
+            renderer_->prepareBlocking();
+            char name[64];
+            std::snprintf(name, sizeof(name), "frame_%04u.png", written);
+            const std::string out = (std::filesystem::path(dirPath) / name).string();
+            if (!exportToPng(width, height, out, bgOverride, ssaa, colorDepth, false)) {
+                spdlog::error("[io] export(anim): 相机帧 {} 导出失败，中止", i);
+                return false;
+            }
+            ++written;
+        }
+        if (frameCountOut != nullptr) {
+            *frameCountOut = written;
+        }
+        spdlog::info("[io] export(anim): 相机旋转 {} 帧 -> {} ({}x{})", written, dirPath,
+                     width, height);
+        return written > 0;
+    }
+
     entity::SceneStructure* sc = renderer_->mutableScene();
     const auto& instances = sc->instances();
     if (instanceIndex >= instances.size() || !instances[instanceIndex].trajectory) {
@@ -1191,11 +1294,24 @@ bool MolScene::exportAnimationToPng(uint32_t width, uint32_t height,
         spdlog::error("[io] export(anim): 起始帧 {} 超出轨迹帧数 {}", inFrame, total);
         return false;
     }
+    // 导出逐帧改写场景坐标；结束后恢复导出前的时间轴帧，否则界面会停在
+    // 最后一帧而时间轴仍显示旧帧号（下一次播放才纠正）。
+    const uint64_t savedFrame = trajectoryFrame_;
+    auto restoreFrame = [this, sc, instanceIndex, savedFrame]() {
+        sc->applyTrajectoryFrame(instanceIndex, savedFrame);
+        trajectoryFrame_ = savedFrame;
+        if (renderer_ != nullptr) {
+            renderer_->setTrajectoryFrame(savedFrame);
+            renderer_->update(0.0f);
+            renderer_->prepareBlocking();
+        }
+    };
     // 结束帧：0 = 到末帧（UI 默认值就是 0，避免用户必须先知道总帧数）
     const uint64_t last = (outFrame == 0 || outFrame >= total) ? total - 1 : outFrame;
     const uint32_t stepN = step == 0 ? 1 : step;
     if (inFrame > last) {
         spdlog::error("[io] export(anim): 起始帧 {} > 结束帧 {}", inFrame, last);
+        restoreFrame();
         return false;
     }
 
@@ -1207,10 +1323,16 @@ bool MolScene::exportAnimationToPng(uint32_t width, uint32_t height,
     }
 
     uint32_t written = 0;
+    const uint32_t totalFrames = static_cast<uint32_t>((last - inFrame) / stepN + 1);
     for (uint64_t f = inFrame; f <= last; f += stepN) {
         // 帧坐标 → 世界坐标（与播放链路同一实现）→ 命令流重建
         if (!sc->applyTrajectoryFrame(instanceIndex, f)) {
             continue;
+        }
+        if (source == 2 && orbit) {
+            camera_->yaw = savedCamera.yaw +
+                           2.0f * 3.14159265358979323846f * static_cast<float>(written) /
+                               static_cast<float>(std::max(1u, totalFrames));
         }
         renderer_->update(0.0f);
         renderer_->prepareBlocking();   // 动画逐帧导出：同步确保表面就绪
@@ -1222,6 +1344,7 @@ bool MolScene::exportAnimationToPng(uint32_t width, uint32_t height,
             (std::filesystem::path(dirPath) / name).string();
         if (!exportToPng(width, height, out, bgOverride, ssaa, colorDepth, false)) {
             spdlog::error("[io] export(anim): 帧 {} 导出失败，中止", f);
+            restoreFrame();
             return false;
         }
         ++written;
@@ -1231,6 +1354,7 @@ bool MolScene::exportAnimationToPng(uint32_t width, uint32_t height,
     }
     spdlog::info("[io] export(anim): {} 帧 -> {} ({}x{}, ssaa={}, {} bit)", written,
                  dirPath, width, height, std::max(1, ssaa), colorDepth);
+    restoreFrame();
     return written > 0;
 }
 
@@ -1401,6 +1525,36 @@ void MolScene::destroyRtTexture() {
 
 ImTextureID MolScene::textureId() const {
     return texture_;
+}
+
+bool MolScene::rayTraceSupported() const {
+    // 真实 GPU 光追可用性：设备已启用 KHR RT 扩展 + feature，且光追管线可建
+    //（惰性初始化一次）。不可用时导出自动回退 CPU（见 exportRayTracedToPng），
+    // 「光追」勾选仅用于选择默认后端，并不影响 CPU 回退的可用性。
+    return renderer_ != nullptr && renderer_->gpuRayTraceAvailable();
+}
+
+void MolScene::setRenderScale(float s) {
+    const float v = std::clamp(s, 0.35f, 2.0f);
+    if (std::abs(v - renderScale_) < 1e-4f) {
+        return;
+    }
+    renderScale_ = v;
+    dirty_ = true;   // 触发 FBO resize
+}
+
+void MolScene::setMeshQuality(int detail, int segments) {
+    const int d = std::clamp(detail, 1, 4);
+    const int seg = std::clamp(segments, 8, 64);
+    if (d == meshDetail_ && seg == meshSegments_) {
+        return;
+    }
+    meshDetail_ = d;
+    meshSegments_ = seg;
+    if (offscreen_) {
+        offscreen_->setMeshQuality(d, seg);
+    }
+    markDirty();
 }
 
 } // namespace moleculens::app

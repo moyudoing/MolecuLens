@@ -19,8 +19,17 @@ function(moleculens_add_shader target src out_header)
     #（主方案 §12 风险"UBO 字段与 GLSL 布局错位"由此从根上消除）。
     get_filename_component(_src_dir "${src}" DIRECTORY)
 
+    # 光追阶段（.rgen/.rmiss/.rchit/.rahit/.rint/.rcall）必须 --target-env
+    # vulkan1.2（SPIR-V 1.5）：光追扩展要求 SPIR-V >= 1.4，glslang 默认
+    # vulkan1.0 只产 1.0；栅格化着色器保持原命令不变（产物逐字节不变）。
+    string(TOLOWER "${src}" _src_lower)
+    set(_target_env_args "")
+    if(_src_lower MATCHES "\\.(rgen|rmiss|rchit|rahit|rint|rcall)$")
+        set(_target_env_args --target-env vulkan1.2)
+    endif()
+
     execute_process(
-        COMMAND ${GLSLANG_VALIDATOR} -V -I${_src_dir} ${src} -o ${out_header}.spv
+        COMMAND ${GLSLANG_VALIDATOR} -V ${_target_env_args} -I${_src_dir} ${src} -o ${out_header}.spv
         RESULT_VARIABLE _glsl_result
         OUTPUT_VARIABLE _glsl_out ERROR_VARIABLE _glsl_out)
     if(NOT _glsl_result EQUAL 0)

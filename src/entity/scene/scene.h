@@ -120,6 +120,97 @@ inline void unwrapAroundFirst(glm::vec3* pts, size_t count,
     }
 }
 
+// 按"分子连通分量"补齐整段坐标（原地）。unwraproot[i] 是原子 i 所属分量的
+// 最小下标（registerStructure 预计算）。每个分量以自己下标最小的原子为锚，
+// 只对分量内原子做最小镜像；无键原子保持原位。相比全体系单锚，跨盒边界的
+// 分子不会被整体拉成长棍。
+inline void unwrapByComponents(glm::vec3* pts, size_t count,
+                               const std::vector<uint32_t>& unwrapRoot,
+                               const std::array<float, 9>& box) {
+    if (pts == nullptr || count == 0 || unwrapRoot.size() < count) {
+        return;
+    }
+    const float L[3] = {box[0], box[4], box[8]};
+    if (L[0] <= 1e-3f && L[1] <= 1e-3f && L[2] <= 1e-3f) {
+        return;
+    }
+    std::vector<glm::vec3> anchors(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (unwrapRoot[i] == i) {
+            anchors[i] = pts[i];
+        }
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const uint32_t root = unwrapRoot[i];
+        if (root != i && root < count) {
+            pts[i] = anchors[root] + minimumImageDelta(pts[i] - anchors[root], L);
+        }
+    }
+}
+
+// 沿键 BFS 的逐分子 PBC 补齐。以每个连通分量的最小下标为根，子原子取
+// 相对**父原子**的最小镜像（而非相对根），每条键都保持相邻镜像。对长链、
+// 环状分子比"全体向根取镜像"稳健：后者在链跨越半个盒子时仍可能把某个
+// 原子选到错误镜像，形成一根贯穿盒子的长键。
+// 无键原子（adj 为空）退化为保持原位，与旧行为一致。
+inline void unwrapByComponents(const glm::vec3* ptsIn, glm::vec3* pts, size_t count,
+                               const std::vector<uint32_t>& unwrapRoot,
+                               const std::vector<uint32_t>& adjOffset,
+                               const std::vector<uint32_t>& adj,
+                               const std::array<float, 9>& box) {
+    if (pts == nullptr || count == 0 || unwrapRoot.size() < count) {
+        return;
+    }
+    const float L[3] = {box[0], box[4], box[8]};
+    if (L[0] <= 1e-3f && L[1] <= 1e-3f && L[2] <= 1e-3f) {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        pts[i] = ptsIn[i];
+    }
+    if (adjOffset.size() < count + 1 || adj.empty()) {
+        // 没有拓扑：按分量根做一次最小镜像兜底。
+        std::vector<glm::vec3> anchors(count);
+        for (size_t i = 0; i < count; ++i) {
+            if (unwrapRoot[i] == i) {
+                anchors[i] = pts[i];
+            }
+        }
+        for (size_t i = 0; i < count; ++i) {
+            const uint32_t root = unwrapRoot[i];
+            if (root != i && root < count) {
+                pts[i] = anchors[root] + minimumImageDelta(pts[i] - anchors[root], L);
+            }
+        }
+        return;
+    }
+    std::vector<uint8_t> visited(count, 0);
+    std::vector<uint32_t> queue;
+    queue.reserve(count);
+    for (size_t start = 0; start < count; ++start) {
+        if (unwrapRoot[start] != start || visited[start]) {
+            continue;
+        }
+        queue.clear();
+        queue.push_back(static_cast<uint32_t>(start));
+        visited[start] = 1;
+        for (size_t qi = 0; qi < queue.size(); ++qi) {
+            const uint32_t parent = queue[qi];
+            const uint32_t begin = adjOffset[parent];
+            const uint32_t end = adjOffset[parent + 1];
+            for (uint32_t ei = begin; ei < end; ++ei) {
+                const uint32_t child = adj[ei];
+                if (child >= count || visited[child]) {
+                    continue;
+                }
+                visited[child] = 1;
+                pts[child] = pts[parent] + minimumImageDelta(pts[child] - pts[parent], L);
+                queue.push_back(child);
+            }
+        }
+    }
+}
+
 // —— 轨迹（主方案 §4.3 / §8.1）——
 struct Trajectory {
     std::vector<Timestep> frames;        // 各帧坐标（共享拓扑）

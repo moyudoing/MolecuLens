@@ -43,7 +43,9 @@ public:
         uint32_t dpi = 300;
         std::string outPath;
         // —— CPU 光线追踪（一.7）——
-        bool rayTraced = false;    // 渲染方式：false=光栅化 / true=光线追踪
+        // 渲染方式：false=光栅化 / true=光线追踪。默认开启光追（仅用于图片导出，
+        // 视口交互始终光栅化）；当前后端为 CPU 光追，GPU RT 扩展查询见 MolScene。
+        bool rayTraced = true;
         int rtSamples = 4;         // RT 每像素子采样数（1-8）
         // —— 抗锯齿（QS.3：光栅化用 SSAA 超采样降采样；RT 用 rtSamples）——
         // 默认 2x（不是 1x）：1x 等于没有抗锯齿，导出图在斜边上全是阶梯。
@@ -90,7 +92,7 @@ private:
     ImageExportOptions imgOpts_{};
     AnimationExportOptions animOpts_{};
     int sizeModeIdx_ = 0;           // 尺寸模式下拉下标
-    int renderModeIdx_ = 0;         // 渲染方式下拉下标
+    int renderModeIdx_ = 1;         // 渲染方式下拉下标（默认光追导出）
     int presetIdx_ = 2;             // 预设分辨率下标（默认 4K）
     char fileName_[256] = "image.png";
     char animPath_[512] = "export/anim";

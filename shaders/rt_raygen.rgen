@@ -1,0 +1,75 @@
+// =============================================================================
+// MolecuLens · shaders/rt_raygen.rgen —— GPU 光追主光线（每像素一条/子采样）
+// 规格来源：任务 E（GPU 光追模块）；与 CPU ray_tracer.cpp 的光线生成逐式对齐
+// 说明：像素中心 + 子采样抖动 → 方向；沿光线做"最近命中 + 透明层合成"，
+//       最后线性 → sRGB（1/2.2）写入 rgba8 存储图像（行序 top→bottom）。
+// =============================================================================
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "rt_common.glsl"
+
+// 主光线 + 半透明层合成（front-to-back，与 CPU traceColor 等价）：
+//   前层 α 与后层 (1-α) 混合，最多 maxLayers 层（任务要求 ≤4）。
+vec3 rtTracePath(vec3 dir, uint salt) {
+    vec3 acc = vec3(0.0);
+    float transmit = 1.0;
+    vec3 origin = ubo.camPos.xyz;
+    const int maxLayers = max(1, int(ubo.counts.w + 0.5));
+    const int maxBounces = int(max(0.0, ubo.weights.z + 0.5));
+    for (int layer = 0; layer < maxLayers; ++layer) {
+        gPayload.hit = 0;
+        gPayload.color = vec3(0.0);
+        gPayload.alpha = 1.0;
+        gPayload.t = -1.0;
+        gPayload.depth = maxBounces;
+        gPayload.seed = salt;
+        traceRayEXT(uTopLevelAS, gl_RayFlagsOpaqueEXT, 0xFF, 0, 0, 0,
+                    origin, 0.0, dir, 1e30, 0);
+        if (gPayload.hit == 0) {
+            acc += transmit * ubo.bgColor.rgb;
+            return acc;
+        }
+        acc += transmit * gPayload.color * gPayload.alpha;
+        transmit *= (1.0 - gPayload.alpha);
+        if (gPayload.alpha >= 0.999 || transmit <= 1e-4) {
+            return acc;
+        }
+        // 沿同一方向推进一步，避免再次命中同一表面（CPU: kEps*16）
+        origin = gPayload.hitPos + dir * (kRtEps * 16.0);
+    }
+    return acc;   // 层数用尽：不再取背景（与 CPU depth<=0 一致）
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+    const uint W = uint(ubo.camUp.w + 0.5);
+    const uint H = uint(ubo.weights.w + 0.5);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= int(W) || pixel.y >= int(H)) {
+        return;
+    }
+    const int spp = max(1, int(ubo.camRight.w + 0.5));
+    const vec3 fwd = normalize(ubo.camForward.xyz);
+    const vec3 right = normalize(ubo.camRight.xyz);
+    const vec3 up = normalize(ubo.camUp.xyz);
+    const float tanHalf = ubo.camPos.w;
+    const float px = tanHalf * ubo.camForward.w;   // aspect
+    const float py = tanHalf;
+
+    vec3 acc = vec3(0.0);
+    for (int s = 0; s < spp; ++s) {
+        const uint ux = uint(pixel.x);
+        const uint uy = uint(pixel.y);
+        const float jx = spp > 1 ? rtHashUnit(ux * 97u + uint(s), uy * 131u) - 0.5 : 0.0;
+        const float jy = spp > 1 ? rtHashUnit(ux * 151u, uy * 89u + uint(s)) - 0.5 : 0.0;
+        const float u = ((float(pixel.x) + 0.5 + jx) / float(W)) * 2.0 - 1.0;
+        const float v = 1.0 - ((float(pixel.y) + 0.5 + jy) / float(H)) * 2.0;
+        const vec3 dir = normalize(fwd + right * (u * px) + up * (v * py));
+        const uint salt = (ux * 73856093u) ^ (uy * 19349663u) ^
+                          (uint(s) * 83492791u);
+        acc += rtTracePath(dir, salt);
+    }
+    acc /= float(spp);
+    // 线性 → sRGB 近似（与 CPU 的 pow(1/2.2) 相同；再由 UNORM 量化到 8-bit）
+    const vec3 srgb = pow(max(acc, vec3(0.0)), vec3(1.0 / 2.2));
+    imageStore(uOutImage, pixel, vec4(srgb, 1.0));
+}

@@ -22,6 +22,7 @@
 | 光追观感（表面不透明度、AO/GGX、降噪） | 未做；BVH 与 RT LOD 已完成 | ROADMAP §2.6、ISSUES I-25 |
 | 逐实例 QuickSurf 缓存 | 实现过、因相位差回退，待决策 | ISSUES I-17 |
 | i18n 覆盖率 | **约 428 条中文未收录**（2026-10-22 实测：408 条 + 预览 20 条） | 本文 §2 |
+| Python 接口 | 数据层 + 绘图全流程封装已落地（`python/`，54 例 pytest，含真实 CLI 渲染/动画/导出）；轨迹逐帧坐标、场景编辑与进程内视口未做 | [`python/README.md`](python/README.md) |
 | 其它缺陷 | 18 条（S2 6 / S3 12） | ISSUES 清单 |
 
 ---

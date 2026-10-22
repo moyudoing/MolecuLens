@@ -238,7 +238,8 @@ int renderCommand(CLI::App& app) {
     static int width = 1920, height = 1080;
     static bool systemSurface = false;   // --system-surface：整体系合并为一个表面（G5）
     static int meshDetail = 3;      // 球体细分档（1=80 … 4=5120 面）
-static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图（P1 原型）
+static int rtSpp = 0;                  // --rt：>0 时改用光追出图（P1 原型）
+    static std::string rtBackend = "auto";   // --rt-backend cpu|gpu|auto
     static int meshSegments = 24;   // 键圆柱截面段数
     static float zoom = 1.0f;       // 相机拉近倍数（用于验证视锥剔除）
     static std::string camera = "front";
@@ -313,7 +314,11 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
         ->default_val(24);
     sub->add_option("--zoom", zoom, "相机拉近倍数（>1 放大；用于验证视锥剔除）")
         ->default_val(1.0f);
-    sub->add_option("--rt", rtSpp, "CPU 光追采样数（>0 时改用光追出图；1 = 单样本，4 = 抗锯齿）")->default_val(0);
+    sub->add_option("--rt", rtSpp, "光追采样数（>0 时改用光追出图；1 = 单样本，4 = 抗锯齿）")->default_val(0);
+    sub->add_option("--rt-backend", rtBackend,
+                    "光追后端：cpu = CPU 光线追踪；gpu = Vulkan KHR 硬件光追（需 RT 设备）；"
+                    "auto = 有 RT 设备用 GPU，否则 CPU")
+        ->default_val("auto");
     sub->add_option("--camera", camera, "相机预设 (front/side/top)");
     sub->add_option("--scale", scale, "超采样倍数（SSAA）")->default_val(1);
     sub->add_option("--msaa", msaa, "MSAA（离屏恒 1x，保留参数）")->default_val(4);
@@ -385,6 +390,11 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
         }
         if (depth != 8 && depth != 16) {
             spdlog::error("[cli] render: --depth {} 非法（仅 8 或 16）", depth);
+            std::exit(3);
+        }
+        if (rtBackend != "cpu" && rtBackend != "gpu" && rtBackend != "auto") {
+            spdlog::error("[cli] render: --rt-backend '{}' 非法（cpu/gpu/auto）",
+                          rtBackend);
             std::exit(3);
         }
 
@@ -747,16 +757,45 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
             }
             std::vector<uint8_t> rgba;
             const auto t0 = std::chrono::steady_clock::now();
-            if (!engine::rayTrace(rtScene, rtc, rtl, bgColor, rtSpp, rgba)) {
-                spdlog::error("[cli] render: 光追失败");
-                std::exit(3);
+            // 后端选择：cpu = 强制 CPU；gpu = 强制 GPU（不可用即报错）；
+            // auto = 有 RT 设备用 GPU，否则 CPU（无 RT 机器自动回退）。
+            bool useGpu = false;
+            if (rtBackend == "gpu") {
+                if (!renderer.gpuRayTraceAvailable()) {
+                    spdlog::error(
+                        "[cli] render: --rt-backend gpu 但当前设备不可用硬件光追");
+                    std::exit(3);
+                }
+                useGpu = true;
+            } else if (rtBackend == "auto") {
+                useGpu = renderer.gpuRayTraceAvailable();
+            }
+            bool traced = false;
+            bool usedGpu = false;
+            if (useGpu) {
+                traced = renderer.gpuRayTrace(rtScene, rtc, rtl, bgColor, rtSpp, rgba);
+                usedGpu = traced;
+                if (!traced) {
+                    if (rtBackend == "gpu") {
+                        spdlog::error("[cli] render: GPU 光追渲染失败");
+                        std::exit(3);
+                    }
+                    spdlog::warn("[cli] render: GPU 光追失败 -> 回退 CPU 光追");
+                }
+            }
+            if (!traced) {
+                if (!engine::rayTrace(rtScene, rtc, rtl, bgColor, rtSpp, rgba)) {
+                    spdlog::error("[cli] render: 光追失败");
+                    std::exit(3);
+                }
             }
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::steady_clock::now() - t0)
                                 .count();
-            spdlog::info("[cli] rt: {} 球 + {} 胶囊 + {} 三角, {} spp, {}x{}, {} ms（场景解包 {} ms）",
+            spdlog::info("[cli] rt: {} 球 + {} 胶囊 + {} 三角, {} spp, {}x{}, {} ms（场景解包 {} ms, backend={}）",
                          rtScene.spheres.size(), rtScene.cylinders.size(),
-                         rtScene.triangles.size(), rtSpp, width, height, ms, sceneMs);
+                         rtScene.triangles.size(), rtSpp, width, height, ms, sceneMs,
+                         usedGpu ? "gpu" : "cpu");
             if (!engine::writePng(out, rtc.width, rtc.height, rgba)) {
                 spdlog::error("[cli] render: PNG 写出失败: {}", out);
                 std::exit(3);

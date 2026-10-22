@@ -33,6 +33,12 @@ void drawStick(const RepContext& ctx, SceneCommandList& out) {
             !(*ctx.mask)[ga] || !(*ctx.mask)[gb]) {
             continue;
         }
+        {
+            const glm::vec3 bd = pos[gb] - pos[ga];
+            if (glm::dot(bd, bd) > 3.2f * 3.2f) {
+                continue;   // 跨盒伪键
+            }
+        }
         glm::vec3 s, e;
         // 棍状两端无需内缩（原子端帽可隐）；简单做法：端面缩 0.25×cylR 防穿
         const glm::vec3 dir = glm::normalize(pos[gb] - pos[ga]);

@@ -57,6 +57,15 @@ void drawBallAndStick(const RepContext& ctx, SceneCommandList& out) {
             !atomSelected[bnd.a] || !atomSelected[bnd.b]) {
             continue;
         }
+        // 安全网：PBC 补齐在环状分子/三斜盒上仍可能留下一条跨盒长键。把明显
+        // 超出共价键范围（> 3.2 Å）的键直接跳过，避免视口出现贯穿整个盒子的
+        // "长棍"；原子本身仍按补齐后的坐标绘制。
+        const glm::vec3& pa = pos[ctx.globalAtomBase + bnd.a];
+        const glm::vec3& pb = pos[ctx.globalAtomBase + bnd.b];
+        const glm::vec3 bd = pb - pa;
+        if (glm::dot(bd, bd) > 3.2f * 3.2f) {
+            continue;
+        }
         glm::vec3 s, e;
         BondRenderParams::computeEndpoints(pos[ctx.globalAtomBase + bnd.a],
                                            pos[ctx.globalAtomBase + bnd.b],

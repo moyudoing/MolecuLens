@@ -4,6 +4,7 @@
 
 #include "engine/serialize/scene_bridge.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -315,6 +316,15 @@ SceneSnapshot makeSnapshot(const SnapshotSource& in) {
             o.metallic = r.metallic;
             o.roughness = r.roughness;
             o.opacity = r.opacity;
+            // v2.19：表面绘制模式 + 实例级类型范围（.mlscene 可选键）
+            o.surfaceDrawMode = std::min<uint8_t>(r.surfaceDrawMode, 2u);
+            o.rangeMode = std::min<uint8_t>(
+                r.rangeMode,
+                static_cast<uint8_t>(Representation::InstanceRangeMode::Stride));
+            o.rangeType = r.rangeType;
+            o.rangeFraction = r.rangeFraction;
+            o.rangeStride = r.rangeStride;
+            o.rangeOffset = r.rangeOffset;
             snap.representations.push_back(std::move(o));
         }
     }
@@ -415,6 +425,16 @@ void applySnapshot(const SceneSnapshot& snap, const RestoreTarget& out) {
             rep.metallic = r.metallic;
             rep.roughness = r.roughness;
             rep.opacity = r.opacity;
+            // v2.19：表面绘制模式 + 实例级类型范围；快照缺字段时取结构默认值
+            // （0 / 全部 / 1.0 / 步长 1），旧 .mlscene 载入行为不变。
+            rep.surfaceDrawMode = std::min<uint8_t>(r.surfaceDrawMode, 2u);
+            rep.rangeMode = std::min<uint8_t>(
+                r.rangeMode,
+                static_cast<uint8_t>(Representation::InstanceRangeMode::Stride));
+            rep.rangeType = r.rangeType;
+            rep.rangeFraction = std::clamp(r.rangeFraction, 0.0f, 1.0f);
+            rep.rangeStride = std::max(1u, r.rangeStride);
+            rep.rangeOffset = r.rangeOffset;
             // 材质名 → 预设下标；名字未知/为空（自定义或旧文件）→ -1，
             // 数值已由上面逐字段恢复，观感不变，下拉显示"自定义"
             rep.materialPreset = engine::materialPresetIndexByName(

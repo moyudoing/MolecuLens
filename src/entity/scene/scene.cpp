@@ -51,7 +51,10 @@ void fillInstanceSegment(SceneStructure& scene, const MoleculeInstance& mi,
     }
     // 补齐跨盒子边界的分子（与 applyTrajectoryFrame 同一处理与同一理由）
     if (frame != nullptr) {
-        unwrapAroundFirst(out.data() + base, n, frame->box);
+        const auto& st = scene.structures()[mi.structureIndex];
+        unwrapByComponents(out.data() + base, out.data() + base, n,
+                           st.unwrapRoot, st.unwrapAdjOffset, st.unwrapAdj,
+                           frame->box);
     }
     for (size_t i = 0; i < n; ++i) {
         out[base + i] = glm::vec3(m * glm::vec4(out[base + i], 1.0f));
@@ -67,7 +70,64 @@ uint32_t SceneStructure::registerStructure(const MoleculeStructure& ms) {
     }
     const uint32_t index = static_cast<uint32_t>(structuresPool_.size());
     structuresPool_.push_back(ms);
-    structureIndex_.emplace(ms.key, index);
+    MoleculeStructure& stored = structuresPool_.back();
+
+    // 预计算"按键连通的分子分量"：每个原子的根 = 分量内最小原子下标。
+    // 无键原子自成一类；bonds 的 a/b 已在解析阶段保证 < 原子数。
+    const size_t n = stored.elements.size();
+    stored.unwrapRoot.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        stored.unwrapRoot[i] = static_cast<uint32_t>(i);
+    }
+    auto findRoot = [&stored](uint32_t x) {
+        while (stored.unwrapRoot[x] != x) {
+            stored.unwrapRoot[x] = stored.unwrapRoot[stored.unwrapRoot[x]];
+            x = stored.unwrapRoot[x];
+        }
+        return x;
+    };
+    for (const Bond& b : stored.bonds) {
+        if (b.a >= n || b.b >= n) {
+            continue;
+        }
+        const uint32_t ra = findRoot(b.a);
+        const uint32_t rb = findRoot(b.b);
+        if (ra == rb) {
+            continue;
+        }
+        // 根取较小下标，保证 unwrapRoot[i] == i 是分量锚点。
+        if (ra < rb) {
+            stored.unwrapRoot[rb] = ra;
+        } else {
+            stored.unwrapRoot[ra] = rb;
+        }
+    }
+    for (size_t i = 0; i < n; ++i) {
+        stored.unwrapRoot[i] = findRoot(static_cast<uint32_t>(i));
+    }
+
+    // 键邻接 CSR（无向，两个方向都存）。逐帧 unwrap 沿键 BFS 传播镜像，
+    // 保证每条键的两个端点处于相邻镜像，长链/环也不会被拆到盒子两侧。
+    stored.unwrapAdjOffset.assign(n + 1, 0);
+    for (const Bond& b : stored.bonds) {
+        if (b.a < n && b.b < n) {
+            ++stored.unwrapAdjOffset[b.a + 1];
+            ++stored.unwrapAdjOffset[b.b + 1];
+        }
+    }
+    for (size_t i = 1; i <= n; ++i) {
+        stored.unwrapAdjOffset[i] += stored.unwrapAdjOffset[i - 1];
+    }
+    stored.unwrapAdj.assign(stored.unwrapAdjOffset[n], 0);
+    std::vector<uint32_t> cursor = stored.unwrapAdjOffset;
+    for (const Bond& b : stored.bonds) {
+        if (b.a < n && b.b < n) {
+            stored.unwrapAdj[cursor[b.a]++] = b.b;
+            stored.unwrapAdj[cursor[b.b]++] = b.a;
+        }
+    }
+
+    structureIndex_.emplace(stored.key, index);
     return index;
 }
 
@@ -340,7 +400,8 @@ bool SceneStructure::applyTrajectoryFrame(uint32_t instanceIndex, uint64_t frame
     uint32_t base = 0;
     for (uint32_t i = 0; i < instances_.size(); ++i) {
         const auto& mi = instances_[i];
-        const size_t n = structuresPool_[mi.structureIndex].elements.size();
+        const auto& st = structuresPool_[mi.structureIndex];
+        const size_t n = st.elements.size();
         const bool sharedTraj = mi.trajectory.get() == shared;
         // 尺寸校验：帧坐标长度不足以覆盖本实例的切片时拒绝写入。
         // （多帧 PDB 曾因"拓扑多采了其它 model 的原子、帧只有 1/3 长度"而静默
@@ -357,8 +418,9 @@ bool SceneStructure::applyTrajectoryFrame(uint32_t instanceIndex, uint64_t frame
             // 补齐跨盒子边界的分子**再**做位姿变换：轨迹文件（XTC/DCD）的坐标同样是
             // wrapped 的，若不补齐，播放到该帧时分子又会被画成长棍（结构文件补齐了、
             // 逐帧坐标没补齐 = 只有首帧正常，播放后立刻变形）。
-            unwrapAroundFirst(world.data(), world.size(),
-                              inst.trajectory->frames[frame].box);
+            unwrapByComponents(world.data(), world.data(), world.size(), st.unwrapRoot,
+                               st.unwrapAdjOffset, st.unwrapAdj,
+                               inst.trajectory->frames[frame].box);
             for (size_t k = 0; k < n; ++k) {
                 coordsSoA_.positions[base + k] =
                     glm::vec3(m * glm::vec4(world[k], 1.0f));
@@ -382,7 +444,8 @@ bool SceneStructure::buildWorldPositionsForFrame(uint64_t frame,
     out.clear();
     out.reserve(coordsSoA_.positions.size());
     for (const auto& mi : instances_) {
-        const size_t n = structuresPool_[mi.structureIndex].elements.size();
+        const auto& st = structuresPool_[mi.structureIndex];
+        const size_t n = st.elements.size();
         const size_t base = out.size();
         out.resize(base + n, glm::vec3(0.0f));
 
@@ -399,7 +462,8 @@ bool SceneStructure::buildWorldPositionsForFrame(uint64_t frame,
                     out[base + k] = ts->positions[src];
                 }
             }
-            unwrapAroundFirst(out.data() + base, n, ts->box);
+            unwrapByComponents(out.data() + base, out.data() + base, n,
+                               st.unwrapRoot, st.unwrapAdjOffset, st.unwrapAdj, ts->box);
         }
         const glm::mat4 m = instanceWorldMatrix(*this, mi);
         for (size_t k = 0; k < n; ++k) {

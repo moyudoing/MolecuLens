@@ -89,6 +89,30 @@ public:
     [[nodiscard]] bool queryVramUsage(VramUsage* out) const;
     // 扩展是否已启用（未启用时 queryVramUsage 恒返回 false）
     [[nodiscard]] bool hasMemoryBudget() const { return memoryBudgetEnabled_; }
+    // 设备是否暴露 Vulkan 硬件光追扩展（acceleration structure + ray tracing
+    // pipeline）。仅表示"硬件/驱动支持"，不代表本进程已启用 —— 真正可用的判据
+    // 是 rayTracingEnabled()（GPU 光追后端必须看它）。
+    [[nodiscard]] bool supportsGpuRayTracing() const { return gpuRayTracingAvailable_; }
+
+    // —— 硬件光追（VK_KHR_acceleration_structure + ray_tracing_pipeline）——
+    // enable 成功后才会为 true；创建失败时会退回"无 RT"设备（不崩溃、栅格路径
+    // 行为不变）。所有 RT 函数指针只在 enabled 时调用。
+    [[nodiscard]] bool rayTracingEnabled() const { return rtEnabled_; }
+    // 光追属性（SBT 句柄大小/对齐、最大递归深度、AS 上限）。未启用时全 0。
+    struct RayTracingProperties {
+        uint32_t shaderGroupHandleSize = 0;
+        uint32_t shaderGroupBaseAlignment = 0;
+        uint32_t shaderGroupHandleAlignment = 0;
+        uint32_t maxRayRecursionDepth = 0;
+        uint32_t maxGeometryCount = 0;
+        uint32_t maxInstanceCount = 0;
+        uint32_t maxPrimitiveCount = 0;
+        uint32_t minScratchOffsetAlignment = 0;   // 加速结构 build scratch 对齐
+        VkFormat accelerationStructureFormat = VK_FORMAT_UNDEFINED;
+    };
+    [[nodiscard]] const RayTracingProperties& rayTracingProperties() const {
+        return rtProps_;
+    }
 
     VkCommandPool commandPool() const { return commandPool_; }
     // 每帧命令缓冲
@@ -138,6 +162,7 @@ private:
     WindowHandle window_ = nullptr;
     RenderConfig config_;
     bool validationEnabled_ = false;
+    VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;   // 校验层回调
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
@@ -150,6 +175,9 @@ private:
     uint32_t presentFamily_ = 0;
     VkSampleCountFlagBits msaaSamples_ = VK_SAMPLE_COUNT_1_BIT;
     bool memoryBudgetEnabled_ = false;   // VK_EXT_memory_budget 是否已启用
+    bool gpuRayTracingAvailable_ = false; // 设备扩展支持硬件光追（未启用管线）
+    bool rtEnabled_ = false;             // RT 扩展 + feature 已在本设备启用
+    RayTracingProperties rtProps_{};     // RT 属性（未启用时全 0）
 
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     std::vector<VkImage> swapchainImages_;

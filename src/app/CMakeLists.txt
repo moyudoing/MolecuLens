@@ -43,16 +43,10 @@ else()
     message(FATAL_ERROR "imgui backends source missing at ${_imgui_backends}")
 endif()
 
-# Python 绑定与 ZMQ RPC：规格已定（主方案 §10/§13）但源码尚未落地——
-# 此前这两个分支直接引用 python/module/pybind_module.cpp 与 rpc/server/rpc_server.cpp，
-# 而这两个文件在磁盘上并不存在 → 一旦开启 option 必然配置失败且原因难以定位。
-# 故改为显式报错，把"未实现"讲清楚；实现落地后再接回源文件。
-if(MOLECULENS_BUILD_PYTHON)
-    message(FATAL_ERROR
-        "MOLECULENS_BUILD_PYTHON=ON 暂不可用：Python 绑定源码（python/module/）尚未落地。"
-        " 需先实现绑定模块后再开启该选项。")
-endif()
-
+# Python 绑定已落地在仓库根目录 python/（pybind11，顶层 CMake 在
+# MOLECULENS_BUILD_PYTHON=ON 时 add_subdirectory(python)），本可执行目标不再
+# 承担绑定编译。ZMQ RPC 规格已定（主方案 §10/§13）但源码尚未落地——开启时显式
+# 报错，避免引用不存在的 rpc/server/rpc_server.cpp 后在链接期才失败。
 if(MOLECULENS_ENABLE_ZMQ)
     message(FATAL_ERROR
         "MOLECULENS_ENABLE_ZMQ=ON 暂不可用：RPC 服务源码（rpc/server/、rpc/methods/）尚未落地。"

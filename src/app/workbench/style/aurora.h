@@ -29,8 +29,12 @@ struct Palette {
     ImVec4 textFaint;    // 极弱（禁用、提示）
     ImVec4 accent;       // 主色（蓝）
     ImVec4 accentHi;     // 主色高亮（hover/滑块）
-    ImVec4 accentSoft;   // 主色淡底（选中态背景）
+    ImVec4 accentSoft;   // 主色淡底（hover/弱选中）
     ImVec4 onAccent;     // 主色上的文字
+    // v2.14：选中态固定高饱和蓝 + 白前景。旧实现用 16% 主色的 accentSoft，
+    // 在浅色主题或粉色自定义主色下几乎看不见；导航、列表行、分段按钮统一走这两个字段。
+    ImVec4 selection;
+    ImVec4 onSelection;
     ImVec4 ok, warn, danger;
     ImVec4 gradTop, gradBottom;   // 视口空背景渐变
     bool dark = false;
@@ -64,6 +68,11 @@ inline constexpr float kInspectorMax = 760.0f;
 inline constexpr float kQuickBar = 46.0f;
 inline constexpr float kStatusBar = 26.0f;
 inline constexpr float kPad = 12.0f;
+// 左侧工具栏（v2.17）：夹在左导航与视口之间的一条竖向工具条。
+// 56 px = 44 px 按钮 + 左右各 6 px 内边距；收起后宽度归零，视口拿回这 56+8 px。
+inline constexpr float kToolShelf = 56.0f;
+// 工具栏按钮尺寸（竖排；高度由可用高度自适应，见 Workbench::renderToolShelf）
+inline constexpr float kToolButton = 44.0f;
 } // namespace metrics
 
 ImU32 col(const ImVec4& c);
@@ -110,6 +119,36 @@ void statChip(const char* label, const char* value);
 
 // 视口悬浮工具按钮（小号、半透明底）
 bool toolButton(const char* label, const char* tip = nullptr);
+
+// —— 左侧工具栏（v2.17）——
+// 图标同样用 ImDrawList 矢量绘制（与 navIcon 同一取舍：不引入图标字体/图片，
+// 任意 DPI 都清晰）。新增工具只需在枚举末尾加一项 + 在 tool_icons.cpp 里补一个 case。
+enum class ToolIcon : int {
+    Pointer = 0,   // 浏览 / 选择（默认相机操作）
+    Ruler,         // 测量距离
+    TextLabel,     // 文字标注
+    Arrow,         // 箭头
+    Frame,         // 取景全部
+    Reset,         // 重置视角
+    Axes,          // 坐标轴方向
+    ScaleBar,      // 比例尺与尺寸
+    Box,           // 周期水盒
+    Hydrogen,      // 隐藏氢原子
+    Camera,        // 截图 / 导出
+    Sun,           // 光追预览
+    Theme,         // 浅色 / 深色
+    Trash,         // 清除测量
+    Count,
+};
+
+// 画一个工具栏图标：center = 图标中心，radius = 半个外框边长（约 10–12 px）。
+void toolIcon(ImDrawList* dl, ToolIcon icon, const ImVec2& center, float radius, ImU32 tint);
+
+// 工具栏按钮（竖向方形图标按钮）。
+//   active = 选中；toggle = true 时按"开关"样式画（淡主色底 + 主色图标），
+//   否则按"互斥模式"样式画（主色实底 + 白图标 + 左侧白条，与 navButton 一致）。
+bool shelfButton(ToolIcon icon, bool active, bool toggle, const ImVec2& size,
+                 const char* tip = nullptr);
 
 // 表单行：标签在上、控件在下（右检查器宽度有限，横排会挤压控件）
 bool sliderRow(const char* label, float* value, float vmin, float vmax,

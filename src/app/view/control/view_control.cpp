@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <thread>
 
@@ -60,6 +61,9 @@
 namespace moleculens::app {
 
 namespace {
+
+// 定义见下方 createWindow 之前；ws.dragWindow 的 lambda 需要先看到声明。
+void beginNativeWindowDrag(GLFWwindow* window);
 
 #ifdef _WIN32
 // UTF-8 → UTF-16（Win32 W 版 API 必需）。
@@ -194,10 +198,41 @@ void persistSettingField(const std::function<void(persist::Settings&)>& mutate) 
     }
 }
 
-// 上次导出目录（会话内记忆；首次为空 → 由系统决定/当前目录）。
+// 首次导出的默认目录：用户「图片」下的 MolecuLens 子目录。
+// 旧实现让保存对话框停在进程当前目录：从开始菜单/Program Files 启动时
+// 当前目录不可写，用户一保存就报“没有权限”。写到一个确定可写的用户目录，
+// 再从那里让用户自由改路径。
+std::string defaultExportDir() {
+#ifdef _WIN32
+    const char* home = std::getenv("USERPROFILE");
+    if (home != nullptr && *home != '\0') {
+        std::filesystem::path base(home);
+        for (const char* leaf : {"Pictures", "Documents"}) {
+            std::filesystem::path dir = base / leaf / "MolecuLens";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            if (!ec && std::filesystem::is_directory(dir)) {
+                return dir.string();
+            }
+        }
+    }
+#endif
+    std::error_code ec;
+    std::filesystem::path tmp = std::filesystem::temp_directory_path(ec);
+    if (!ec) {
+        std::filesystem::path dir = tmp / "MolecuLens";
+        std::filesystem::create_directories(dir, ec);
+        if (!ec) {
+            return dir.string();
+        }
+    }
+    return {};
+}
+
+// 上次导出目录（会话内记忆；首次指向用户的图片目录，而不是进程 cwd）。
 // "导出图像"对话框下次默认定位到该目录。
 std::string& lastExportDir() {
-    static std::string dir;
+    static std::string dir = defaultExportDir();
     return dir;
 }
 
@@ -224,7 +259,16 @@ std::string ViewControl::saveFileDialogEx(const char* defaultName, const char* f
     // 否则中文/特殊字符路径下另存为同样会出错（用户可能分不清"打开"和"保存"哪个坏了）。
     const std::wstring filterW = widenUtf8(filter != nullptr ? filter : "");
     const std::wstring defExtW = widenUtf8(defExt != nullptr ? defExt : "");
-    std::wstring path = widenUtf8(name);
+    // 初始路径给**完整路径**而不只是文件名：否则对话框返回的可能是相对路径，
+    // 最终落盘位置取决于进程 cwd（从开始菜单启动时通常不可写）。
+    const std::string& initDir = lastExportDir();
+    std::wstring path = widenUtf8(initDir);
+    if (!path.empty()) {
+        if (path.back() != L'\\' && path.back() != L'/') {
+            path += L'\\';
+        }
+    }
+    path += widenUtf8(name);
     path.resize(kDialogPathChars, L'\0');
 
     OPENFILENAMEW ofn{};
@@ -239,7 +283,6 @@ std::string ViewControl::saveFileDialogEx(const char* defaultName, const char* f
     ofn.Flags = OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST |
                 OFN_NOCHANGEDIR | OFN_HIDEREADONLY;
     ofn.nFilterIndex = 1;
-    const std::string& initDir = lastExportDir();
     const std::wstring initDirW = widenUtf8(initDir);
     ofn.lpstrInitialDir = initDirW.empty() ? nullptr : initDirW.c_str();
 
@@ -416,11 +459,21 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
 }
 
 void ViewControl::initWorkbench() {
+    // 多视图容器先装配（工作台渲染时会直接调用它）：
+    // 主视图复用既有 molScene_/renderer_/camera_，副视图由 MultiView 自建。
+    multiView_.init(vk_, renderer_, svc_ != nullptr ? svc_->scene : nullptr,
+                    &molScene_, camera_);
+    multiView_.setOpenFileHandler(
+        [this](int pane) { workbench_.openFileDialogForPane(pane); });
+    multiView_.setNotifyHandler(
+        [this](const std::string& text) { workbench_.notify(text); });
+
     WorkbenchServices ws;
     ws.vk = vk_;
     ws.renderer = renderer_;
     ws.data = dataMgr_;
     ws.viewport = &molScene_;
+    ws.multiView = &multiView_;
     ws.scene = svc_ != nullptr ? svc_->scene : nullptr;
     ws.sceneCtl = sceneCtl_;
     ws.renderCtl = renderCtl_;
@@ -433,11 +486,9 @@ void ViewControl::initWorkbench() {
     ws.minimizeWindow = [this]() { glfwIconifyWindow(window_); };
     ws.toggleMaximize = [this]() { this->toggleMaximize(); };
     ws.isMaximized = [this]() { return windowIsMaximized(); };
-    ws.dragWindow = [this](float dx, float dy) {
-        int wx = 0;
-        int wy = 0;
-        glfwGetWindowPos(window_, &wx, &wy);
-        glfwSetWindowPos(window_, wx + static_cast<int>(dx), wy + static_cast<int>(dy));
+    ws.dragWindow = [this]() {
+        // 只在“开始拖动”的帧调用一次：交给系统移动循环，松手后返回。
+        beginNativeWindowDrag(window_);
     };
     ws.dlgOpen = [](const char* filter, const char* defExt) {
         return ViewControl::openFileDialogEx(filter, defExt);
@@ -469,6 +520,9 @@ void ViewControl::shutdown() {
         // 而池在后端 Shutdown 时销毁 —— 之后释放会操作已销毁的池。
         // （MolScene 的析构发生在 ViewControl 成员销毁阶段，晚于此处。）
         molScene_.releaseImGuiTextures();
+        // 副视图的视口纹理同样注册在 ImGui 描述符池里；池随后端 Shutdown 销毁。
+        multiView_.releaseImGuiTextures();
+        multiView_.shutdown();
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -476,6 +530,25 @@ void ViewControl::shutdown() {
         window_ = nullptr;
     }
 }
+
+namespace {
+
+// 无边框窗口的原生拖动：把标题栏按下交给 Windows 的 HTCAPTION 移动循环。
+// 不再每帧 glfwSetWindowPos —— 那样窗口在“移动 + 重绘 + 垂直同步”之间来回，
+// 会看到内容闪烁/撕裂；原生循环由 DWM 连续移动最后一帧，松手后主循环继续。
+void beginNativeWindowDrag(GLFWwindow* window) {
+#ifdef _WIN32
+    HWND hwnd = glfwGetWin32Window(window);
+    if (hwnd != nullptr) {
+        ReleaseCapture();
+        SendMessageW(hwnd, WM_NCLBUTTONDOWN, static_cast<WPARAM>(HTCAPTION), 0);
+    }
+#else
+    (void)window;
+#endif
+}
+
+}  // namespace
 
 bool ViewControl::createWindow() {
     if (!glfwInit()) {
@@ -503,6 +576,26 @@ bool ViewControl::createWindow() {
         spdlog::error("[ui] glfwCreateWindow failed");
         return false;
     }
+#ifdef _WIN32
+    // 显式设置窗口图标：资源为 app.ico（IDI_ICON1 = 1），16 px 给标题栏/
+    // 任务栏，32 px 给 Alt+Tab。这样不依赖 Explorer 对 exe 资源的旧缓存。
+    if (HWND hwnd = glfwGetWin32Window(window_)) {
+        HICON smallIcon = static_cast<HICON>(LoadImageW(
+            GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON,
+            16, 16, LR_DEFAULTCOLOR));
+        HICON bigIcon = static_cast<HICON>(LoadImageW(
+            GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1), IMAGE_ICON,
+            32, 32, LR_DEFAULTCOLOR));
+        if (smallIcon) {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL,
+                         reinterpret_cast<LPARAM>(smallIcon));
+        }
+        if (bigIcon) {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG,
+                         reinterpret_cast<LPARAM>(bigIcon));
+        }
+    }
+#endif
     return true;
 }
 
@@ -1008,31 +1101,18 @@ void ViewControl::renderMainMenuBar() {
 
         // 3) 拖拽区 —— 最后绘制，铺满"菜单之后 → 按钮之前"并接收点击；
         //    透明按钮盖在标题上不影响显示，标题区域点击同样可拖动窗口。
-        //    拖拽用"按下时光标相对窗口的偏移"定位：每帧窗口位置 =
-        //    当前窗口位置 + (光标相对位移)，光标坐标用 glfwGetCursorPos
-        //    （窗口相对坐标），避免 MouseDelta 累加在快速移动时漂移。
+        //    拖动交给 Windows 原生 HTCAPTION 移动循环见下。
         const float dragW = (btnX - row.x) - 8.0f;
         ImGui::SetCursorScreenPos(ImVec2(row.x, row.y));
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0, 0, 0, 0));
         ImGui::InvisibleButton("##drag", ImVec2(std::max(1.0f, dragW), bh));
         ImGui::PopStyleColor(2);
-        // 按下帧（item 尚未进入拖动）就记录偏移——IsItemClicked 只在点击帧为真，
-        // 若放在"拖动守卫"内会在点击帧被跳过，导致偏移恒为 0、窗口跳变。
-        static float s_grabX = 0.0f, s_grabY = 0.0f;
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-            double cx, cy;
-            glfwGetCursorPos(window_, &cx, &cy);
-            s_grabX = static_cast<float>(cx);
-            s_grabY = static_cast<float>(cy);
-        }
+        // 按下后先判断是否真的拖动（超过 ImGui 拖动阈值），避免单击/双击
+        // 进入系统移动循环；第一次拖动帧交给 Windows 原生 HTCAPTION 循环，
+        // 拖动期间不再逐帧 glfwSetWindowPos（消除窗口移动时的内容闪烁）。
         if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-            double cx, cy;
-            glfwGetCursorPos(window_, &cx, &cy);
-            int wx, wy;
-            glfwGetWindowPos(window_, &wx, &wy);
-            glfwSetWindowPos(window_, wx + static_cast<int>(cx - s_grabX),
-                             wy + static_cast<int>(cy - s_grabY));
+            beginNativeWindowDrag(window_);
         }
 
         ImGui::EndMenuBar();
