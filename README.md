@@ -1,124 +1,229 @@
-# MolecuLens · 分子视镜
+<div align="center">
 
-![MolecuLens 字标](docs/figs_v2/wordmark.png)
+<img src="docs/figs_v2/wordmark.png" width="380" alt="MolecuLens">
 
-跨平台（Windows / Linux / macOS）的分子结构与轨迹实时显示引擎，以现代化单窗口桌面应用交付。
-v2（Aurora）起，界面重构为**固定五区的模块化工作台**：标题栏 / 菜单 / 文件栏 / 左导航 + 视口 + 检查器 + 快捷条 / 状态栏。
-能力覆盖多格式载入、多表示渲染、轨迹播放（DCD / XTC / TRR）、ESP 映射表面、脚本化与插件化。
+**A molecular viewer and rendering engine for structural biology and computational chemistry.**
 
-> 架构与开发依据：`docs/_internal/blueprint.md`（v2 设计基线）+ [01-软件架构书](docs/01-软件架构书.md)（以已落地实现为准）。
+Load, inspect, style, animate and export in one window — then reproduce the exact same picture
+from the command line for a paper.
 
-## 快速开始
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#build)
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](#build)
+[![Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C.svg)](#architecture)
+[![Tests](https://img.shields.io/badge/tests-187%20cases%20%2F%20193%2C781%20assertions-brightgreen.svg)](#testing)
+[![Version](https://img.shields.io/badge/version-v2.13-orange.svg)](docs/_internal/CHANGELOG-2026-10-22-v2.13.md)
 
-```powershell
-# 前置：CMake ≥ 3.21、vcpkg、Vulkan SDK（见 DEPENDENCIES.md）
-cd F:\MolecuLens
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug `
-      -DCMAKE_TOOLCHAIN_FILE=F:\vcpkg\scripts\buildsystems\vcpkg.cmake
-cmake --build build --config Debug -j
-.\build\src\app\Debug\moleculens_app.exe data\EPI.pdb   # GUI（可传结构文件；不传则空白，Ctrl+O 打开）
-.\build\src\cli\Debug\moleculens-cli.exe info data\EPI.pdb
-# 轨迹帧出图（DCD / XTC / TRR 任一）：
-# .\build\src\cli\Release\moleculens-cli.exe render md.gro --traj md.trr --frame 500 --out f500.png
-# ESP 映射表面出图（density cube 为输入结构，--esp 为静电势 cube）：
-# .\build\src\cli\Debug\moleculens-cli.exe render density.cube --esp ESP.cube --bg white --out esp.png
-ctest --test-dir build                 # 单元测试
-```
+**[English](README.md)** · **[简体中文](README.zh-CN.md)** · [Documentation](docs/) · [Changelog](docs/_internal/)
 
-## 功能
+</div>
 
-- **多格式**：PDB / GRO / SDF / Gaussian cube（`.cube/.cub`，用于 ESP 表面）；轨迹 DCD / XTC / TRR（GROMACS 经典与 2023+ 布局）
-- **多表示（16 种）**：线状 / 棍状 / 球棍（默认）/ 空间填充 / 范德华球 / 卡通 / 改进卡通 / 丝带 / 管状 / 甘草棍 /
-  表面 / QuickSurf / 平板（辅基）/ 菱形 / 点云 / **ESP 映射表面**
-  （电子密度等值面 + 静电势逐顶点着色 + 色标条 + 极值数值标注，见 [ESP_SURFACE.md](ESP_SURFACE.md)）
-- **多输出**：实时窗口渲染、离屏视口（FBO + ImGui 贴图）、CLI 无头出图（M4）、
-  OBJ / POV / STL / .mlscene 导出
-- **轨迹动画导出**：GUI「动画导出」与 CLI `--anim` 支持 PNG 序列 / APNG / GIF / MP4 / WebM
-  （后四者经 ffmpeg 封装；可用 `MOLECULENS_FFMPEG` 指定编码器路径）
-- **现代化工作台 UI（v2 Aurora）**：固定五区布局、9 个检查器模块（显示/分子/ESP/轨道/轨迹/标注/分析/日志/设置）、
-  矢量图标左导航、取色器与材质微调、浅色/深色双主题、中英双语、加载遮罩与快捷键
-- **渲染风格（v2.2）**：环绕柔光 + `fwidth` 像素轮廓 + 背景色距离淡出；四套预设（默认/柔和/出版/鲜明），
-  出版预设一键白底+关阴影+强轮廓，GUI「设置 → 渲染风格」与 CLI `--style` 共用
-- **时间轴与轨迹**（M3 / v2.12）：时间驱动播放、选区循环、帧增量上传；播放帧率 12–60 FPS 可调，
-  导入轨迹后拖拽/滚轮缩放正常，时间轴可拖动跳帧
-- **视口叠加（v2.12）**：场景包围盒尺寸、比例尺、坐标轴方向（三个开关可分别关闭）
-- **工程完备**：Catch2 测试（最近记录 184 例 / 193,765 断言，34 文件）、spdlog 分级日志、目录粒度检查、三平台构建
+---
 
-## 项目结构
+## Why another molecular viewer?
 
-> 字体：`data/font/NotoSansSC-Medium-subset.ttf`（Noto Sans SC 子集，SIL OFL 1.1，见
-> `data/font/OFL.txt`；生成脚本 `tools/subset_font.py`）。CMake 构建时自动拷贝到可执行目录
-> `font/`；缺失时运行期回退系统字体（微软雅黑等）。
+Two workflows, one binary.
 
-```
-CMakeLists.txt / vcpkg.json / cmake/ / shaders/   # 构建与着色器（SPIR-V 内嵌）
-src/entity/     # 领域模型（元素表/结构识别码/场景/选择语言/键搜索）+ IO + 持久化
-src/engine/     # 场景图/表示/命令流/相机/拾取/Renderer + Vulkan 单后端 + 导出器
-src/app/        # 组合根/事件总线/8 控制器/工作台（workbench：style · modules · 五区布局）
-src/cli/        # 无头 CLI（render/convert/info）
-tests/          # 单元/集成测试（element/identity/selection/serializer/camera/cartoon/
-                #   scheduler/vulkan smoke/layout/trajectory dcd-xtc-trr）
-plugins/ tools/ # 插件 ABI 样例 / RPC 客户端脚本
-data/           # 演示夹具（demo.pdb）、字体
-```
+*Exploration* — a single-window workbench built for large systems: a fixed five-zone layout,
+a real-time Vulkan viewport, per-representation styling, trajectory scrubbing that stays above
+100 FPS while surface meshes are rebuilt in the background.
 
-## 里程碑
+*Reproduction* — every visible setting has a CLI flag, so a figure you tuned interactively can be
+regenerated bit-for-bit in a script or CI job: `moleculens-cli render … --rep quicksurf --style publication`.
 
-| 里程碑 | 交付 |
-|---|---|
-| M0 骨架 + UI 外壳 | 三平台编译；单窗口 + 自绘标题栏 + Dock + 日志面板；Vulkan 清屏 |
-| M1 Core + 解析 + 基础渲染 | 数据模型/StructureKey/PDB·GRO/球棍·空间填充/轨道相机/命令流 + Vulkan 全链 |
-| M2 并行 prepare + 表示系统 + 拾取 | 并行生成/表示三元组/离屏 ID 拾取/MolList·Styles·Material |
-| M3 时间轴 + 轨迹 | 轨迹/播放状态机/TimeAxis/帧增量上传 |
-| M4 Python + RPC + CLI + 导出 | pybind11/控制台/RPC/CLI/OBJ·POV 导出/PNG 截图 |
-| M5 插件体系 + 打磨 | 插件 ABI/主题/布局持久化/打包 |
-| **v2.0 Aurora** | 界面重构为固定五区工作台；9 个检查器模块；Dock 自由浮动下线（`#if 0` 保留对照） |
-| **v2.1 迭代** | 左栏矢量图标、检查器收窄、设置页五卡片、背景取色弹窗、材质微调、Surface 网格参数修复、TRR 轨迹原生读取、CLI `--surf-iso/--surf-grid/--traj/--frame` |
-| **v2.2–v2.5** | 渲染风格四预设（默认/柔和/出版/鲜明）与 CLI `--style`；标注模块（随 PNG 与 `.mlscene`）；剖切面、主题强调色与调色盘 |
-| **v2.6** | 玻璃观感（视相关玻璃壳 + 边缘吸收/掠射高光）；CLI `--material` 与 `--rep` 五段规格；「一键风格」VMD 玻璃/不透明 |
-| **v2.7–v2.8** | 表面并入显示、视口下方时间轴条、检查器 420 px 可拖动、浅色主题白底；UI 组件 P0（`segmented`/`sliderNum`/`stepper`/`badge`/`statChip`） |
-| **v2.9** | 表示表格（样式/配色/选择直改、多选批量、Del 删除）、视口分子名标注、分子列表按结构聚合 |
-| **v2.10** | 「分子」独立成模块、列表改「体系 → 结构」两级、不同导入沿 +X 并排 |
-| **v2.11** | 轨迹面板重构（文件/体系/卸载）、时间轴两行布局、统一 1 基帧号 |
+It is not a plugin of VMD, PyMOL or ChimeraX. The renderer, the representation system, the
+trajectory reader and the CPU ray tracer are all implemented in this repository (~41k lines of C++20,
+no Python or runtime dependency in the shipped app).
 
-## 开发约定
+## Gallery
 
-- 命名：类 `PascalCase`、方法 `snake_case`、成员 `lowercase_`、命名空间 `moleculens`
-- 目录粒度：每目录 `.cpp/.h ≤ 3`（`cmake/check_tree.py` 检查）
-- 依赖方向：`moleculens_entity ← moleculens_engine ← app/cli`
-- 协议头独立编译：`engine/cmd/cmd.h`（附录 F）、`persist/mlscene/mlscene.h`（附录 G）
-- 缓存纪律：重建命令流必须 `bumpSerial()`（P5）
+<table>
+<tr>
+<td width="58%"><img src="docs/figs_v2/overview.png" alt="Aurora workbench"><br>
+<sub><b>Aurora workbench</b> — nav rail, viewport, inspector and status bar; FPS, atom and molecule counts at a glance.</sub></td>
+<td width="42%"><img src="docs/figs_v2/esp-map.png" alt="ESP-mapped surface"><br>
+<sub><b>ESP-mapped surface</b> — electron-density isosurface coloured per vertex by electrostatic potential, with colourbar and min/max callouts.</sub></td>
+</tr>
+<tr>
+<td><img src="docs/figs_v2/rt_bvh_md_1080p.png" alt="CPU ray-traced water box"><br>
+<sub><b>CPU ray tracing</b> — 1080p, 4 spp, GROMACS water box, built-in BVH; no GPU required.</sub></td>
+<td><img src="docs/figs_v2/trajectory.png" alt="Trajectory frame, publication style"><br>
+<sub><b>Trajectory frame</b> — GROMACS XTC at frame 500, publication style (white background, crisp outlines).</sub></td>
+</tr>
+</table>
 
-## 文档
+More figures (materials, tessellation, quality comparisons) live in [`docs/figs_v2/`](docs/figs_v2/).
 
-| 文档 | 内容 |
+## Features
+
+| Area | What you get |
 | --- | --- |
-| [01-软件架构书](docs/01-软件架构书.md) | 分层、模块、数据流、命令流、渲染管线、ADR 与设计偏差记录 |
-| [02-功能介绍书](docs/02-功能介绍书.md) | 功能矩阵、模块逐项说明、与 VMD/Multiwfn/GXNU 的对照 |
-| [03-使用说明](docs/03-使用说明.md) | 安装、界面导览、逐模块操作、快捷键、命令行参数、FAQ |
-| [04-测试报告](docs/04-测试报告.md) | GROMACS 6452 原子真实算例：表面/QuickSurf 速度、导出、轨迹、缺陷与修复 |
-| [05-DFT常用绘图指南](docs/05-DFT常用绘图指南.md) | 论文插图类型 → 数据来源 → 参数 → 工具 → 本项支持度对照 |
-| [ESP_SURFACE.md](ESP_SURFACE.md) | ESP 映射表面的数据链、参数与出图配方 |
-| [REMAINING_WORK.md](REMAINING_WORK.md) | 剩余工作索引、i18n 收尾、**环境与构建约定**（新会话先读） |
-| [blueprint.md](docs/_internal/blueprint.md) | v2 Aurora 设计基线：分层、五区布局、模块契约 |
-| [ISSUES-已知问题登记](docs/_internal/ISSUES-已知问题登记.md) | 未解决缺陷（S2/S3）、建议修复顺序 |
-| [ROADMAP-渲染与DFT视图](docs/_internal/ROADMAP-渲染与DFT视图.md) | 渲染/光追/DFT 未落地项与验收标准 |
-| [PLAN-UI组件丰富化](docs/_internal/PLAN-UI组件丰富化.md) | UI 设计 token 与待做组件 |
-| [REFACTOR-2026-10-22](docs/_internal/REFACTOR-2026-10-22.md) | 结构性问题 + 50 项领域改进清单（渲染/轨迹/交互/测试/构建/文档/合规）与分阶段方案 |
-| [archive](docs/_internal/archive/README.md) | 已完成方案与过期交接（仅追溯，含"不要重做"清单） |
+| **Input formats** | PDB, GRO, SDF, Gaussian cube (`.cube`/`.cub`); trajectories **DCD**, **XTC**, **TRR** (GROMACS legacy *and* 2023+ layouts) |
+| **Representations (17)** | wireframe, stick, ball-and-stick, spacefill, VdW, licorice, tube, ribbon, cartoon, new-cartoon, surface, QuickSurf, ESP surface, plate, diamond, dot cloud, polyhedron |
+| **Colouring** | CPK by element, VMD-style *Name* palette, chain, residue, B-factor, uniform |
+| **ESP surfaces** | density isosurface + per-vertex electrostatic potential, colour maps (`bwr`, `coolwarm`, `viridis`, `jet`, reference/spectral), colourbar and extrema labels |
+| **Ray tracing** | built-in CPU path tracer with a compact BVH for spheres, capsules and triangles — surfaces and QuickSurf meshes included, no GPU or OptiX needed |
+| **Trajectories** | time-driven playback at 12–60 FPS, selection-aware looping, frame-accurate scrubbing, frame-incremental uploads |
+| **Animation export** | PNG sequence, APNG, GIF, MP4, WebM (the last four through `ffmpeg`; override the encoder with `MOLECULENS_FFMPEG`) |
+| **Workbench** | fixed five-zone layout, 9 inspector modules (display, molecules, ESP, orbitals, trajectory, annotations, analysis, log, settings), light/dark themes, Chinese and English UI |
+| **Publication output** | style presets `default` / `soft` / `publication` / `vivid`, 8-bit and 16-bit PNG, transparent background, OBJ / POV / STL / `.mlscene` export |
+| **Engineering** | Catch2 suites, spdlog level logging, Vulkan single backend with an offscreen FBO path, three-platform CMake build |
 
-对应的 `.docx` 版本由 `tools/md_to_docx.py` 从 Markdown 生成，与 Markdown 内容一致。
+## Build
 
-## 依赖
+### Requirements
 
-全部第三方依赖的安装方式 / 版本要求 / 环境配置见 **[DEPENDENCIES.md](DEPENDENCIES.md)**。
+* CMake ≥ 3.21 and a C++20 compiler (MSVC 2022, GCC 11+, Clang 14+)
+* [vcpkg](https://github.com/microsoft/vcpkg) for dependencies (`vcpkg.json` in the repository root)
+* Vulkan SDK (headers and loader)
+* Optional: `ffmpeg` on `PATH` (or `MOLECULENS_FFMPEG`) for MP4 / WebM / GIF export
 
-## 许可证
+Full dependency list, versions and platform notes: **[DEPENDENCIES.md](DEPENDENCIES.md)**.
 
-本项目（代码与文档）采用 **Apache License 2.0** 授权，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
-第三方依赖、字体与测试数据的来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+### Build and run
 
-- 界面字体 Noto Sans SC 为 SIL OFL 1.1（`data/font/OFL.txt`），随二进制分发时保留该许可。
-- `data/traj_xtc_10f10a.xtc` 为 MDAnalysis 的 **GPL-2.0+** 测试夹具，单独声明，不适用 Apache-2.0。
-- 项目名称 `MolecuLens` / `分子视镜` 的商标权保留；Apache-2.0 不授予商标许可。
-- 欢迎以 issue / PR 参与；提交即表示同意按 Apache-2.0 授权你的贡献（DCO 风格）。
+```bash
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build --config Release -j
+
+# GUI (pass a structure to open it directly, or use Ctrl+O)
+./build/src/app/Release/moleculens_app data/EPI.pdb
+
+# headless CLI
+./build/src/cli/Release/moleculens-cli info data/EPI.pdb
+```
+
+Unit and integration tests:
+
+```bash
+ctest --test-dir build -C Release --output-on-failure
+# or run the binary directly
+./build/tests/Release/moleculens_tests
+```
+
+## Command line
+
+`moleculens-cli` exposes three subcommands — `info`, `render`, `convert` — and the `render` command
+covers every visual setting of the GUI.
+
+```bash
+# structure summary
+moleculens-cli info data/EPI.pdb
+
+# publication still (white background, crisp outlines)
+moleculens-cli render md.gro --rep ballstick --style publication --bg white \
+    --size 1920 --height 1080 --out fig.png
+
+# trajectory frame
+moleculens-cli render md.gro --traj md.xtc --frame 500 --out frame500.png
+
+# ESP-mapped surface from a density cube + an electrostatic-potential cube
+moleculens-cli render density.cube --esp ESP.cube --cmap coolwarm \
+    --vmin -40 --vmax 40 --out esp.png
+
+# CPU ray tracing instead of the rasteriser
+moleculens-cli render md.gro --rt 4 --size 1920 --height 1080 --out rt.png
+MOLECULENS_RT_NO_BVH=1 moleculens-cli render md.gro --rt 1 --out linear.png   # A/B against the linear tracer
+
+# animation
+moleculens-cli render md.gro --traj md.xtc --anim movie.mp4 --anim-fps 30 --anim-range 0:200
+```
+
+Other useful flags: `--rep` / `--repr`, `--coloring`, `--color`, `--material`, `--opacity`,
+`--surf-iso`, `--surf-grid`, `--system-surface`, `--iso`, `--density`, `--clip`, `--clip-offset`,
+`--camera`, `--zoom`, `--msaa`, `--light-az`, `--light-el`, `--seg`, `--detail`, `--invert`,
+`--esp-opacity`, `--anim-step`, `--anim-interp`.
+
+## Performance
+
+Measured on a GROMACS fixture (`md.gro`, 6,452 atoms / 2,042 water molecules) and a surface mesh of
+911,096 triangles. Absolute numbers depend on the machine; the ratios are the point.
+
+| Workload | Result |
+| --- | --- |
+| QuickSurf density kernel + marching cubes, 1 thread | 100.9 ms + 61.0 ms |
+| Same, 8 threads | 15.6 ms + 31.7 ms (**3.4×**), bit-identical output |
+| CPU ray tracing 480×360 / 1 spp, spheres and capsules | **138 ms** with BVH vs **31,904 ms** linear (**231×**) |
+| CPU ray tracing 1920×1080 / 4 spp | 3.8 s |
+| Ray-traced mesh (911k triangles), 960×540 / 1 spp | 6.5 s, of which ~5 s is BVH build (single-threaded) |
+| Trajectory playback with per-frame QuickSurf (Release) | 98–119 FPS |
+
+## Architecture
+
+```text
+src/entity/   domain model (element table, structure keys, scene, selection language) + IO + persistence
+src/engine/   scene graph, representations, command stream, camera, picking,
+              Vulkan backend (+ offscreen FBO), exporters, CPU ray tracer
+src/app/      composition root, event bus, controllers, Aurora workbench (style · modules · layout)
+src/cli/      headless CLI: info / render / convert
+tests/        Catch2 unit and integration tests
+plugins/      plugin ABI sample and RPC client scripts
+data/         demo structures, trajectory fixtures, bundled font
+```
+
+Dependencies point one way: `entity ← engine ← app / cli`. Protocol headers
+(`engine/cmd/cmd.h`, `persist/mlscene/mlscene.h`) compile standalone. Every directory keeps
+at most three `.cpp/.h` pairs, checked by `cmake/check_tree.py`.
+
+## Testing
+
+* **187 test cases / 193,781 assertions** across 34 test files — element and structure recognition,
+  selection language, serialisation, camera, cartoon geometry, scheduler, Vulkan smoke tests,
+  UI layout, DCD/XTC/TRR reading, exporters, ray-tracer equivalence.
+* Rendering changes are held to a bit-exact standard: the BVH and linear tracers, and the QuickSurf
+  threaded and scalar kernels, are compared by PNG md5 in the tests.
+* `cmake/check_tree.py` enforces the directory rule; `moleculens_tests` covers behaviour.
+
+## Documentation
+
+The long-form documentation is written in Chinese; English translations are welcome.
+
+| Document | Contents |
+| --- | --- |
+| [软件架构书](docs/01-软件架构书.md) | layering, modules, data flow, command stream, render pipeline, ADR and deviation log |
+| [功能介绍书](docs/02-功能介绍书.md) | feature matrix, per-module walkthrough, comparison with VMD / Multiwfn / GaussView |
+| [使用说明](docs/03-使用说明.md) | installation, UI tour, per-module operations, shortcuts, CLI reference, FAQ |
+| [测试报告](docs/04-测试报告.md) | real 6,452-atom benchmark: surface speed, export, trajectories, defects found and fixed |
+| [DFT 常用绘图指南](docs/05-DFT常用绘图指南.md) | paper figure types → data source → parameters → tool → support status |
+| [ESP_SURFACE.md](ESP_SURFACE.md) | ESP surface data path, parameters and figure recipes |
+| [REMAINING_WORK.md](REMAINING_WORK.md) | open work index and build/environment conventions |
+| [DEPENDENCIES.md](DEPENDENCIES.md) | dependency installation, versions, environment |
+
+## What's new in v2.13
+
+* Per-frame QuickSurf now follows trajectory playback — a 24-frame LRU cache plus a low-priority
+  prefetch queue for the next 6 frames — instead of freezing one stale surface (98–119 FPS).
+* Coordinate replay no longer rebuilds frozen system surfaces, and mesh uploads are skipped when
+  the geometry has not changed (`meshSerial` vs `listRevision`).
+* Rendering-view panel redesigned as a list + form, with stronger selection contrast.
+* `Diamond` and `Polyhedron` draw one shape per non-hydrogen atom; material presets are localised.
+* ESP colourbar and extrema labels move above the timeline when a trajectory is loaded.
+
+Full entry: [CHANGELOG v2.13](docs/_internal/CHANGELOG-2026-10-22-v2.13.md).
+
+## Roadmap
+
+* Shared unit-sphere mesh with per-instance transforms and a parallel BVH build — cuts the 911k
+  triangles by one to two orders of magnitude and the 5 s build to tens of milliseconds.
+* DFT property views: MO isosurfaces and energy-level diagrams.
+* Transparent surfaces in the ray tracer, incremental BVH, video-export polish.
+
+See [ROADMAP-渲染与DFT视图](docs/_internal/ROADMAP-渲染与DFT视图.md) and
+[ISSUES-已知问题登记](docs/_internal/ISSUES-已知问题登记.md) for the full list.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `moleculens_tests` and keep rendering changes
+bit-exact (compare PNG md5 before and after). By submitting a contribution you agree to license it
+under Apache-2.0 (DCO style).
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Third-party libraries, fonts and test data: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+* The bundled UI font (Noto Sans SC subset) is SIL OFL 1.1 — `data/font/OFL.txt`.
+* `data/traj_xtc_10f10a.xtc` is a GPL-2.0+ fixture from MDAnalysis and is **not** covered by the
+  Apache-2.0 grant.
+* The names *MolecuLens* and *分子视镜* are trademarks; Apache-2.0 grants no trademark rights.
