@@ -16,7 +16,7 @@ authors:
 repository-code: "https://github.com/moyudoing/MolecuLens"
 url: "https://moyudoing.github.io/MolecuLens/"
 license: "Apache-2.0"
-version: "2.13.0"
+version: "2.19.0"
 date-released: "2026-10-22"
 keywords:
   - "molecular visualization"

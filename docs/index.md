@@ -6,8 +6,8 @@ picture from the command line for a paper.
 
 ![Aurora 工作台：导航栏、视图、检查器与状态栏](figs_v2/overview.png)
 
-!!! note "版本 v2.13"
-    当前文档集对应 **v2.13（2026-10-22）**，源码 Apache-2.0，Windows / Linux / macOS
+!!! note "版本 v2.19"
+    当前文档集对应 **v2.19（2026-10-22）**，源码 Apache-2.0，Windows / Linux / macOS
     三平台 CMake 构建。长篇文档为中文，代码与注释中英混排。
 
 ## 它能做什么
@@ -20,8 +20,10 @@ picture from the command line for a paper.
   逐帧快速表面走 24 帧 LRU 缓存 + 低优先级预取，暂停/跳帧都停在正确的那一帧。
 - **内置 CPU 光追** —— 紧凑 BVH 覆盖球、胶囊与三角面：480×360 / 1 spp 从 31.9 s
   降到 138 ms（231×），1080p / 4 spp 约 3.8 s，不需要 GPU 或专用光追硬件。
-- **命令行可复现** —— 界面上每一个可见参数都有对应的 CLI 开关，`info` / `render` /
-  `convert` 三个子命令即可把论文插图固化成脚本。
+- **GPU 光追与多视图** —— Vulkan KHR 光追（BLAS/TLAS、5 组管线）自动回退 CPU；
+  单视图 / 左右 / 上下 / 四视图各自独立相机与显示范围（`Ctrl+1`…`Ctrl+4`）。
+- **命令行与 Python** —— 界面上每一个可见参数都有对应的 CLI 开关；`python/` 提供
+  pybind11 数据层与 CLI 绘图层，适合服务器批量出图。
 
 ## 文档
 
@@ -32,8 +34,9 @@ picture from the command line for a paper.
 | [使用说明](03-使用说明.md) | 安装启动、界面导览、逐模块操作、快捷键、CLI 参数参考、FAQ |
 | [测试报告](04-测试报告.md) | 6,452 原子 GROMACS 算例上的表面/导出/轨迹实测与缺陷记录 |
 | [DFT 绘图指南](05-DFT常用绘图指南.md) | 论文插图类型 → 数据来源 → 参数 → 工具与支持状态 |
-| [开源数据集与演示](06-开源数据集与演示.md) | 可直接下载的公开结构与轨迹、许可与出处、复现命令 |
-| [更新记录](_internal/CHANGELOG-2026-10-22-v2.13.md) | 每一版做了什么、为什么、怎么验证 |
+| [开源数据集与演示](06-开源数据集与演示.md) | 19 个公开数据集、来源与许可、可复现演示图 |
+| [Python 接口与案例](07-Python接口与案例.md) | 安装构建、数据层、选择语言、出图与数据案例巡览 |
+| [更新记录](_internal/CHANGELOG-2026-10-22-v2.19.md) | 每一版做了什么、为什么、怎么验证 |
 
 ## 快速开始
 
@@ -61,8 +64,11 @@ ctest --test-dir build -C Release --output-on-failure
 ## 数据与演示
 
 仓库自带一组可直接上手的小样本：`data/EPI.pdb`（表儿茶素）、`data/glycine.pdb`、
-`data/md.gro` + `data/md.xtc`（2,042 个水分子的 GROMACS 轨迹）。
-公开数据集的出处、许可以及复现命令，见 [开源数据集与演示](06-开源数据集与演示.md)。
+`data/md.gro` + `data/md.xtc`（2,042 个水分子的 GROMACS 轨迹）。公开数据集
+[`datasets/`](https://github.com/moyudoing/MolecuLens/tree/master/datasets) 另含 19 个文件：
+蛋白-配体复合物、膜蛋白、NMR 多模型、小分子与 51 帧轨迹。
+出处、许可与复现命令见 [开源数据集与演示](06-开源数据集与演示.md)；
+Python 用法与数据案例见 [Python 接口与案例](07-Python接口与案例.md)。
 
 ## 许可与致谢
 

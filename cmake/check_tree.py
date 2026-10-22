@@ -8,7 +8,9 @@
   * src/app/imgui/backends —— vendored Dear ImGui 的 GLFW / Vulkan 后端，
     文件名由上游固定，不能拆分或改名；
   * tests/entity/trajectory —— 每种轨迹格式（DCD / XTC / TRR）一个测试文件；
-  * tests/vulkan —— 每条 Vulkan 路径（线框 / 网格 / 离屏 / 单原子）一个冒烟测试。
+  * tests/vulkan —— 每条 Vulkan 路径（线框 / 网格 / 离屏 / 单原子）一个冒烟测试；
+  * src/app/view/container —— 主视图与多视图容器（单/双/四视图）是一组；
+  * src/app/workbench/analysis —— 分子统计与 xlsx 导出是一组分析工具。
 
 用法：python check_tree.py [src_dir ...]
 退出码：0 通过 / 1 违反
@@ -22,6 +24,8 @@ EXEMPT_DIRS = {
     "src/app/imgui/backends": "vendored Dear ImGui backends (upstream filenames)",
     "tests/entity/trajectory": "one test file per trajectory format",
     "tests/vulkan": "one smoke test per Vulkan path",
+    "src/app/view/container": "main view + multi-view container",
+    "src/app/workbench/analysis": "molecule stats + xlsx writer",
 }
 
 

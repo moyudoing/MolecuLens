@@ -74,7 +74,7 @@ $env:PYTHONPATH = "$PWD\build\python"
 python -m pytest python\tests -q
 ```
 
-预期结果：`54 passed`（46 个数据层 + 8 个绘图全流程）。如果构建目录不是
+预期结果：`78 passed`（46 个数据层 + 8 个绘图全流程 + 24 个数据案例）。如果构建目录不是
 `build`，把 `MOLECULENS_PYTHON_DIR` 指到包含 `moleculens/` 的目录；
 `MOLECULENS_CLI` 可显式指定 CLI 路径（默认自动查找
 `build/src/cli/<Release|RelWithDebInfo|Debug>/moleculens-cli.exe`）。
@@ -179,6 +179,22 @@ moleculens.convert("data/EPI.pdb", "figs/epi.obj", rep="ballstick")
 $env:PYTHONPATH = "$PWD\build\python"
 python python\examples\render_gallery.py --out-dir .tmp\render_gallery
 ```
+
+## 数据案例巡览
+
+[`examples/dataset_tour.py`](examples/dataset_tour.py) 把数据层与绘图层串成一条可重复流水线：
+加载 `datasets/` 下的 15 个结构/轨迹案例，执行 `resname XK2`、`within`、糖链等选择，渲染
+1HVR / 1L2Y / MD / ESP 四张图，并生成 `report.md`。
+
+```powershell
+$env:PYTHONPATH = "$PWD\build\python"
+python python\examples\dataset_tour.py --out-dir .tmp\dataset_tour
+python python\examples\dataset_tour.py --no-render      # 只跑数据层
+```
+
+`tests/test_datasets.py` 会逐一校验 `datasets/` 下 18 个结构文件的原子/键/帧数、1HVR 配体选择
+与清单一致性。完整数据说明见 [`datasets/README.md`](../datasets/README.md)，中文教程见
+[`docs/07-Python接口与案例.md`](../docs/07-Python接口与案例.md)。
 
 ## 语义约定
 

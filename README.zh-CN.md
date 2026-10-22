@@ -11,7 +11,7 @@
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](#构建)
 [![Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C.svg)](#架构)
 [![Tests](https://img.shields.io/badge/tests-187%20cases%20%2F%20193%2C781%20assertions-brightgreen.svg)](#测试)
-[![Version](https://img.shields.io/badge/version-v2.13-orange.svg)](docs/_internal/CHANGELOG-2026-10-22-v2.13.md)
+[![Version](https://img.shields.io/badge/version-v2.19-orange.svg)](docs/_internal/CHANGELOG-2026-10-22-v2.19.md)
 [![Docs & quality](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml/badge.svg)](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml)
 [![Docs site](https://github.com/moyudoing/MolecuLens/actions/workflows/pages.yml/badge.svg)](https://moyudoing.github.io/MolecuLens/)
 
@@ -59,26 +59,28 @@ moleculens-cli render md.gro --rep quicksurf --style publication --bg white --ou
 
 ## 开源数据集与演示
 
-[`datasets/`](datasets/) 收录 12 个可公开分发的结构、小分子与 51 帧轨迹文件。下面的每张图都由
+[`datasets/`](datasets/) 收录 19 个可公开分发的结构、小分子与 51 帧轨迹文件，包含蛋白-配体
+复合物（1HVR）、膜蛋白（1U19）与 38 模型 NMR 结构（1L2Y）。下面的每张图都由
 `moleculens-cli` 直接从这些文件渲染，未做后期处理。
 
 <table>
 <tr>
 <td width="50%"><img src="docs/figs_v2/demo/1crn_newcartoon.png" alt="Crambin 卡通"><br>
 <sub><b>1CRN · 改进卡通</b> —— 327 原子，白底出版风格。</sub></td>
-<td width="50%"><img src="docs/figs_v2/demo/md_1u19_frame25.png" alt="视紫红素轨迹"><br>
-<sub><b>视紫红素轨迹 · 第 25 帧</b> —— 5,547 原子，51 帧 × 20 ps。</sub></td>
+<td width="50%"><img src="docs/figs_v2/demo/1hvr_ligand.png" alt="HIV 蛋白酶与抑制剂"><br>
+<sub><b>1HVR · 蛋白-配体</b> —— HIV-1 蛋白酶卡通 + XK2 抑制剂球棍。</sub></td>
 </tr>
 <tr>
+<td><img src="docs/figs_v2/demo/md_1u19_frame25.png" alt="视紫红素轨迹"><br>
+<sub><b>视紫红素轨迹 · 第 25 帧</b> —— 5,547 原子，51 帧 × 20 ps。</sub></td>
 <td><img src="docs/figs_v2/demo/glycine_esp.png" alt="ESP 映射表面"><br>
 <sub><b>ESP 映射表面</b> —— 密度等值面按静电势逐顶点着色（合成夹具）。</sub></td>
-<td><img src="docs/figs_v2/demo/aspirin_rt.png" alt="阿司匹林光追"><br>
-<sub><b>CPU 光追</b> —— 阿司匹林，4 spp，柔和阴影。</sub></td>
 </tr>
 </table>
 
 来源、SHA-256 与许可见 [`datasets/README.md`](datasets/README.md)；完整图库与复现命令见
-[开源数据集与演示](docs/06-开源数据集与演示.md)。
+[开源数据集与演示](docs/06-开源数据集与演示.md)，Python 用法与数据案例见
+[Python 接口与案例](docs/07-Python接口与案例.md)。
 
 ## 功能
 
@@ -162,6 +164,35 @@ moleculens-cli render md.gro --traj md.xtc --anim movie.mp4 --anim-fps 30 --anim
 `--camera`、`--zoom`、`--msaa`、`--light-az`、`--light-el`、`--seg`、`--detail`、`--invert`、
 `--esp-opacity`、`--anim-step`、`--anim-interp`。
 
+## Python 接口（可选）
+
+[`python/`](python/README.md) 提供 pybind11 数据层（解析器、原子/键快照、选择语言）与 CLI 绘图层
+封装。它默认 **OFF**，发布的应用不依赖 Python；数据层只链接 `moleculens_entity`，无 GPU 也能导入。
+
+```bash
+python -m pip install pybind11 pytest pillow
+cmake -B build -S . -DMOLECULENS_BUILD_PYTHON=ON
+cmake --build build --config Release --target _native moleculens-cli
+PYTHONPATH=build/python python -m pytest python/tests -q
+```
+
+```python
+import moleculens as ml
+
+mol = ml.load("datasets/pdb/1HVR.pdb")
+ml_ligand = mol.select("resname XK2")             # 46 个全局原子下标
+pocket = mol.select("within 6 of resname XK2")    # 260 个口袋原子
+
+ml.render("datasets/pdb/1HVR.pdb", "1hvr.png",
+          rep=["cartoon:not resname XK2:chain", "ballstick:resname XK2:element"],
+          zoom=1.2, style="publication", background="white", size=(1200, 900))
+```
+
+78 个 pytest 用例覆盖数据层、选择语言与真实出图流程，并校验 `datasets/` 下每个文件。可运行
+[`python/examples/dataset_tour.py`](python/examples/dataset_tour.py) 一键巡览 15 个数据案例；
+完整说明见 [Python 接口与案例](docs/07-Python接口与案例.md) 与
+[`python/README.md`](python/README.md)。
+
 ## 性能
 
 在 GROMACS 算例（`md.gro`，6452 原子 / 2042 个水分子）与 911,096 三角形的表面网格上实测。
@@ -185,6 +216,8 @@ src/app/      组合根、事件总线、控制器、Aurora 工作台（style ·
 src/cli/      无头 CLI：info / render / convert
 tests/        Catch2 单元与集成测试
 plugins/      插件 ABI 样例、RPC 客户端脚本
+python/       可选 pybind11 绑定 + 示例/测试
+datasets/     可公开分发的结构、轨迹与 ESP 夹具
 data/         演示结构、轨迹夹具、界面字体
 ```
 
@@ -196,7 +229,7 @@ data/         演示结构、轨迹夹具、界面字体
 
 ## 测试
 
-* **187 个用例 / 193,781 条断言**，分布在 34 个测试文件：元素与结构识别、选择语言、序列化、
+* **210 个用例 / 193,948 条断言**，分布在 37 个测试文件：元素与结构识别、选择语言、序列化、
   相机、卡通几何、调度器、Vulkan 冒烟、界面布局、DCD/XTC/TRR 读取、导出器、光追一致性。
 * 渲染改动按**逐位一致**验收：BVH 与线性遍历、QuickSurf 多线程与标量内核，用 PNG md5 对比。
 * `cmake/check_tree.py` 守目录粒度，`moleculens_tests` 守行为。
@@ -210,27 +243,31 @@ data/         演示结构、轨迹夹具、界面字体
 | [03-使用说明](docs/03-使用说明.md) | 安装、界面导览、逐模块操作、快捷键、命令行参数、FAQ |
 | [04-测试报告](docs/04-测试报告.md) | GROMACS 6452 原子真实算例：表面速度、导出、轨迹、缺陷与修复 |
 | [05-DFT常用绘图指南](docs/05-DFT常用绘图指南.md) | 论文插图类型 → 数据来源 → 参数 → 工具 → 本项支持度 |
-| [06-开源数据集与演示](docs/06-开源数据集与演示.md) | 12 个公开数据集、来源与许可、可复现演示图 |
+| [06-开源数据集与演示](docs/06-开源数据集与演示.md) | 19 个公开数据集、来源与许可、可复现演示图 |
+| [07-Python接口与案例](docs/07-Python接口与案例.md) | 安装构建、数据层、选择语言、出图与数据案例巡览 |
 | [ESP_SURFACE.md](ESP_SURFACE.md) | ESP 映射表面的数据链、参数与出图配方 |
 | [REMAINING_WORK.md](REMAINING_WORK.md) | 剩余工作索引与**环境/构建约定**（新会话先读） |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | 依赖安装、版本、环境配置 |
 
 内部设计文档（改造清单、已知问题、路线图）在 [`docs/_internal/`](docs/_internal/)。
 
-## v2.13 更新
+## v2.19 更新
 
-* 逐帧 QuickSurf 跟随轨迹播放：24 帧 LRU 缓存 + 低优先级预取后 6 帧，不再冻结一张旧表面，
-  实测 98–119 FPS。
-* 坐标重放不再重建冻结的整体系表面；几何未变时跳过网格上传（`meshSerial` 与 `listRevision` 分离）。
-* 「渲染视图」改为列表 + 表单，选中行对比度加强。
-* 「菱形」「多面体」按非氢原子逐个绘制；材质预设名称中文化。
-* 有轨迹时间轴时，ESP 色标与极值标注上移，避免被遮挡。
+* **动态 FPS 轨迹播放**：刷新同步 / 固定帧率 / 动态三种模式，写入 `settings.json`；
+  追帧上限可调，掉帧不会积压成一串跳跃。
+* **表面绘制模式与实例范围**：整体系表面逐顶点着色，实心 / 线框 / 半透明可选；
+  按类型 / 比例 / 步长筛选溶剂实例。
+* **多视图对照**：单视图、左右双视图、上下双视图、2×2 四视图，各自独立相机与显示范围
+  （`Ctrl+1`…`Ctrl+4`）。
+* **GPU 光追**：Vulkan KHR 加速结构与 5 组光追管线，失败自动回退 CPU
+  （`--rt-backend cpu|gpu|auto`）。
+* **Python 绑定**：pybind11 数据层 + CLI 绘图层，附数据巡览脚本与 78 个 pytest 用例。
 
-完整条目见 [CHANGELOG v2.13](docs/_internal/CHANGELOG-2026-10-22-v2.13.md)。
+完整条目见 [CHANGELOG v2.19](docs/_internal/CHANGELOG-2026-10-22-v2.19.md)。
 
 ## 文档与开源数据（2026-10-22）
 
-* 新增 `datasets/`：12 个可公开分发的数据文件（RCSB PDB 结构、PubChem 3D 构象、MIT 许可的
+* 新增 `datasets/`：19 个可公开分发的数据文件（RCSB PDB 结构、PubChem 3D 构象、MIT 许可的
   51 帧轨迹），附来源、SHA-256 与可复现演示图库。
 * 新增 GitHub Pages 文档站、社区健康文件、issue/PR 模板，以及检查相对链接与第三方产品名的
   CI 文档门禁。

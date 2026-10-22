@@ -12,7 +12,7 @@ from the command line for a paper.
 [![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](#build)
 [![Vulkan](https://img.shields.io/badge/renderer-Vulkan-AC162C.svg)](#architecture)
 [![Tests](https://img.shields.io/badge/tests-187%20cases%20%2F%20193%2C781%20assertions-brightgreen.svg)](#testing)
-[![Version](https://img.shields.io/badge/version-v2.13-orange.svg)](docs/_internal/CHANGELOG-2026-10-22-v2.13.md)
+[![Version](https://img.shields.io/badge/version-v2.19-orange.svg)](docs/_internal/CHANGELOG-2026-10-22-v2.19.md)
 [![Docs & quality](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml/badge.svg)](https://github.com/moyudoing/MolecuLens/actions/workflows/quality.yml)
 [![Docs site](https://github.com/moyudoing/MolecuLens/actions/workflows/pages.yml/badge.svg)](https://moyudoing.github.io/MolecuLens/)
 
@@ -58,26 +58,29 @@ More figures (materials, tessellation, quality comparisons) live in [`docs/figs_
 
 ## Open data & demos
 
-[`datasets/`](datasets/) ships 12 openly licensed structures, small molecules and a 51-frame
-trajectory. Every image below was rendered by `moleculens-cli` from those files — no post-processing.
+[`datasets/`](datasets/) ships 19 openly licensed structures, small molecules and a 51-frame
+trajectory, including a protein–ligand complex (1HVR), a membrane protein (1U19) and a 38-model
+NMR ensemble (1L2Y). Every image below was rendered by `moleculens-cli` from those files — no
+post-processing.
 
 <table>
 <tr>
 <td width="50%"><img src="docs/figs_v2/demo/1crn_newcartoon.png" alt="Crambin cartoon"><br>
 <sub><b>1CRN · new-cartoon</b> — 327 atoms, publication style.</sub></td>
-<td width="50%"><img src="docs/figs_v2/demo/md_1u19_frame25.png" alt="Rhodopsin trajectory"><br>
-<sub><b>Rhodopsin trajectory · frame 25</b> — 5,547 atoms, 51 frames at 20 ps.</sub></td>
+<td width="50%"><img src="docs/figs_v2/demo/1hvr_ligand.png" alt="HIV protease with inhibitor"><br>
+<sub><b>1HVR · protein–ligand</b> — HIV-1 protease cartoon with the XK2 inhibitor.</sub></td>
 </tr>
 <tr>
+<td><img src="docs/figs_v2/demo/md_1u19_frame25.png" alt="Rhodopsin trajectory"><br>
+<sub><b>Rhodopsin trajectory · frame 25</b> — 5,547 atoms, 51 frames at 20 ps.</sub></td>
 <td><img src="docs/figs_v2/demo/glycine_esp.png" alt="ESP surface"><br>
 <sub><b>ESP-mapped surface</b> — density isosurface coloured by electrostatic potential (synthetic fixture).</sub></td>
-<td><img src="docs/figs_v2/demo/aspirin_rt.png" alt="Ray-traced aspirin"><br>
-<sub><b>CPU ray tracing</b> — aspirin, 4 spp, soft shadows.</sub></td>
 </tr>
 </table>
 
 Provenance, SHA-256 checksums and licenses: [`datasets/README.md`](datasets/README.md).
 Full gallery and exact commands: [Open data & demos](docs/06-开源数据集与演示.md).
+Python examples and data cases: [Python API & cases](docs/07-Python接口与案例.md).
 
 ## Features
 
@@ -177,22 +180,22 @@ PYTHONPATH=build/python python -m pytest python/tests -q
 ```python
 import moleculens
 
-mol = moleculens.load("data/EPI.pdb")
-mol.atoms[0].element                    # 'O'
-mol.select("within 1.9 of element O")   # global atom indices
-mol.summary()["composition"]            # {'C': 15, 'H': 14, 'O': 6}
+mol = moleculens.load("datasets/pdb/1HVR.pdb")
+ligand = mol.select("resname XK2")             # 46 global atom indices
+pocket = mol.select("within 6 of resname XK2") # 260 pocket atoms
 
-moleculens.render("data/EPI.pdb", "epi.png",
-                  rep="ballstick", style="publication", size=(1280, 720))
-moleculens.render_animation("data/md.gro", "md.gif",
-                            trajectory="data/md.xtc", frame_range="0:30")
+moleculens.render("datasets/pdb/1HVR.pdb", "1hvr.png",
+                  rep=["cartoon:not resname XK2:chain", "ballstick:resname XK2:element"],
+                  zoom=1.2, style="publication", background="white", size=(1200, 900))
 ```
 
 Rendering is a thin wrapper around the same `moleculens-cli render` used by the GUI and
-tests, so both front-ends share one parameter table. The 54-case pytest suite includes a
+tests, so both front-ends share one parameter table. The 78-case pytest suite includes a
 real end-to-end render pipeline (PNG/16-bit/transparency, trajectory frames, ESP, CPU ray
-tracing, GIF animation, OBJ export). Build layout, semantics and limitations:
-[`python/README.md`](python/README.md).
+tracing, GIF animation, OBJ export) and validates every file in `datasets/`. A runnable
+data tour lives in [`python/examples/dataset_tour.py`](python/examples/dataset_tour.py);
+build layout, semantics and limitations: [`python/README.md`](python/README.md), with a
+full walkthrough in [Python API & cases](docs/07-Python接口与案例.md).
 
 ## Performance
 
@@ -219,6 +222,8 @@ src/cli/      headless CLI: info / render / convert
 tests/        Catch2 unit and integration tests
 python/       optional pybind11 data-layer bindings (OFF by default)
 plugins/      plugin ABI sample and RPC client scripts
+python/       optional pybind11 bindings + examples/tests
+datasets/     openly licensed structures, trajectories and ESP fixtures
 data/         demo structures, trajectory fixtures, bundled font
 ```
 
@@ -228,7 +233,7 @@ at most three `.cpp/.h` pairs, checked by `cmake/check_tree.py`.
 
 ## Testing
 
-* **187 test cases / 193,781 assertions** across 34 test files — element and structure recognition,
+* **210 test cases / 193,948 assertions** across 37 test files — element and structure recognition,
   selection language, serialisation, camera, cartoon geometry, scheduler, Vulkan smoke tests,
   UI layout, DCD/XTC/TRR reading, exporters, ray-tracer equivalence.
 * Rendering changes are held to a bit-exact standard: the BVH and linear tracers, and the QuickSurf
@@ -246,28 +251,34 @@ The long-form documentation is written in Chinese; English translations are welc
 | [使用说明](docs/03-使用说明.md) | installation, UI tour, per-module operations, shortcuts, CLI reference, FAQ |
 | [测试报告](docs/04-测试报告.md) | real 6,452-atom benchmark: surface speed, export, trajectories, defects found and fixed |
 | [DFT 常用绘图指南](docs/05-DFT常用绘图指南.md) | paper figure types → data source → parameters → tool → support status |
-| [Open data & demos](docs/06-开源数据集与演示.md) | 12 openly licensed datasets, provenance, licenses and reproducible renders |
+| [Open data & demos](docs/06-开源数据集与演示.md) | 19 openly licensed datasets, provenance, licenses and reproducible renders |
+| [Python API & cases](docs/07-Python接口与案例.md) | install/build, data layer, selections, rendering, data-case tour |
 | [ESP_SURFACE.md](ESP_SURFACE.md) | ESP surface data path, parameters and figure recipes |
 | [REMAINING_WORK.md](REMAINING_WORK.md) | open work index and build/environment conventions |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | dependency installation, versions, environment |
 
-## What's new in v2.13
+## What's new in v2.19
 
-* Per-frame QuickSurf now follows trajectory playback — a 24-frame LRU cache plus a low-priority
-  prefetch queue for the next 6 frames — instead of freezing one stale surface (98–119 FPS).
-* Coordinate replay no longer rebuilds frozen system surfaces, and mesh uploads are skipped when
-  the geometry has not changed (`meshSerial` vs `listRevision`).
-* Rendering-view panel redesigned as a list + form, with stronger selection contrast.
-* `Diamond` and `Polyhedron` draw one shape per non-hydrogen atom; material presets are localised.
-* ESP colourbar and extrema labels move above the timeline when a trajectory is loaded.
+* **Dynamic-FPS trajectory playback**: RefreshSync / FixedFps / Dynamic modes, persisted in
+  `settings.json`; catch-up is capped so a dropped frame never queues a burst.
+* **Surface drawing modes and instance ranges**: per-vertex system-surface colouring, solid /
+  wireframe / translucent surfaces, and type/fraction/stride filters for solvent instances.
+* **Multi-view layouts**: single, side-by-side, stacked or 2×2 viewports with independent
+  cameras and display filters (`Ctrl+1`…`Ctrl+4`).
+* **GPU ray tracing**: Vulkan KHR acceleration structures and five ray-tracing pipelines, with
+  automatic CPU fallback (`--rt-backend cpu|gpu|auto`).
+* **Python bindings**: pybind11 data layer plus a CLI-backed rendering layer, a runnable data
+  tour and 78 pytest cases.
 
-Full entry: [CHANGELOG v2.13](docs/_internal/CHANGELOG-2026-10-22-v2.13.md).
+Full entry: [CHANGELOG v2.19](docs/_internal/CHANGELOG-2026-10-22-v2.19.md).
 
 ## Documentation & open data (2026-10-22)
 
-* New `datasets/` collection: 12 openly licensed files (RCSB PDB structures, PubChem 3D
+* New `datasets/` collection: 19 openly licensed files (RCSB PDB structures, PubChem 3D
   conformers, an MIT-licensed 51-frame trajectory) with provenance, SHA-256 checksums and a
   reproducible demo gallery.
+* Python bindings (`python/`) and a runnable data tour covering protein–ligand complexes,
+  membrane proteins, NMR ensembles, small molecules, trajectories and ESP surfaces.
 * GitHub Pages documentation site, community health files, issue/PR templates and a CI gate that
   checks relative links and keeps the documentation free of third-party product names.
 * The long-form documentation is now vendor-neutral; third-party reference notes and assets were
