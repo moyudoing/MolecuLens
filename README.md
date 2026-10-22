@@ -104,7 +104,7 @@ data/           # 演示夹具（demo.pdb）、字体
 | [ISSUES-已知问题登记](docs/_internal/ISSUES-已知问题登记.md) | 未解决缺陷（S2/S3）、建议修复顺序 |
 | [ROADMAP-渲染与DFT视图](docs/_internal/ROADMAP-渲染与DFT视图.md) | 渲染/光追/DFT 未落地项与验收标准 |
 | [PLAN-UI组件丰富化](docs/_internal/PLAN-UI组件丰富化.md) | UI 设计 token 与待做组件 |
-| [REFACTOR-2026-10-22](docs/_internal/REFACTOR-2026-10-22.md) | 结构性问题清单与分阶段改造方案（坐标管线、重放、拆分） |
+| [REFACTOR-2026-10-22](docs/_internal/REFACTOR-2026-10-22.md) | 结构性问题 + 50 项领域改进清单（渲染/轨迹/交互/测试/构建/文档/合规）与分阶段方案 |
 | [archive](docs/_internal/archive/README.md) | 已完成方案与过期交接（仅追溯，含"不要重做"清单） |
 
 对应的 `.docx` 版本由 `tools/md_to_docx.py` 从 Markdown 生成，与 Markdown 内容一致。
