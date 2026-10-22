@@ -1,10 +1,11 @@
 # MolecuLens 剩余工作与工程约定
 
-> 快照：2026-10-22 02:05（Asia/Shanghai），代码基线 v2.11。
+> 快照：2026-10-22 02:05（Asia/Shanghai），代码基线 v2.12。
 > 本文**只保留跨文档的开放项索引与环境/构建约定**；具体问题、验收标准、UI 组件分别落在：
 > - 未解决缺陷：[`docs/_internal/ISSUES-已知问题登记.md`](docs/_internal/ISSUES-已知问题登记.md)
 > - 渲染 / 光追 / DFT 路线：[`docs/_internal/ROADMAP-渲染与DFT视图.md`](docs/_internal/ROADMAP-渲染与DFT视图.md)
 > - UI 组件：[`docs/_internal/PLAN-UI组件丰富化.md`](docs/_internal/PLAN-UI组件丰富化.md)
+> - 结构改造：[`docs/_internal/REFACTOR-2026-10-22.md`](docs/_internal/REFACTOR-2026-10-22.md)
 > - 2026-10-22 之前的已完成工作与实测记录：[`docs/_internal/archive/`](docs/_internal/archive/README.md)
 >
 > 新会话先读这一节「环境与命令」，否则很容易白跑一轮。
@@ -21,7 +22,7 @@
 | 光追观感（表面不透明度、AO/GGX、降噪） | 未做；BVH 与 RT LOD 已完成 | ROADMAP §2.6、ISSUES I-25 |
 | 逐实例 QuickSurf 缓存 | 实现过、因相位差回退，待决策 | ISSUES I-17 |
 | i18n 覆盖率 | **约 428 条中文未收录**（2026-10-22 实测：408 条 + 预览 20 条） | 本文 §2 |
-| 其它缺陷 | 12 条（S2 4 条 / S3 8 条） | ISSUES 清单 |
+| 其它缺陷 | 18 条（S2 6 / S3 12） | ISSUES 清单 |
 
 ---
 
@@ -68,7 +69,7 @@ $env:PYTHONIOENCODING="utf-8"
   判断依据：日志里出现 `<target>.vcxproj -> ...exe` 产出行。
 - **运行期 DLL**：因上一条，`fmt.dll` / `spdlog.dll` / `glfw3.dll` 不会自动拷贝，缺了就 `0xC0000135`。
   从 `build\vcpkg_installed\x64-windows\bin`（Release）或 `...\debug\bin`（Debug）复制到 exe 旁。
-- **测试**：`build\tests\<Config>\moleculens_tests.exe`，最近记录 **182 例 / 193,749 断言全过**（2026-10-22 02:36，字体替换后复跑）；
+- **测试**：`build\tests\<Config>\moleculens_tests.exe`，最近记录 **184 例 / 193,765 断言全过**（2026-10-22 02:36，字体替换后复跑）；
   本轮文档更新没有重新构建，改代码后必须复跑。
 - **基准**：`pwsh -File tools\run_bench.ps1 -Config Release` → `other\bench_out\bench_report.md`；
   引擎级基准是 `moleculens_bench`（headless GPU，`--rep/--material/--png/--verbose`）。
