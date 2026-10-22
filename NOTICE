@@ -1,0 +1,17 @@
+MolecuLens (分子视镜)
+Copyright 2026 MolecuLens contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software and assets developed by third parties.
+The full list, with the corresponding licenses and attributions, is in
+THIRD_PARTY_NOTICES.md. In particular:
+
+  * Interface font: Noto Sans SC, subset and instanced, distributed under the
+    SIL Open Font License 1.1 — see data/font/OFL.txt.
+  * The test fixture data/traj_xtc_10f10a.xtc comes from the MDAnalysis
+    project and is licensed under GPL-2.0+; it is NOT covered by the
+    Apache-2.0 license of this project.
+
+"MolecuLens" and "分子视镜" are project names; the Apache-2.0 license does
+not grant trademark rights to them (see LICENSE section 6).

@@ -33,12 +33,14 @@ ctest --test-dir build                 # 单元测试
   （电子密度等值面 + 静电势逐顶点着色 + 色标条 + 极值数值标注，见 [ESP_SURFACE.md](ESP_SURFACE.md)）
 - **多输出**：实时窗口渲染、离屏视口（FBO + ImGui 贴图）、CLI 无头出图（M4）、
   OBJ / POV / STL / .mlscene 导出
+- **轨迹动画导出**：GUI「动画导出」与 CLI `--anim` 支持 PNG 序列 / APNG / GIF / MP4 / WebM
+  （后四者经 ffmpeg 封装；可用 `MOLECULENS_FFMPEG` 指定编码器路径）
 - **现代化工作台 UI（v2 Aurora）**：固定五区布局、9 个检查器模块（显示/分子/ESP/轨道/轨迹/标注/分析/日志/设置）、
   矢量图标左导航、取色器与材质微调、浅色/深色双主题、中英双语、加载遮罩与快捷键
 - **渲染风格（v2.2）**：环绕柔光 + `fwidth` 像素轮廓 + 背景色距离淡出；四套预设（默认/柔和/出版/鲜明），
   出版预设一键白底+关阴影+强轮廓，GUI「设置 → 渲染风格」与 CLI `--style` 共用
 - **时间轴与轨迹**（M3）：时间驱动播放、选区循环、帧增量上传
-- **工程完备**：Catch2 测试（最近记录 182 例 / 193,749 断言，34 文件）、spdlog 分级日志、目录粒度检查、三平台构建
+- **工程完备**：Catch2 测试（最近记录 184 例 / 193,765 断言，34 文件）、spdlog 分级日志、目录粒度检查、三平台构建
 
 ## 项目结构
 
@@ -107,3 +109,13 @@ data/           # 演示夹具（demo.pdb）、字体
 ## 依赖
 
 全部第三方依赖的安装方式 / 版本要求 / 环境配置见 **[DEPENDENCIES.md](DEPENDENCIES.md)**。
+
+## 许可证
+
+本项目（代码与文档）采用 **Apache License 2.0** 授权，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+第三方依赖、字体与测试数据的来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+- 界面字体 Noto Sans SC 为 SIL OFL 1.1（`data/font/OFL.txt`），随二进制分发时保留该许可。
+- `data/traj_xtc_10f10a.xtc` 为 MDAnalysis 的 **GPL-2.0+** 测试夹具，单独声明，不适用 Apache-2.0。
+- 项目名称 `MolecuLens` / `分子视镜` 的商标权保留；Apache-2.0 不授予商标许可。
+- 欢迎以 issue / PR 参与；提交即表示同意按 Apache-2.0 授权你的贡献（DCO 风格）。
