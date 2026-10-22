@@ -480,7 +480,7 @@ void Workbench::applyPublicationStyle() {
         svc_.renderCtl->setBackgroundColor(0.0f, 0.0f, 0.0f);
         svc_.renderCtl->setShadowsEnabled(false);
     }
-    // 平光材质：高环境光 + 低高光，接近 VMD「AOChalky / 黑底卡通」的观感
+    // 平光材质：高环境光 + 低高光，接近「AOChalky / 黑底卡通」的观感
     if (svc_.repCtl != nullptr) {
         auto& reps = const_cast<std::vector<engine::Representation>&>(
             svc_.repCtl->representations());

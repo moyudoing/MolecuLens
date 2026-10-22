@@ -57,7 +57,7 @@ float parseFloat(const std::string& s, float fallback) {
 
 // GRO 原子名 → 元素类型（正确距离判键的前置：元素必须解析对）。
 // GRO 常见命名不是元素符号：水 OW/HW、离子 NA/CL、残基原子 C05/O01（数字序号）。
-// 规则（参考 VMD/OpenBabel guessbonds 的元素推断）：
+// 规则（参考 OpenBabel guessbonds 的元素推断）：
 //   1) 去掉尾随数字与常见英文标记字符（'W','H','1','2' 等）后精确匹配元素符号
 //   2) 否则贪心取最长可转元素的前缀（<=2 字母），剩余视为标记（OW→O、HW→H）
 //   3) 仍失败 → Unknown（键搜索对 Unknown 原子跳过，避免 0 半径假键）

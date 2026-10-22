@@ -272,7 +272,7 @@ void drawSurface(const RepContext& ctx, SceneCommandList& out) {
     }
 
     // TriMesh 输出（法线 + 逐顶点按原子着色）。
-    // 与 VMD 的 Surf「Coloring Method」对齐：顶点色取所属体素最近原子的
+    // 与 Surf「Coloring Method」对齐：顶点色取所属体素最近原子的
     // Representer::colorForAtom（Name 方案下即 C 青/N 蓝/O 红/H 白）。此前这里写死
     // 浅蓝，导致「一个链/一个表面只有一种颜色」——正是用户报告的线框/表面配色问题。
     std::vector<TriMeshVertex> mesh;

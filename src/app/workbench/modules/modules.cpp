@@ -107,7 +107,7 @@ int typeIndex(RepresentationType t) {
 }
 
 const char* kColorSchemeNames[] = {"元素 CPK", "按链", "按残基", "按 BFactor",
-                                   "统一色", "按原子名 (VMD)"};
+                                   "统一色", "按原子名"};
 
 void applyMaterial(RepresentationController* ctl, int32_t id, int presetIdx) {
     if (ctl == nullptr || presetIdx < 0 || presetIdx >= engine::kMaterialPresetCount) {
@@ -265,11 +265,11 @@ std::string buildResnameSelection(const std::vector<std::string>& included,
     return out;
 }
 
-// 一键风格：VMD「Glass + DynamicBonds」观感（v2.6）
+// 一键风格：「Glass + DynamicBonds」观感（v2.6）
 //   表面 = 整体系 QuickSurf + Glass2 + 不透明度 0.32 + Name 配色
 //   球棍 = Opaque + Name 配色（在玻璃壳内部，透过壳可见）
-//   背景 = 近白（与 VMD 参考图一致的棚拍观感）
-[[maybe_unused]] void applyVmdGlassPreset(Workbench& wb) {
+//   背景 = 近白（棚拍观感）
+[[maybe_unused]] void applyGlassPreset(Workbench& wb) {
     RepresentationController* ctl = wb.reps();
     if (ctl == nullptr) {
         return;
@@ -658,7 +658,7 @@ static void renderMoleculeSection(Workbench& wb) {
         ImGui::PopID();
     }
 }
-// v2.9：表示表格（VMD Graphical Representations 的对照布局）。
+// v2.9：表示表格（图形表示对话框的对照布局）。
 // 一屏列出「名称 / 样式 / 配色 / 选择」，点行切换当前编辑对象，行尾 × 直接删除；
 // 比「下拉选一个再编辑」更适合 3 条以上表示的场合。
 // 「作用分子」编辑器（v2.9）：顶部三个快捷按钮 + 按结构勾选。
@@ -937,7 +937,7 @@ static void styleCombo(Workbench& wb, int32_t id, const Representation& r) {
         }
         const std::string style = engine::representationTypeZh(rep.type);
         const std::string color = engine::colorSchemeZh(rep.colorScheme);
-        // v2.9：样式/配色单元格可点击，弹出 VMD 式快速选择（不必先选中行再滚到下方表单）
+        // v2.9：样式/配色单元格可点击，弹出快速选择（不必先选中行再滚到下方表单）
         const auto popupStyles = [&](int32_t repId) {
             for (const auto& entry : kTypes) {
                 const bool cur = (entry.type == rep.type);
@@ -1418,7 +1418,7 @@ public:
         }
         ImGui::TextDisabled("%s", tr("例：not element H · resid 1-20 · within 4 of element Fe"));
 
-        // 作用分子（v2.9，VMD 式）：直接勾分子，自动改写上面的选择表达式
+        // 作用分子（v2.9，勾选式）：直接勾分子，自动改写上面的选择表达式
         if (wb.data() != nullptr &&
             ImGui::TreeNodeEx(tr("作用分子（多选）"), ImGuiTreeNodeFlags_SpanAvailWidth)) {
             DataManager* dm = wb.data();

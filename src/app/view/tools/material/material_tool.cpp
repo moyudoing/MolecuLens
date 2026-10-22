@@ -1,8 +1,8 @@
 // =============================================================================
 // Moleculens · app · view/tools/material/material_tool.cpp —— 材质面板实现
 // 规格来源：主方案 §6.6.2（材质预设）/ §6.6.6（调整 → 表示材质 → 脏位置位）
-// 材质库：engine/render/render_parameter.h 的 kMaterialPresets（23 套，与 VMD
-//         Material 下拉同名）；本面板只做选择与逐参数微调，不另存一份数值表。
+// 材质库：engine/render/render_parameter.h 的 kMaterialPresets（23 套，名称沿用
+//         经典材质库）；本面板只做选择与逐参数微调，不另存一份数值表。
 // =============================================================================
 
 #include "app/i18n/language.h"
@@ -62,7 +62,7 @@ void MaterialTool::render(DataManager* dm, MolScene* scene) {
     const engine::Representation& rep = reps[static_cast<size_t>(activeRep)];
     ImGui::TextDisabled(tr("正在编辑：%s"), rep.name.c_str());
 
-    // —— 材质预设（23 套，名字与 VMD 的 Material 下拉对齐）——
+    // —— 材质预设（23 套，名称沿用经典材质库）——
     // 回显以 rep.materialPreset 为准；若该下标对应的数值与当前参数已不符
     // （外部改了参数 / 载入了别的场景），显示"自定义"。
     int comboIdx = rep.materialPreset;
@@ -89,7 +89,7 @@ void MaterialTool::render(DataManager* dm, MolScene* scene) {
                                        p.shininess, p.metallic, p.roughness, p.opacity);
         }
     }
-    UITheme::helpMarker(tr("23 套材质（名字对齐 VMD 的 Material 下拉）。\n" "数值是按本引擎 Phong/PBR 管线观感调校的近似值，非 VMD 原表；\n" "Edgy*/AO* 在 VMD 里依赖描边与环境光遮蔽通道，本引擎以" "高光/环境光近似。"));
+    UITheme::helpMarker(tr("23 套材质（名称沿用经典材质库）。\n数值是按本引擎 Phong/PBR 管线观感调校的近似值，非原始参数表；\nEdgy*/AO* 类材质依赖描边与环境光遮蔽通道，本引擎以高光/环境光近似。"));
 
     // —— 逐参数微调（改任一项即转"自定义"）——
     float ambient[4], diffuse[4], specular[4];

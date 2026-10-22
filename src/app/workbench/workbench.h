@@ -212,7 +212,7 @@ public:
     void addLabel(const std::string& text, const glm::vec3& pos);
     void labelMolecules(size_t first, size_t count);
     void clearAnnotations();
-    // 出版风格：黑底 + 关阴影 + 平光材质（VMD 黑底卡通观感）
+    // 出版风格：黑底 + 关阴影 + 平光材质（黑底卡通观感）
     void applyPublicationStyle();
     // 示意图风格：黑底 + 平光 + 强轮廓 + 关阴影 + 无距离淡出（参考 TCBG 光合体系图）
     void applyDiagramStyle();

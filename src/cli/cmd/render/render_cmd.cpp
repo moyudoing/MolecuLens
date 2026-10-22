@@ -70,7 +70,7 @@ bool parseStyle(const std::string& name, engine::RepresentationType* out) {
     return true;
 }
 
-// 配色方案（与 GUI 的「配色」下拉一致；name = VMD Name 观感）
+// 配色方案（与 GUI 的「配色」下拉一致；name = 原子名配色）
 bool parseColorScheme(const std::string& name, engine::ColorScheme* out) {
     std::string s = name;
     std::transform(s.begin(), s.end(), s.begin(),
@@ -291,7 +291,7 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
     sub->add_option("--repr", repr, "表示风格 (wireframe/stick/ballstick/spacefill/...)");
     sub->add_option("--coloring", colorName,
                     "配色方法 (element/chain/residue/bfactor/uniform/name；"
-                    "name = VMD Name 观感：碳青/氮蓝/氧红/氢白)");
+                    "name = 原子名配色：碳青/氮蓝/氧红/氢白)");
     sub->add_option("--rep", repSpecs,
                     "多表示（可重复），格式 style[:selection[:color[:opacity]]]，"
                     "例如 --rep 'quicksurf:all:name:0.25' --rep 'surface:not resname SOL:name'");
@@ -475,7 +475,7 @@ static int rtSpp = 0;                  // --rt：>0 时改用 CPU 光追出图�
                 std::exit(3);
             }
         } else if (type == engine::RepresentationType::Wireframe) {
-            // 未指定配色时：线框默认用 VMD 的按原子名配色（与 GUI 默认策略一致）
+            // 未指定配色时：线框默认用按原子名配色（与 GUI 默认策略一致）
             colorScheme = engine::ColorScheme::AtomName;
         }
         // ESP 表面：--esp 提供静电势 cube 时追加一条 EspSurface 表示

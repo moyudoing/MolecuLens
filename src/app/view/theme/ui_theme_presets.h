@@ -193,7 +193,7 @@ inline ThemeColors getThemeColors(UIThemePreset preset) {
                 ImVec4(0.345f, 0.431f, 0.459f, 1.0f),  // textMuted #586E75
             };
 
-        // —— 亮色主题：参考图（VMD）是浅灰原生风格 ——
+        // —— 亮色主题：参考图是浅灰原生风格 ——
         case UIThemePreset::Light:
             return {
                 ImVec4(0.941f, 0.941f, 0.949f, 1.0f),  // bg #F0F0F2（浅灰底）

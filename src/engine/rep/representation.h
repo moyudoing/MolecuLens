@@ -37,10 +37,10 @@ enum class RepresentationType : uint8_t {
 
 enum class ColorScheme : uint8_t {
     ElementCPK, Chain, Residue, BFactor, Uniform,
-    // VMD「Coloring Method = Name」的观感调色板（v2.3）：
+    // 原子名（Coloring Method = Name）观感调色板（v2.3）：
     // C 青、N 蓝、O 红、H 白、S 黄、P 橙，其余回落 CPK。
-    // 与 ElementCPK 的区别就是碳——CPK 的碳是灰色，VMD Name 的碳是青色，
-    // 这正是用户对比 VMD 截图时觉得"颜色不一样"的地方。
+    // 与 ElementCPK 的区别就是碳——CPK 的碳是灰色，原子名配色的碳是青色，
+    // 这正是用户对比参考截图时觉得"颜色不一样"的地方。
     AtomName,
     Count,
 };

@@ -54,7 +54,7 @@ void BondSearch::search(const std::vector<glm::vec3>& positions,
     };
 
     // 1) 计算每原子判键距离 + 体系最大判键距离（cell 尺寸）。
-    //    正确距离判键（主方案 §4.7 参考 VMD guessbonds / RDKit 距离规则）：
+    //    正确距离判键（主方案 §4.7 参考 guessbonds / RDKit 距离规则）：
     //      bond 判据：dist ≤ cov(a) + cov(b) + tolerance，
     //      其中 tolerance 默认 0.45Å；对含 H 的键收窄为 0.40Å（H 键长更短，
     //      可避免水分子 O–H…O 氢键/跨溶剂假键），金属/Unknown 原子不参与判键

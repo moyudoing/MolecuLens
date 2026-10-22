@@ -40,7 +40,7 @@ const char* colorSchemeZhImpl(ColorScheme scheme) noexcept {
         case ColorScheme::Residue:     return "按残基";
         case ColorScheme::BFactor:     return "按 BFactor";
         case ColorScheme::Uniform:     return "统一色";
-        case ColorScheme::AtomName:    return "按原子名 (VMD)";
+        case ColorScheme::AtomName:    return "按原子名";
         default:                       return "未知";
     }
 }
@@ -176,7 +176,7 @@ glm::vec4 Representer::colorForAtomSrgb(const RepContext& ctx, uint32_t globalAt
             return glm::vec4(bfactorColor(b), 1.0f);
         }
         case ColorScheme::AtomName: {
-            // VMD「Name」观感：碳青、氮蓝、氧红、氢白、硫黄、磷橙；其余回落元素色。
+            // 原子名（Name）观感：碳青、氮蓝、氧红、氢白、硫黄、磷橙；其余回落元素色。
             const auto& info = elementInfo(st.elements[localIdx]);
             const char* sym = info.symbol != nullptr ? info.symbol : "";
             if (sym[0] == 'C') {

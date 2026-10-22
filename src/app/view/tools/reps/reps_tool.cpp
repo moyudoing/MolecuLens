@@ -1,6 +1,6 @@
 // =============================================================================
 // Moleculens · app · view/tools/reps/reps_tool.cpp —— 图形表示面板实现
-// 规格来源：需求附图（VMD Graphical Representations 的四页签与控件）
+// 规格来源：需求附图（图形表示对话框的四页签与控件）
 // =============================================================================
 
 #include "app/i18n/language.h"
@@ -32,11 +32,11 @@ namespace moleculens::app {
 
 namespace {
 
-// —— Drawing Method（参考图的 27 项 VMD 绘图方法）——
+// —— Drawing Method（参考图的 27 项绘图方法）——
 // implemented=false 的项**置灰列出**而不是隐藏：参考图把它们都摆出来了，用户会去
 // 找；如实标注"本引擎未实现"远好于静默映射到另一个样式（那会让用户以为选对了）。
 struct DrawMethodEntry {
-    const char* vmdName;              // 参考图里的名字
+    const char* methodName;           // 参考图里的名字
     engine::RepresentationType type;  // 对应本引擎的样式（未实现项仅作占位）
     bool implemented;
     const char* note;                 // 未实现时的说明
@@ -386,7 +386,7 @@ void RepsTool::renderDrawStyleTab(int32_t repId) {
         onChange();
     }
 
-    // —— Material（23 套，与 VMD 的 Material 下拉同名）——
+    // —— Material（23 套，名称沿用经典材质库）——
     int matIdx = edit.materialPreset;
     if (matIdx < 0 || matIdx > engine::kMaterialPresetCount) {
         matIdx = engine::kMaterialPresetCount;   // 自定义
@@ -411,22 +411,22 @@ void RepsTool::renderDrawStyleTab(int32_t repId) {
     ImGui::TextUnformatted("Drawing Method");
     ImGui::SameLine(170.0f);
     ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::BeginCombo("##drawmethod", kDrawMethods[dmIdx].vmdName)) {
+    if (ImGui::BeginCombo("##drawmethod", kDrawMethods[dmIdx].methodName)) {
         for (int i = 0; i < kDrawMethodCount; ++i) {
             const DrawMethodEntry& e = kDrawMethods[i];
             ImGui::PushID(i);
             if (!e.implemented) {
                 ImGui::BeginDisabled();
-                ImGui::Selectable(e.vmdName, false);
+                ImGui::Selectable(e.methodName, false);
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
                     ImGui::SetTooltip(tr("本引擎未实现：%s"), e.note ? e.note : "—");
                 }
-            } else if (ImGui::Selectable(e.vmdName, i == dmIdx)) {
+            } else if (ImGui::Selectable(e.methodName, i == dmIdx)) {
                 const engine::RepresentationType oldType = edit.type;
                 edit.type = e.type;
-                // 线框默认用 VMD 的「按原子名」配色（碳青/氧红/氮蓝/氢白），
-                // 否则默认 ElementCPK 下碳灰、氢白，与 VMD 对照图观感差很远。
+                // 线框默认用「按原子名」配色（碳青/氧红/氮蓝/氢白），
+                // 否则默认 ElementCPK 下碳灰、氢白，与参考图观感差很远。
                 // 仅当配色仍是出厂默认时套用；用户改过就不覆盖。
                 if (oldType != engine::RepresentationType::Wireframe &&
                     e.type == engine::RepresentationType::Wireframe &&
@@ -848,7 +848,7 @@ void RepsTool::renderTrajectoryTab() {
     }
     UITheme::helpMarker(tr("结束帧 = 0 表示末帧（与时间轴 In/Out 同义）。"));
     ImGui::Separator();
-    ImGui::TextDisabled(tr("Update Style（VMD 的逐帧更新方式）在本引擎是内建的：\n" "帧切走坐标重放（只重写坐标载荷，不重建命令流）。\n" "含表面的表示无法重放（顶点数随坐标变化），会退回整条重建。"));
+    ImGui::TextDisabled(tr("Update Style（逐帧更新方式）在本引擎是内建的：\n帧切走坐标重放（只重写坐标载荷，不重建命令流）。\n含表面的表示无法重放（顶点数随坐标变化），会退回整条重建。"));
 }
 
 void RepsTool::renderPeriodicTab(MolScene* scene) {

@@ -1,10 +1,10 @@
 // =============================================================================
 // MolecuLens · entity · trajectory/dcd_reader.h —— DCD（CHARMM/NAMD）轨迹读取器
-// 格式来源：CHARMM DCD 二进制格式（NAMD / CHARMM / VMD 通用）
+// 格式来源：CHARMM DCD 二进制格式（NAMD / CHARMM 通用）
 //
 // 为什么自研而不是引 chemfiles：
 //   chemfiles 0.10.4 的 CMakeLists 声明 `cmake_minimum_required(VERSION 2.8.12)`
-//   （现代 CMake 需 policy 覆盖，CMake 4.x 直接拒绝），且**自带 VMD molfile 插件
+//   （现代 CMake 需 policy 覆盖，CMake 4.x 直接拒绝），且**自带 molfile 插件
 //   与内嵌 zlib/lzma/bzip2**（`$<TARGET_OBJECTS:molfiles>`，CHFL_SYSTEM_* 默认 OFF）
 //   —— 对只需要的 XTC/DCD/TRR 而言是数百源文件的重型依赖，且 molfiles 的 MSVC
 //   兼容性historically 不佳。DCD 无压缩、结构简单，自研约 200 行且零依赖。

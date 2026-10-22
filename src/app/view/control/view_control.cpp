@@ -387,7 +387,7 @@ bool ViewControl::init(engine::VulkanRenderer* vk, engine::Renderer* renderer,
         addModule(std::move(mt));
     }
     {
-        // 图形表示面板（VMD 式四页签）：表示级增删与全部参数都在这里；
+        // 图形表示面板（四页签）：表示级增删与全部参数都在这里；
         // styles_tool 只保留场景级设置（背景/雾/光照/视角）
         auto rp = std::make_unique<RepsTool>();
         repsTool_ = rp.get();

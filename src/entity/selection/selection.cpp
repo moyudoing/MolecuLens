@@ -498,8 +498,8 @@ private:
                                                             static_cast<uint32_t>(i))),
                                 c.valS);
                 } else if (c.attr == "resname") {
-                    // 残基名（VMD 的 resname）：水 = SOL/WAT/HOH/TIP3 等，可写
-                    // "not resname SOL" 只留溶质（对齐 VMD 的 "not water" 用法）。
+                    // 残基名（resname）：水 = SOL/WAT/HOH/TIP3 等，可写
+                    // "not resname SOL" 只留溶质（对齐 "not water" 用法）。
                     const int32_t rid = st.atoms[i].residueId;
                     hit = rid >= 0 && eqStr(std::string(scene_.residueName(rid)), c.valS);
                 } else if (c.attr == "resid") {

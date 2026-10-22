@@ -1,6 +1,6 @@
 // =============================================================================
-// Moleculens · app · view/tools/reps/reps_tool.h —— 图形表示面板（VMD 式）
-// 规格来源：需求附图（VMD 的 Graphical Representations 对话框）
+// Moleculens · app · view/tools/reps/reps_tool.h —— 图形表示面板
+// 规格来源：需求附图（图形表示对话框）
 //   顶部：Selected Molecule + Create/Delete Rep + 表示表格(Style/Color/Selection)
 //         + Selected Atoms
 //   页签：Draw style / Selections / Trajectory / Periodic

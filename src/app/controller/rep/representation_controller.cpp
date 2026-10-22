@@ -36,7 +36,7 @@ int32_t RepresentationController::addRepresentation(const std::string& name,
     rep.type = type;
     rep.selection = selection;
     rep.colorScheme = scheme;
-    // v2.8：新建分子表面 / 快速表面时默认「整体系合并」——与 VMD 默认只出一张
+    // v2.8：新建分子表面 / 快速表面时默认「整体系合并」——与默认只出一张
     // 连续表面的观感一致，也避免多实例体系里 2000+ 个水分子各生成一张小球壳。
     if (type == engine::RepresentationType::Surface ||
         type == engine::RepresentationType::QuickSurf) {

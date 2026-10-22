@@ -40,7 +40,7 @@ void main() {
     col = mix(col, fogColor(), depthCueFactor(vDist));
 
     float alpha = mat.matOpacity * vColor.a;
-    // 玻璃壳（VMD Glass 观感）：掠射角处光程变长 → 吸收更多（边缘更暗）、反射更强
+    // 玻璃壳（Glass 观感）：掠射角处光程变长 → 吸收更多（边缘更暗）、反射更强
     // （高光更亮），同时不透明度升高，形成清晰的薄壳轮廓。正面则更通透。
     // 只有半透明片元启用；不透明片元（球棍/线框）alpha=1 完全不受影响。
     if (alpha < 0.95) {
@@ -51,7 +51,7 @@ void main() {
         alpha = clamp(alpha + (1.0 - alpha) * fres * 0.90, 0.0, 1.0);
         col *= mix(1.0, 0.72, fres);                              // 边缘吸收偏暗
         col += vec3(0.60, 0.72, 0.90) * (rim * 0.18);             // 冷调反射底
-        col += mat.matSpecular.rgb * (rim * 0.55);                // 掠射高光（VMD 那道亮边）
+        col += mat.matSpecular.rgb * (rim * 0.55);                // 掠射高光（边缘亮边）
     }
 
     outColor = vec4(col, alpha);

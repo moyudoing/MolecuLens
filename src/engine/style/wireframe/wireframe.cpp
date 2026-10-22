@@ -41,7 +41,7 @@ namespace moleculens::engine {
                 continue;
                 }
 
-            // 半键着色（VMD Lines 的做法）：一条键拆成两段，各用本端原子的颜色。
+            // 半键着色（Lines 的做法）：一条键拆成两段，各用本端原子的颜色。
             // 以前整条键用 a 端颜色 —— 水分子 O-H 全画成红色、蛋白质里 C-N 全按碳色，
             // 视觉上就像"一条链只有一种颜色"。拆半后按原子名/元素配色才分得开。
             const glm::vec3 pa = pos[ga];
