@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 构建与依赖 / Build & dependencies
+    url: https://github.com/moyudoing/MolecuLens/blob/master/DEPENDENCIES.md
+    about: CMake, vcpkg, Vulkan SDK and ffmpeg versions, plus platform notes.
+  - name: 使用说明与文档 / Documentation
+    url: https://github.com/moyudoing/MolecuLens/tree/master/docs
+    about: Installation, UI tour, CLI reference and the DFT figure cookbook (Chinese).
+  - name: 已知问题清单 / Known issues
+    url: https://github.com/moyudoing/MolecuLens/blob/master/REMAINING_WORK.md
+    about: Open work index and the "do not redo" list — check here before filing.

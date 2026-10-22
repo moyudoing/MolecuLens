@@ -1,0 +1,75 @@
+name: "✨ Feature request / 功能建议"
+description: Suggest a capability, a workflow improvement, or a representation/format we do not support yet.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the **problem** first and the proposed solution second — it makes it much
+        easier to judge fit with the existing architecture.
+
+        先讲**问题**，再讲方案，这样更容易判断它和现有架构是否合拍。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / 要解决的问题
+      description: What are you trying to do, and where does the current build get in the way?
+      placeholder: |
+        e.g. I export 40 figures per paper and the style preset resets every time I launch the CLI,
+        so I have to repeat four flags in every command.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution / 建议方案
+      description: Command line, UI, or API shape you would like to see. Sketches welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / 其它做法
+      description: Workarounds you use today, or alternative designs you considered.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 模块
+      options:
+        - Rendering / 渲染
+        - Ray tracing / 光追
+        - Representations & colouring / 表示与配色
+        - GUI / workbench / 界面
+        - Trajectory & timeline / 轨迹与时间轴
+        - CLI / 命令行
+        - Import & export / 导入导出
+        - DFT property views / DFT 属性视图
+        - Performance / 性能
+        - Documentation / 文档
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References / 参考
+      description: Papers, other tools, screenshots or figures that show the target behaviour.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: willingness
+    attributes:
+      label: Contribution / 参与
+      options:
+        - label: I would be willing to implement this (with guidance on the design).
+          required: false
+        - label: I can provide test data or a benchmark case.
+          required: false

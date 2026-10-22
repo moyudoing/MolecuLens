@@ -214,9 +214,11 @@ See [ROADMAP-渲染与DFT视图](docs/_internal/ROADMAP-渲染与DFT视图.md) a
 
 ## Contributing
 
-Issues and pull requests are welcome. Please run `moleculens_tests` and keep rendering changes
-bit-exact (compare PNG md5 before and after). By submitting a contribution you agree to license it
-under Apache-2.0 (DCO style).
+Issues and pull requests are welcome. Start with **[CONTRIBUTING.md](CONTRIBUTING.md)** — it covers
+the local build, the conventions this codebase enforces (naming, directory granularity, dependency
+direction) and the one rule reviewers check hardest: rendering changes must be bit-exact, proved by
+an unchanged PNG md5. Please run `moleculens_tests` before opening a PR, and sign your commits
+(`git commit -s`) to certify the Apache-2.0 contribution.
 
 ## License
 

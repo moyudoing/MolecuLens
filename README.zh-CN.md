@@ -213,8 +213,10 @@ data/         演示结构、轨迹夹具、界面字体
 
 ## 参与
 
-欢迎 issue 与 PR。提交前请跑一遍 `moleculens_tests`；渲染相关改动请保持逐位一致（改前改后比 PNG md5）。
-提交即表示同意按 Apache-2.0 授权你的贡献（DCO 风格）。
+欢迎 issue 与 PR。先看 **[CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md)**：里面写了本地构建、
+这个仓库坚守的约定（命名、目录粒度、依赖方向），以及评审时查得最严的一条——渲染改动必须逐位一致，
+用改前改后相同的 PNG md5 证明。提 PR 前请跑一遍 `moleculens_tests`，并用 `git commit -s` 签署，
+表示同意按 Apache-2.0 授权你的贡献。
 
 ## 许可证
 
