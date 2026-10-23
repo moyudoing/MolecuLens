@@ -13,6 +13,16 @@
 
 namespace moleculens::engine {
 
+// 左键拖拽 → 轨道角增量（弧度）。dx/dy 是屏幕像素位移（ImGui：y 向下为正），
+// sensitivity = 每像素弧度。语义 = "抓住分子拖"（与主流查看器一致）：
+//   · 拖右（dx>0）→ 相机向左绕（yaw 减小），分子右侧转到面前；
+//   · 拖下（dy>0）→ pitch 增大（相机升高、从上方看），屏幕上分子跟着向下滑。
+// 旧实现把 dy 也取负 → 往上拖时分子反而往下跑（用户反馈"左键手势很奇怪"）。
+// 把符号集中在这里而不是散在视图层：这是能直接感知的方向，必须可单测。
+inline glm::vec2 orbitDragDelta(float dxPixels, float dyPixels, float sensitivity) {
+    return glm::vec2(-dxPixels * sensitivity, dyPixels * sensitivity);
+}
+
 class OrbitCamera {
 public:
     glm::vec3 target{0.0f};

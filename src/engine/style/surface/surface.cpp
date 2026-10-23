@@ -8,12 +8,17 @@
 
 #include "engine/style/surface/surface.h"
 #include "engine/style/surface/mc_tables.h"
+#include "engine/style/quicksurf/quicksurf.h"   // 平滑表面复用高斯密度内核
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cfloat>
 #include <cmath>
+#include <cstdint>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "entity/element/element.h"
@@ -116,6 +121,164 @@ void computeVdwSurfaceField(const std::vector<glm::vec3>& centers,
     }
 }
 
+// 可分离二项式平滑（1-4-6-4-1 / 16，等效高斯 σ≈1 体素），X/Y/Z 各一次。
+// 用于抹掉 vdW 并集在溶剂盒上的"水分子级疙瘩"——用户反馈的表面渲染成
+// "云雾状方盒"就是这些高频起伏。边界用最近邻钳制（不外扩、不塌边）。
+// 5 抽头（而非 3×3×3 盒式）在同样迭代次数下平滑半径更大，1 次就能明显
+// 消除水分子尺度（~1.5 Å）的起伏。
+void smoothScalarField(std::vector<float>& f, int nx, int ny, int nz, int iterations) {
+    if (iterations <= 0 || nx < 3 || ny < 3 || nz < 3) {
+        return;
+    }
+    std::vector<float> tmp(f.size());
+    const auto idx = [&](int x, int y, int z) {
+        return static_cast<size_t>(z) * nx * ny + static_cast<size_t>(y) * nx +
+               static_cast<size_t>(x);
+    };
+    // 一维 5 抽头卷积（钳制到边界）
+    const auto tap = [](int i, int n) {
+        return std::array<int, 5>{std::clamp(i - 2, 0, n - 1),
+                                  std::clamp(i - 1, 0, n - 1), i,
+                                  std::clamp(i + 1, 0, n - 1),
+                                  std::clamp(i + 2, 0, n - 1)};
+    };
+    for (int it = 0; it < iterations; ++it) {
+        for (int z = 0; z < nz; ++z) {
+            for (int y = 0; y < ny; ++y) {
+                for (int x = 0; x < nx; ++x) {
+                    const auto t = tap(x, nx);
+                    tmp[idx(x, y, z)] = (f[idx(t[0], y, z)] + 4.0f * f[idx(t[1], y, z)] +
+                                         6.0f * f[idx(t[2], y, z)] +
+                                         4.0f * f[idx(t[3], y, z)] +
+                                         f[idx(t[4], y, z)]) /
+                                        16.0f;
+                }
+            }
+        }
+        f.swap(tmp);
+        for (int z = 0; z < nz; ++z) {
+            for (int y = 0; y < ny; ++y) {
+                const auto t = tap(y, ny);
+                for (int x = 0; x < nx; ++x) {
+                    tmp[idx(x, y, z)] = (f[idx(x, t[0], z)] + 4.0f * f[idx(x, t[1], z)] +
+                                         6.0f * f[idx(x, t[2], z)] +
+                                         4.0f * f[idx(x, t[3], z)] +
+                                         f[idx(x, t[4], z)]) /
+                                        16.0f;
+                }
+            }
+        }
+        f.swap(tmp);
+        for (int z = 0; z < nz; ++z) {
+            const auto t = tap(z, nz);
+            for (int y = 0; y < ny; ++y) {
+                for (int x = 0; x < nx; ++x) {
+                    tmp[idx(x, y, z)] = (f[idx(x, y, t[0])] + 4.0f * f[idx(x, y, t[1])] +
+                                         6.0f * f[idx(x, y, t[2])] +
+                                         4.0f * f[idx(x, y, t[3])] +
+                                         f[idx(x, y, t[4])]) /
+                                        16.0f;
+                }
+            }
+        }
+        f.swap(tmp);
+    }
+}
+
+// 表面法线 = 平滑标量场的梯度（中心差分）。旧实现用"指向最近原子中心"的球面
+// 法线：在每个原子的 bisector 平面上法线突变，表面看起来像一堆小球拼出来的
+// （大理石/云雾感），这是用户截图里"表面渲染效果不对"的主因之一。梯度法线
+// 在原子之间连续过渡，配合平滑后是干净的分子表面。
+glm::vec3 fieldGradientNormal(const std::vector<float>& f, int nx, int ny, int nz,
+                              int x, int y, int z, const glm::vec3& fallback) {
+    const auto at = [&](int xx, int yy, int zz) {
+        return f[static_cast<size_t>(zz) * nx * ny + static_cast<size_t>(yy) * nx +
+                 static_cast<size_t>(xx)];
+    };
+    const int xm = std::max(0, x - 1);
+    const int xp = std::min(nx - 1, x + 1);
+    const int ym = std::max(0, y - 1);
+    const int yp = std::min(ny - 1, y + 1);
+    const int zm = std::max(0, z - 1);
+    const int zp = std::min(nz - 1, z + 1);
+    const glm::vec3 g(at(xp, y, z) - at(xm, y, z), at(x, yp, z) - at(x, ym, z),
+                      at(x, y, zp) - at(x, y, zm));
+    const float len = glm::length(g);
+    if (len < 1e-8f) {
+        return fallback;   // 平坦区域：退回最近原子法线（极小概率）
+    }
+    return g / len;
+}
+
+// 顶点 → 最近原子下标（空间哈希，cell ≈ 3 Å）。密度场等值面的顶点不再携带
+// "最近原子"信息，而逐顶点着色（元素/链/残基/统一色）仍需要它。哈希网格把
+// 5 万顶点 × 数千原子的查询从 O(V·N) 降到近 O(V)。
+std::vector<uint32_t> nearestAtomForVertices(const std::vector<glm::vec3>& centers,
+                                             const std::vector<glm::vec3>& verts) {
+    std::vector<uint32_t> out(verts.size(), 0u);
+    if (centers.empty() || verts.empty()) {
+        return out;
+    }
+    const auto brute = [&](size_t vi) {
+        float best = FLT_MAX;
+        uint32_t bi = 0;
+        for (size_t j = 0; j < centers.size(); ++j) {
+            const glm::vec3 d = verts[vi] - centers[j];
+            const float d2 = glm::dot(d, d);
+            if (d2 < best) {
+                best = d2;
+                bi = static_cast<uint32_t>(j);
+            }
+        }
+        return bi;
+    };
+    if (centers.size() <= 64) {
+        for (size_t i = 0; i < verts.size(); ++i) {
+            out[i] = brute(i);
+        }
+        return out;
+    }
+    constexpr float kCell = 3.0f;
+    const auto keyOf = [](int x, int y, int z) -> uint64_t {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 42) |
+               (static_cast<uint64_t>(static_cast<uint32_t>(y)) << 21) |
+               static_cast<uint32_t>(z);
+    };
+    std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+    grid.reserve(centers.size() * 2);
+    for (uint32_t i = 0; i < centers.size(); ++i) {
+        const glm::ivec3 c = glm::ivec3(glm::floor(centers[i] / kCell));
+        grid[keyOf(c.x, c.y, c.z)].push_back(i);
+    }
+    for (size_t vi = 0; vi < verts.size(); ++vi) {
+        const glm::ivec3 c = glm::ivec3(glm::floor(verts[vi] / kCell));
+        float best = FLT_MAX;
+        uint32_t bi = 0;
+        bool found = false;
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const auto it = grid.find(keyOf(c.x + dx, c.y + dy, c.z + dz));
+                    if (it == grid.end()) {
+                        continue;
+                    }
+                    for (uint32_t j : it->second) {
+                        const glm::vec3 d = verts[vi] - centers[j];
+                        const float d2 = glm::dot(d, d);
+                        if (d2 < best) {
+                            best = d2;
+                            bi = j;
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        out[vi] = found ? bi : brute(vi);
+    }
+    return out;
+}
+
 } // namespace
 
 void drawSurface(const RepContext& ctx, SceneCommandList& out) {
@@ -141,6 +304,35 @@ void drawSurface(const RepContext& ctx, SceneCommandList& out) {
     }
     if (centers.empty()) {
         return;
+    }
+
+    // —— v2.20：平滑分子表面（高斯密度等值面）——
+    // 纯 vdW 并集是一堆小球拼出来的"大理石"表面：法线在原子 bisector 处突变，
+    // 溶剂盒上还会出现密密麻麻的水分子疙瘩（用户反馈的"云雾状方盒"）。
+    // surfSmooth>=1 时改用与 QuickSurf 相同的高斯密度内核（AVX2/多线程），
+    // 表面在原子之间平滑融合、法线取密度梯度；0 = 旧 vdW 路径（逐位兼容）。
+    const int smoothLevel = std::clamp(ctx.rep->surfSmooth, 0, 3);
+    if (smoothLevel > 0) {
+        const float gridSp = std::clamp(ctx.rep->surfGridSpacing, 0.15f, 2.0f);
+        const float radscale = 1.0f + 0.25f * static_cast<float>(smoothLevel - 1);
+        const float iso = std::clamp(ctx.rep->surfIsovalue, 0.05f, 2.0f);
+        QuickSurfMesh qm;
+        if (quickSurfMesh(centers, radii, radscale, gridSp, iso, qm) &&
+            !qm.positions.empty() && !qm.indices.empty()) {
+            const std::vector<uint32_t> near = nearestAtomForVertices(centers, qm.positions);
+            std::vector<TriMeshVertex> mesh(qm.positions.size());
+            for (size_t i = 0; i < qm.positions.size(); ++i) {
+                mesh[i].pos = glm::vec4(qm.positions[i], 0.0f);
+                mesh[i].normal = glm::vec4(
+                    i < qm.normals.size() ? qm.normals[i] : glm::vec3(0.0f, 1.0f, 0.0f),
+                    0.0f);
+                mesh[i].color = Representer::colorForAtom(
+                    ctx, atomGlobal[static_cast<size_t>(near[i])]);
+            }
+            out.appendTriMesh(mesh, qm.indices);
+            return;
+        }
+        // 密度核失败（极端体系/内存不足）：退回下面的 vdW MC，至少出图。
     }
 
     // 包围盒 + 边距
@@ -191,6 +383,7 @@ void drawSurface(const RepContext& ctx, SceneCommandList& out) {
                static_cast<size_t>(x);
     };
     computeVdwSurfaceField(centers, radii, lo, dims, sp, field, nearest);
+    smoothScalarField(field, nx, ny, nz, ctx.rep->surfSmooth);
 
     // Marching Cubes 抽取 f==0 等值面
     std::vector<glm::vec3> verts;
@@ -202,10 +395,18 @@ void drawSurface(const RepContext& ctx, SceneCommandList& out) {
         const float f0 = field[idx(x0, y0, z0)], f1 = field[idx(x1, y1, z1)];
         const float t = (f1 - f0) != 0.0f ? f0 / (f0 - f1) : 0.5f;
         const glm::vec3 p = glm::mix(p0, p1, glm::clamp(t, 0.0f, 1.0f));
-        // 法线 = 指向最近原子中心（vdW 球面法线）
+        // 法线 = 平滑标量场的梯度（连续，原子之间不再有 bisector 折痕）；
+        // 退化区域退回"指向最近原子中心"的球面法线。
+        const int gx = std::clamp(
+            static_cast<int>(std::lround((p.x - lo.x) * invSp.x)), 0, nx - 1);
+        const int gy = std::clamp(
+            static_cast<int>(std::lround((p.y - lo.y) * invSp.y)), 0, ny - 1);
+        const int gz = std::clamp(
+            static_cast<int>(std::lround((p.z - lo.z) * invSp.z)), 0, nz - 1);
         const int ai = nearest[idx(x0, y0, z0)];
         const glm::vec3 c = centers[static_cast<size_t>(ai)];
-        *outNrm = glm::normalize(p - c);
+        *outNrm = fieldGradientNormal(field, nx, ny, nz, gx, gy, gz,
+                                      glm::normalize(p - c));
         return p;
     };
 
@@ -355,6 +556,36 @@ void drawSystemSurface(const RepContext& ctx, SceneCommandList& out) {
         return;
     }
 
+    // —— v2.20：平滑体系表面（高斯密度等值面，与逐分子路径一致）——
+    const int smoothLevel = std::clamp(ctx.rep->surfSmooth, 0, 3);
+    if (smoothLevel > 0) {
+        const float gridSp = std::clamp(ctx.rep->surfGridSpacing, 0.15f, 2.0f);
+        const float radscale = 1.0f + 0.25f * static_cast<float>(smoothLevel - 1);
+        const float iso = std::clamp(ctx.rep->surfIsovalue, 0.05f, 2.0f);
+        QuickSurfMesh qm;
+        if (quickSurfMesh(centers, radii, radscale, gridSp, iso, qm) &&
+            !qm.positions.empty() && !qm.indices.empty()) {
+            const std::vector<uint32_t> near = nearestAtomForVertices(centers, qm.positions);
+            std::vector<TriMeshVertex> mesh(qm.positions.size());
+            for (size_t i = 0; i < qm.positions.size(); ++i) {
+                mesh[i].pos = glm::vec4(qm.positions[i], 0.0f);
+                mesh[i].normal = glm::vec4(
+                    i < qm.normals.size() ? qm.normals[i] : glm::vec3(0.0f, 1.0f, 0.0f),
+                    0.0f);
+                mesh[i].color = atomColors[static_cast<size_t>(near[i])];
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_systemSurfaceCache.mtx);
+                g_systemSurfaceCache.verts = mesh;
+                g_systemSurfaceCache.indices = qm.indices;
+                g_systemSurfaceCache.valid = true;
+            }
+            out.appendTriMesh(mesh, qm.indices);
+            return;
+        }
+        // 密度核失败：退回下面的 vdW MC。
+    }
+
     // 包围盒 + 边距
     const float margin = 1.2f;
     glm::vec3 lo = centers[0] - glm::vec3(radii[0]);
@@ -398,6 +629,8 @@ void drawSystemSurface(const RepContext& ctx, SceneCommandList& out) {
 
     // MC 抽取（与 drawSurface 相同逻辑）
     const int nx = dims.x, ny = dims.y, nz = dims.z;
+    // 与逐分子路径一致：先平滑标量场，抹掉溶剂盒上的水分子级疙瘩。
+    smoothScalarField(field, nx, ny, nz, ctx.rep->surfSmooth);
     const auto idx = [&](int x, int y, int z) {
         return static_cast<size_t>(z) * nx * ny + static_cast<size_t>(y) * nx +
                static_cast<size_t>(x);
@@ -408,14 +641,22 @@ void drawSystemSurface(const RepContext& ctx, SceneCommandList& out) {
     };
     std::vector<glm::vec3> verts, vertNrm;
     std::vector<uint32_t> indices;
+    const float fieldInvSp = 1.0f / std::max(sp, 1e-6f);
     auto interpolate = [&](int x0, int y0, int z0, int x1, int y1, int z1,
                            const glm::vec3& p0, const glm::vec3& p1, glm::vec3* outNrm) {
         const float f0 = field[idx(x0, y0, z0)], f1 = field[idx(x1, y1, z1)];
         const float t = (f1 - f0) != 0.0f ? f0 / (f0 - f1) : 0.5f;
         const glm::vec3 p = glm::mix(p0, p1, glm::clamp(t, 0.0f, 1.0f));
+        const int gx = std::clamp(
+            static_cast<int>(std::lround((p.x - lo.x) * fieldInvSp)), 0, nx - 1);
+        const int gy = std::clamp(
+            static_cast<int>(std::lround((p.y - lo.y) * fieldInvSp)), 0, ny - 1);
+        const int gz = std::clamp(
+            static_cast<int>(std::lround((p.z - lo.z) * fieldInvSp)), 0, nz - 1);
         const int ai = nearest[idx(x0, y0, z0)];
         const glm::vec3 c = centers[static_cast<size_t>(ai)];
-        *outNrm = glm::normalize(p - c);
+        *outNrm = fieldGradientNormal(field, nx, ny, nz, gx, gy, gz,
+                                      glm::normalize(p - c));
         return p;
     };
     for (int z = 0; z + 1 < nz; ++z) {

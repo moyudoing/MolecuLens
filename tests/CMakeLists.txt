@@ -39,6 +39,11 @@ add_executable(moleculens_tests
     vulkan/rt_smoke.cpp
     vulkan/single_atom_smoke.cpp
     view/layout_serialize_tests.cpp
+    # 分析统计 / XLSX 导出是 app 层纯数据代码（不依赖 ImGui/Vulkan），直接编进
+    # 测试目标，避免为它们再造一个库。
+    ${CMAKE_SOURCE_DIR}/src/app/workbench/analysis/molecule_stats.cpp
+    ${CMAKE_SOURCE_DIR}/src/app/workbench/analysis/xlsx_writer.cpp
+    app/analysis_tests.cpp
 )
 target_link_libraries(moleculens_tests PRIVATE moleculens_engine Catch2::Catch2WithMain)
 include(Catch)

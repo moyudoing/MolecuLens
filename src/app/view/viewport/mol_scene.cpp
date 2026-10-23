@@ -924,14 +924,11 @@ bool MolScene::handleMouse(float dx, float dy, int button) {
     //   根因之一。下面直接用 ImGuiMouseButton_* 常量，杜绝同类错位。
     const float sensitivity = 0.006f;
     if (button == ImGuiMouseButton_Left) {
-        // 左键轨道：**抓住分子拖**的手感（与主流查看器一致）：
-        //   · 水平：拖右 → 相机向左绕（分子右侧转过来），与 v2.13 用户要求一致，
-        //     所以 dx 取负；
-        //   · 垂直：ImGui 的 dy 向下为正。pitch 增大 = 相机升高（从上方看），
-        //     屏幕上分子会**向下**滑。要"分子跟着鼠标走"，拖下（dy>0）就该让
-        //     pitch 增大，因此 dy 必须取**正**。此前和 dx 一起取负 → 上下方向
-        //     相反，用户反馈"左键手势很奇怪"就是它。
-        cameraCtl_->orbit(-dx * sensitivity, dy * sensitivity);
+        // 左键轨道：**抓住分子拖**的手感（与主流查看器一致）。
+        // 方向符号集中在 engine/camera/camera.h 的 orbitDragDelta() 里，并有
+        // 单测覆盖：水平拖右 → 分子右侧转过来；垂直拖下 → 分子跟着向下。
+        const glm::vec2 d = engine::orbitDragDelta(dx, dy, sensitivity);
+        cameraCtl_->orbit(d.x, d.y);
     } else if (button == ImGuiMouseButton_Right) {
         const bool shift = ImGui::GetIO().KeyShift;
         if (!shift) {

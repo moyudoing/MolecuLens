@@ -277,6 +277,7 @@ static int rtSpp = 0;                  // --rt：>0 时改用光追出图（P1 �
     // 表面/快速表面参数（<=0 表示沿用 Representation 默认值）
     static float surfIso = -1.0f;        // 等值面阈值
     static float surfGrid = -1.0f;       // 网格间距（Å；越小越精细越慢）
+    static int surfSmooth = -1;          // 表面平滑次数（0–3；<0 = 用表示默认值 1）
     // 轨迹：把指定帧的坐标写进场景后再渲染（DCD/XTC/TRR）
     static std::string trajPath;         // 轨迹文件；空则渲染结构文件本身
     static int trajFrame = 0;            // 帧号（0 起；-1 = 末帧）
@@ -305,6 +306,8 @@ static int rtSpp = 0;                  // --rt：>0 时改用光追出图（P1 �
                     "表面等值面阈值（surface/quicksurf，缺省用内置 0.5）");
     sub->add_option("--surf-grid", surfGrid,
                     "表面网格间距 Å（越小越精细越慢，缺省 0.5）");
+    sub->add_option("--surf-smooth", surfSmooth,
+                    "表面平滑次数 0-3（vdW 标量场 3×3×3 平滑；缺省 1）");
     sub->add_option("--size", width, "宽度")->default_val(1920);
     sub->add_option("--height", height, "高度")->default_val(1080);
     sub->add_option("--detail", meshDetail,
@@ -538,6 +541,9 @@ static int rtSpp = 0;                  // --rt：>0 时改用光追出图（P1 �
                 if (surfGrid > 0.0f) {
                     rep.surfGridSpacing = surfGrid;
                 }
+                if (surfSmooth >= 0) {
+                    rep.surfSmooth = std::clamp(surfSmooth, 0, 3);
+                }
                 // --system-surface 对 --rep 生成的每条表示同样生效（此前只作用于 --repr，
                 // 导致「多表示 + 整体系表面」的组合静默退化成逐分子表面）
                 rep.systemSurface = systemSurface;
@@ -557,6 +563,9 @@ static int rtSpp = 0;                  // --rt：>0 时改用光追出图（P1 �
             }
             if (surfGrid > 0.0f) {
                 rep.surfGridSpacing = surfGrid;
+            }
+            if (surfSmooth >= 0) {
+                rep.surfSmooth = std::clamp(surfSmooth, 0, 3);
             }
             reps.push_back(rep);
         }

@@ -15,6 +15,29 @@
 
 namespace moleculens::app {
 
+namespace {
+// 溶剂化体系里「分子表面」的默认作用域：只包溶质（排除常见水名）。
+// 全部原子的 vdW 并集会把整个水盒渲染成一个"云雾状方壳"（用户实测截图）；
+// 需要溶剂表面时把「作用分子」改成全部分子即可。
+std::string defaultSolventFreeSelection(const entity::SceneStructure* scene) {
+    if (scene == nullptr) {
+        return {};
+    }
+    bool hasSolvent = false;
+    for (const auto& inst : scene->instances()) {
+        if (inst.isSolvent) {
+            hasSolvent = true;
+            break;
+        }
+    }
+    if (!hasSolvent) {
+        return {};
+    }
+    return "not resname SOL and not resname WAT and not resname HOH "
+           "and not resname TIP3 and not resname TIP3P and not resname H2O";
+}
+} // namespace
+
 RepresentationController::RepresentationController(AppServices& svc) : svc_(svc) {
 
     if (svc_.bus) {
@@ -41,6 +64,12 @@ int32_t RepresentationController::addRepresentation(const std::string& name,
     if (type == engine::RepresentationType::Surface ||
         type == engine::RepresentationType::QuickSurf) {
         rep.systemSurface = true;
+
+        // v2.20：溶剂化体系里新建表面默认只包**溶质**（见
+        // defaultSolventFreeSelection 的说明）；需要溶剂表面时点「全部分子」。
+        if (selection.empty()) {
+            rep.selection = defaultSolventFreeSelection(svc_.scene);
+        }
     }
     reps_.push_back(rep);
     clampActiveIndex();
@@ -114,6 +143,10 @@ bool RepresentationController::setType(int32_t repId, engine::RepresentationType
             instances = static_cast<uint32_t>(svc_.scene->instances().size());
         }
         rep.systemSurface = instances > kSystemSurfaceInstanceThreshold;
+        // 与「新建表面」同一默认：溶剂化体系只包溶质（否则整盒水变成一个云雾壳）。
+        if (rep.selection.empty()) {
+            rep.selection = defaultSolventFreeSelection(svc_.scene);
+        }
         if (rep.systemSurface) {
             spdlog::info("[rep] {} 实例的体系 -> 默认启用整体系合并表面"
                          "（可在面板关闭）",

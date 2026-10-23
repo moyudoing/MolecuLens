@@ -63,4 +63,5 @@ nav:
   - DFT 绘图指南: 05-DFT常用绘图指南.md
   - 开源数据集与演示: 06-开源数据集与演示.md
   - Python 接口与案例: 07-Python接口与案例.md
+  - 安装与发布: 08-安装与发布.md
   - 更新记录: _internal/CHANGELOG-2026-10-22-v2.19.md

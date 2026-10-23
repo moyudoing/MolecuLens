@@ -2139,14 +2139,6 @@ void Workbench::renderFileBar(const ImVec2& pos, const ImVec2& size) {
         s.language = i18n::languageKey(i18n::current());
         SettingsStore::save(s);
     }
-    ImGui::SameLine();
-    if (ImGui::Button(aurora::isDark() ? tr("浅色") : tr("深色"), ImVec2(52, 28))) {
-        toggleTheme();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(tr("设置"), ImVec2(52, 28))) {
-        setModule("settings");
-    }
     ImGui::PopStyleVar();
     endRegion();
 }
@@ -2256,8 +2248,8 @@ void Workbench::renderToolShelf(const ImVec2& pos, const ImVec2& size) {
     ImGui::SetCursorPos(ImVec2(0.0f, 5.0f));
     textCentered(tr("工具"), p.textFaint);
 
-    const int kBtnCount = 14;   // 4 模式 + 2 视图 + 4 显示 + 3 出图 + 1 清理
-    const int kGroups = 5;
+    const int kBtnCount = 11;   // 4 模式 + 2 视图 + 4 显示 + 1 清理
+    const int kGroups = 4;
     const float titleH = 26.0f;
     const float groupGap = 9.0f;
     const float gap = 3.0f;
@@ -2345,26 +2337,8 @@ void Workbench::renderToolShelf(const ImVec2& pos, const ImVec2& size) {
     }
     divider();
 
-    // —— 组 4：出图 ——
-    if (place(ToolIcon::Camera, false, false, tr("导出当前视口 PNG（Ctrl+E）"))) {
-        exportPngDialog();
-    }
-    {
-        const bool rt = svc_.viewport != nullptr && svc_.viewport->rayTracePreview();
-        if (place(ToolIcon::Sun, rt, true,
-                  tr("光追预览：CPU 光线追踪实时渲染（较慢，质量更高）"))) {
-            if (svc_.viewport != nullptr) {
-                svc_.viewport->setRayTracePreview(!rt);
-                notify(rt ? "已关闭光追预览" : "已开启光追预览（低分辨率渐进）");
-            }
-        }
-    }
-    if (place(ToolIcon::Theme, aurora::isDark(), true, tr("浅色 / 深色主题"))) {
-        toggleTheme();
-    }
-    divider();
-
-    // —— 组 5：清理 ——
+    // —— 组 4：清理 ——
+    // 截图/导出/光追/主题都在文件栏、快捷条或菜单里有唯一入口，工具条不再重复。
     if (place(ToolIcon::Trash, false, false, tr("清除全部距离测量"))) {
         clearMeasurements();
     }
@@ -2595,35 +2569,48 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
     // 多视图下每个视图的相机拖拽/滚轮由 MultiView 各自处理（视图彼此独立），
     // 这里只处理主视图上的"测量/标注/箭头"工具点击和场景标注绘制。
     if (!empty && !multiMode) {
-        ImGui::SetCursorScreenPos(imgMin);
-        ImGui::InvisibleButton("##cam_input",
-                               ImVec2(imgMax.x - imgMin.x, imgMax.y - imgMin.y),
-                               ImGuiButtonFlags_MouseButtonLeft |
-                                   ImGuiButtonFlags_MouseButtonRight |
-                                   ImGuiButtonFlags_MouseButtonMiddle);
-        const bool hovered = ImGui::IsItemHovered();
-        // 拖到视口外时 ImGui 的 Hovered 会变假，但 Active 仍为真：必须用
-        // Active 续拖，否则快速拖动时旋转/平移会中途"断电"。
-        const bool active = ImGui::IsItemActive();
+        // ⚠ 工具条与"整块画面"的相机隐形按钮在几何上重叠：隐形按钮先提交，
+        // 鼠标按下时它会先抢到 ActiveId，后面的工具条按钮就永远点不动
+        //（"布局 1/2/3/4 在单视图下没反应"的根因）。因此鼠标落在悬浮工具条
+        // 上时**不创建**相机输入层，让工具条按钮正常接收点击；离开工具条后
+        // 自动恢复相机拖拽。矩形来自上一帧（工具条在函数末尾绘制）。
+        const std::vector<ImVec4> overlayHitAreas = vpOverlayRects_;
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         bool overOverlay = false;
-        for (const ImVec4& r : vpOverlayRects_) {
+        for (const ImVec4& r : overlayHitAreas) {
             if (mouse.x >= r.x && mouse.x <= r.x + r.z && mouse.y >= r.y &&
                 mouse.y <= r.y + r.w) {
                 overOverlay = true;
                 break;
             }
         }
-        if ((hovered || active) && !overOverlay && svc_.viewport != nullptr) {
-            const ImVec2 d = ImGui::GetIO().MouseDelta;
-            for (int b = 0; b < 3; ++b) {
-                if (ImGui::IsMouseDragging(b, 0.0f) || ImGui::IsMouseDown(b)) {
-                    svc_.viewport->handleMouse(d.x, d.y, b);
+        bool hovered = false;
+        bool active = false;
+        if (!overOverlay) {
+            ImGui::SetCursorScreenPos(imgMin);
+            // 允许后提交的悬浮工具条覆盖在本按钮上并接管点击（ImGui 官方
+            // overlap 语义）；与上面的"跳过创建"形成双保险。
+            ImGui::SetNextItemAllowOverlap();
+            ImGui::InvisibleButton("##cam_input",
+                                   ImVec2(imgMax.x - imgMin.x, imgMax.y - imgMin.y),
+                                   ImGuiButtonFlags_MouseButtonLeft |
+                                       ImGuiButtonFlags_MouseButtonRight |
+                                       ImGuiButtonFlags_MouseButtonMiddle);
+            hovered = ImGui::IsItemHovered();
+            // 拖到视口外时 ImGui 的 Hovered 会变假，但 Active 仍为真：必须用
+            // Active 续拖，否则快速拖动时旋转/平移会中途"断电"。
+            active = ImGui::IsItemActive();
+            if ((hovered || active) && svc_.viewport != nullptr) {
+                const ImVec2 d = ImGui::GetIO().MouseDelta;
+                for (int b = 0; b < 3; ++b) {
+                    if (ImGui::IsMouseDragging(b, 0.0f) || ImGui::IsMouseDown(b)) {
+                        svc_.viewport->handleMouse(d.x, d.y, b);
+                    }
                 }
-            }
-            const float wheel = ImGui::GetIO().MouseWheel;
-            if (hovered && wheel != 0.0f) {
-                svc_.viewport->handleScroll(wheel);
+                const float wheel = ImGui::GetIO().MouseWheel;
+                if (hovered && wheel != 0.0f) {
+                    svc_.viewport->handleScroll(wheel);
+                }
             }
         }
         // —— 工具栏交互（v2.17）：按下 → 松开且没有拖动 = 一次"点击" ——
@@ -2732,21 +2719,29 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
     // 截图/导出/光追移到各自唯一的入口（文件栏导出、快捷条光追），避免同一
     // 功能在三条工具栏里重复出现。
     vpOverlayRects_.clear();
-    float toolbarRight = pos.x + 8.0f;
+    // 工具条上的 chip 按钮：显式补一个"悬停 + 按下"回退。悬浮工具条几何上叠在
+    // 相机输入层之上，个别情况下 ImGui 的 ActiveId 会被先提交的隐形按钮占住；
+    // 回退保证布局/同步等按钮不会出现"有悬停提示但点不动"的静默失效。
+    auto toolbarChip = [](const char* label, bool active, const char* tip) {
+        bool clicked = aurora::chip(label, active, tip);
+        if (!clicked && ImGui::IsItemHovered() &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            clicked = true;
+        }
+        return clicked;
+    };
     ImGui::SetCursorScreenPos(ImVec2(pos.x + 12.0f, pos.y + 12.0f));
     if (aurora::toolButton(tr("取景"),
                            multiMode ? tr("让当前视图的原子充满画面（F）")
                                      : tr("让全部原子充满视口（F）"))) {
         frameCamera();
     }
-    toolbarRight = std::max(toolbarRight, ImGui::GetItemRectMax().x);
     ImGui::SameLine(0, 6);
     if (aurora::toolButton(tr("重置"),
                            multiMode ? tr("恢复当前视图的默认相机（R）")
                                      : tr("恢复默认相机（R）"))) {
         resetCamera();
     }
-    toolbarRight = std::max(toolbarRight, ImGui::GetItemRectMax().x);
 
     // —— 多视图布局快捷按钮（直接切换，不再只能进弹窗）——
     ImGui::SameLine(0, 10);
@@ -2766,33 +2761,29 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
     };
     for (int i = 0; i < 4; ++i) {
         ImGui::SameLine(0, i == 0 ? 6.0f : 4.0f);
-        if (aurora::chip(layouts[i].label, curLayout == layouts[i].value,
+        if (toolbarChip(layouts[i].label, curLayout == layouts[i].value,
                          layouts[i].tip)) {
             setViewLayout(layouts[i].value);
         }
-        toolbarRight = std::max(toolbarRight, ImGui::GetItemRectMax().x);
     }
     if (multiMode) {
         ImGui::SameLine(0, 10);
-        if (aurora::chip(tr("同步相机"), syncCameras(),
+        if (toolbarChip(tr("同步相机"), syncCameras(),
                          tr("开启后，任一视图的旋转/缩放/平移会同步到所有视图"))) {
             setSyncCameras(!syncCameras());
         }
-        toolbarRight = std::max(toolbarRight, ImGui::GetItemRectMax().x);
         ImGui::SameLine(0, 4);
-        if (aurora::chip(tr("全部取景"), false,
+        if (toolbarChip(tr("全部取景"), false,
                          tr("每个视图按自己显示的内容取景（筛选不同的文件时很有用）"))) {
             frameAllViews();
         }
-        toolbarRight = std::max(toolbarRight, ImGui::GetItemRectMax().x);
         ImGui::SameLine(0, 4);
-        if (aurora::chip(tr("对齐全部"), false,
+        if (toolbarChip(tr("对齐全部"), false,
                          tr("把主视图的相机复制到所有视图"))) {
             if (svc_.multiView != nullptr) {
                 svc_.multiView->copyPrimaryCameraToAll();
             }
         }
-        toolbarRight = std::max(toolbarRight, ImGui::GetItemRectMax().x);
     }
     ImGui::SameLine(0, 10);
     const bool anyOverlay = showViewAxes_ || showViewScale_;
@@ -2800,7 +2791,6 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
                            tr("坐标轴方向 / 比例尺 / 场景尺寸（可分别关闭）"))) {
         ImGui::OpenPopup("##vp_overlay_menu");
     }
-    toolbarRight = std::max(toolbarRight, ImGui::GetItemRectMax().x);
     if (ImGui::BeginPopup("##vp_overlay_menu")) {
         ImGui::TextDisabled("%s", tr("分子显示视图"));
         ImGui::Checkbox(tr("坐标轴方向 (X/Y/Z)"), &showViewAxes_);
@@ -2816,10 +2806,12 @@ void Workbench::renderViewport(const ImVec2& pos, const ImVec2& size) {
         }
         ImGui::EndPopup();
     }
-    // 工具条实际宽度（此前固定 400 —— 按钮变多后右侧按钮会被当成视口拖拽区）
+    // 工具条占位矩形：用于让相机输入层避让。这里给足整行宽度（而不是依赖
+    // 最后一个控件的矩形——带 tooltip 的 chip 可能污染 LastItemData，导致矩形
+    // 变窄、按钮又被相机层抢走点击）。单视图下这条横带本来就只有工具条。
     vpOverlayRects_.push_back(
-        ImVec4(pos.x + 8.0f, pos.y + 8.0f,
-               std::max(toolbarRight - (pos.x + 8.0f), 40.0f), 30.0f));
+        ImVec4(pos.x + 6.0f, pos.y + 4.0f,
+               std::min(std::max(size.x - 12.0f, 40.0f), 900.0f), 40.0f));
 
     // 时间轴条占位：底部悬浮状态与 ESP 色标必须上移，否则会压在时间轴上
     //（用户反馈"有时间轴后 esp 轴被挡"）。74 = renderViewport 里的 stripH。
@@ -3101,6 +3093,46 @@ void Workbench::renderQuickBar(const ImVec2& pos, const ImVec2& size) {
             if (svc_.viewport != nullptr) {
                 svc_.viewport->setRayTracePreview(!rt);
             }
+        }
+    }
+
+    // —— 多视图布局（底部常驻按钮）——
+    // 放在底部条而不是只放在视口悬浮层：底部是独立区域窗口，点击不会被视口的
+    // 相机输入层抢占；视口很矮/悬浮层遮挡时也能切换。
+    ImGui::SameLine(0, 12);
+    ImGui::TextColored(p.border, "|");
+    ImGui::SameLine(0, 12);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("%s", tr("布局"));
+    const int quickLayout = viewLayout();
+    struct QuickLayout {
+        const char* label;
+        const char* tip;
+        int value;
+    };
+    const QuickLayout quickLayouts[4] = {
+        {"1", tr("单视图（Ctrl+1）"), 0},
+        {"2", tr("左右双视图（Ctrl+2）"), 1},
+        {"3", tr("上下双视图（Ctrl+3）"), 2},
+        {"4", tr("四视图（Ctrl+4）"), 3},
+    };
+    for (int i = 0; i < 4; ++i) {
+        ImGui::SameLine(0, i == 0 ? 6.0f : 4.0f);
+        if (aurora::chip(quickLayouts[i].label, quickLayout == quickLayouts[i].value,
+                         quickLayouts[i].tip)) {
+            setViewLayout(quickLayouts[i].value);
+        }
+    }
+    if (svc_.multiView != nullptr && svc_.multiView->multiPane()) {
+        ImGui::SameLine(0, 8);
+        if (aurora::chip(tr("同步相机"), syncCameras(),
+                         tr("开启后，任一视图的旋转/缩放/平移会同步到所有视图"))) {
+            setSyncCameras(!syncCameras());
+        }
+        ImGui::SameLine(0, 4);
+        if (aurora::chip(tr("全部取景"), false,
+                         tr("每个视图按自己显示的内容取景（筛选不同的文件时很有用）"))) {
+            frameAllViews();
         }
     }
     endRegion();

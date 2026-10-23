@@ -5,6 +5,7 @@
 /site/
 cmake-build-*/
 /out/
+/dist/
 *.o
 *.obj
 *.lib

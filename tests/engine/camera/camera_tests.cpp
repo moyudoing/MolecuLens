@@ -71,3 +71,34 @@ TEST_CASE("OrbitCamera zoom cannot enter the bounding sphere", "[camera]") {
     REQUIRE(cam.nearClip <= cam.distance * 1e-3f + 1e-6f);
     REQUIRE(cam.nearClip >= 1e-4f);
 }
+
+// v2.20：左键拖拽方向（用户反馈"很奇怪"）。语义 = 抓住分子拖：
+//   · 拖右 → yaw 减小（分子右侧转到面前）；
+//   · 拖下 → pitch 增大（相机升高，分子跟着向下滑）；
+//   · 拖上/拖左 → 符号相反。
+// 这条用例把方向钉死，防止以后再次"顺手改成 dx/dy 都取负"。
+TEST_CASE("Orbit drag follows the grabbed molecule", "[camera]") {
+    const float s = 0.01f;
+    const glm::vec2 right = orbitDragDelta(12.0f, 0.0f, s);
+    REQUIRE(right.x < 0.0f);   // 拖右 → yaw 减小
+    REQUIRE(right.y == Catch::Approx(0.0f));
+
+    const glm::vec2 left = orbitDragDelta(-12.0f, 0.0f, s);
+    REQUIRE(left.x > 0.0f);
+
+    const glm::vec2 down = orbitDragDelta(0.0f, 12.0f, s);
+    REQUIRE(down.y > 0.0f);    // 拖下 → pitch 增大
+    REQUIRE(down.x == Catch::Approx(0.0f));
+
+    const glm::vec2 up = orbitDragDelta(0.0f, -12.0f, s);
+    REQUIRE(up.y < 0.0f);
+
+    // 与 OrbitCamera::orbit 组合后，实际状态变化与上述方向一致。
+    OrbitCamera cam;
+    const float pitch0 = cam.pitch;
+    const float yaw0 = cam.yaw;
+    const glm::vec2 d = orbitDragDelta(0.0f, 12.0f, s);
+    cam.orbit(d.x, d.y);
+    REQUIRE(cam.pitch > pitch0);
+    REQUIRE(cam.yaw == Catch::Approx(yaw0));
+}

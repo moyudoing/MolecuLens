@@ -356,7 +356,18 @@ void MultiView::framePane(int pane) {
         center = glm::vec3(0.0f);
         radius = 10.0f;
     }
-    p.camera->centerOn(center, radius);
+    // 窄而高的视图：centerOn 只按竖向 FOV 计算距离，横向会被裁掉。按图像宽高比
+    // 放大拟合半径（等效拉远相机），窄条/四宫格里分子才能完整入画。
+    float fitRadius = radius;
+    const float w = p.imageMax.x - p.imageMin.x;
+    const float h = p.imageMax.y - p.imageMin.y;
+    if (w > 1.0f && h > 1.0f) {
+        const float aspect = w / h;
+        if (aspect < 1.0f) {
+            fitRadius = radius / std::max(aspect, 0.2f);
+        }
+    }
+    p.camera->centerOn(center, fitRadius);
     if (p.molScene != nullptr) {
         p.molScene->markDirty();
     }
@@ -805,6 +816,14 @@ MultiView::RenderResult MultiView::render(
             // 表示列表零拷贝共享（绑定只在指针/修订号变化时生效）
             pane.renderer->bindRepresentations(&reps, repsRevision);
         }
+        // 先确定本帧的图像矩形：取景（framePane）要用它的宽高比做横向适配，
+        // 否则窄视口里"按半径取景"只保证竖向装得下，横向仍会被裁掉。
+        const ImVec4& r = rects[static_cast<size_t>(i)];
+        const ImVec2 imagePos(r.x, r.y + kHeaderH);
+        const ImVec2 imageSize(std::max(r.z, 1.0f), std::max(r.w - kHeaderH, 1.0f));
+        pane.imageMin = imagePos;
+        pane.imageMax = ImVec2(imagePos.x + imageSize.x, imagePos.y + imageSize.y);
+
         bool instanceChanged = false;
         if (applyPaneFilter(pane, reps, &instanceChanged)) {
             pane.molScene->markDirty();
@@ -821,12 +840,6 @@ MultiView::RenderResult MultiView::render(
         }
         pane.molScene->setTrajectoryFrame(trajectoryFrame);
         pane.molScene->setViewOverlay(showAxes, showScale);
-
-        const ImVec4& r = rects[static_cast<size_t>(i)];
-        const ImVec2 imagePos(r.x, r.y + kHeaderH);
-        const ImVec2 imageSize(std::max(r.z, 1.0f), std::max(r.w - kHeaderH, 1.0f));
-        pane.imageMin = imagePos;
-        pane.imageMax = ImVec2(imagePos.x + imageSize.x, imagePos.y + imageSize.y);
 
         ImGui::SetCursorScreenPos(imagePos);
         // 主视图走正常脏位路径（它负责清脏）；副视图显式喂同一份快照。

@@ -69,3 +69,6 @@ if(MOLECULENS_BUILD_PYTHON)
     add_subdirectory(python)      # Python 绑定（pybind11，仅依赖 entity）
 endif()
 add_subdirectory(shaders)
+
+# —— 安装规则与发布打包（cmake --install / cpack；NSIS 脚本在 installer/）——
+include(cmake/packaging.cmake)

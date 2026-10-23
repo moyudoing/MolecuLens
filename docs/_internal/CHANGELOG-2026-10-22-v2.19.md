@@ -114,3 +114,44 @@ SBT、描述符、提交与 RGBA8 回读）；着色器 `shaders/rt_{raygen.rgen
 - 本轮四个 teammate 的写作用域见 `.tmp/team-plan-dynamic-rt.md`；`modules.cpp` 三处
   并发编辑均用唯一锚点外科式修改。
 - 验证结论：Debug 与 Release 各 210 例 / 193,948 断言全过；Release app/cli/tests 均重建成功。
+
+## 7. v2.20 追加修复（2026-10-23）
+
+### 7.1 左键拖拽方向（用户反馈"很奇怪"）
+- **根因**：`MolScene::handleMouse` 里左键把 dx、dy **都取负**。水平取负是对的
+  （拖右→相机左绕，分子右侧转过来，与 v2.13 的要求一致），但垂直取负后
+  pitch 与鼠标方向相反：拖上时分子反而往下跑。ImGui 的 dy 向下为正、pitch 增大 =
+  相机升高 = 画面上分子下移，所以垂直应取 **正**。
+- **修复**：`orbit(-dx * s, +dy * s)`，灵敏度 0.008 → 0.006；其余手势不变。
+  方向符号收敛到 `engine/camera/camera.h::orbitDragDelta()`（纯函数 + 单测
+  `Orbit drag follows the grabbed molecule`），视图层不再各写一遍符号。
+  （GUI 目视复验受锁屏限制未能完成——桌面锁屏时 GLFW 无法建窗。）
+
+### 7.2 分子表面渲染效果（用户截图：半透明"云雾状方盒"）
+- **根因 1（形状/着色）**：`Surface` 用 vdW 并集 min-distance 场抽等值面，法线取
+  "指向最近原子中心"——在每个原子的 bisector 平面法线突变，表面看起来是一堆
+  小球拼成的"大理石/云雾"；溶剂盒里每个水分子都会形成一个疙瘩。
+- **根因 2（作用范围）**：新建表面默认 `selection` 为空 = 全部分子，于是整盒水
+  被包成一个大壳（截图里正是它）。
+- **修复**：
+  1. `Surface` 的 `surfSmooth >= 1` 时改用**高斯密度等值面**（与 QuickSurf 同一
+     AVX2/多线程内核 `quickSurfMesh`），法线取密度梯度（连续），原子之间平滑融合；
+     `surfSmooth` 2/3 递增高斯半径（1.25× / 1.5×）；`0` 保留旧 vdW 路径。
+     逐分子与整体系两条路径都走同一逻辑（整体系仍写冻结缓存）。
+  2. 溶剂化体系里新建「分子表面/快速表面」默认只包溶质：
+     `not resname SOL and not resname WAT and ...`；**把已有表示的绘图样式改成
+     表面**时同样套用（`setType` 路径）；面板新增「仅溶质（去溶剂）」
+     一键按钮。需要溶剂表面时点「全部分子」即可。
+  3. 表面面板新增「表面平滑」0–3（默认 1）；CLI 新增 `--surf-smooth 0-3`；
+     `.mlscene`/scene_bridge 持久化 `surfSmooth`（旧文件缺键 → 1）。
+  4. 修复 resname 表达式生成/回显：旧 `buildResnameSelection` 生成
+     `not resname X Y Z`，而选择引擎每个比较只取一个值 → 只排除第一个名字；
+     现在生成 `resname A or resname B` / `not (resname X or resname Y)`；
+     勾选框解析器支持复合/否定表达式（否则默认的"去溶剂"表达式会把 SOL 显示成勾选）。
+- **验证**：CLI 对比（md.gro，system surface）：
+  - `--surf-smooth 0`（旧 vdW）→ 一堆小球拼成的疙瘩壳；
+  - `--surf-smooth 1`（密度场）→ 平滑融合的分子表面；
+  - 默认作用域（排除 SOL）→ 只有溶质表面，不再有整盒水壳；
+  - `not (resname SOL or resname WAT)` / `resname API or resname EPI` 均正确解析。
+  测试：Debug/Release **215 例 / 193,993 断言全过**（含新增的拖拽方向用例）。
+

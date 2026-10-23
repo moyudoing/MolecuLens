@@ -186,9 +186,12 @@ std::vector<RepMolGroup> collectRepMolGroups(DataManager* dm) {
 }
 
 struct ResnameSelection {
-    bool valid = true;   // 是否是本 UI 能识别的 resname 形式（空 / resname ... / not resname ...）
-    bool negated = false;
-    std::vector<std::string> names;
+    bool valid = true;          // UI 能理解的 resname 组合（其它表达式不接管）
+    bool defaultInclude = true; // 未列出的类型是否包含（"none" = false）
+    // 类型名 → 是否包含。支持 "not resname X and not resname Y"、
+    // "not (resname X or resname Y)"、"resname A or resname B" 以及旧版的
+    // "resname A B C"（多名字）。
+    std::vector<std::pair<std::string, bool>> flags;
 };
 
 ResnameSelection parseResnameSelection(const std::string& sel) {
@@ -208,20 +211,65 @@ ResnameSelection parseResnameSelection(const std::string& sel) {
     if (!cur.empty()) {
         toks.push_back(cur);
     }
-    if (toks.empty()) {
+    std::vector<std::string> flat;   // 去掉括号：本 UI 只关心 resname 的包含/排除
+    for (const std::string& t : toks) {
+        if (t != "(" && t != ")") {
+            flat.push_back(t);
+        }
+    }
+    if (flat.empty()) {
         return out;   // 空表达式 = 全部
     }
-    size_t i = 0;
-    if (toks[0] == "not" || toks[0] == "NOT") {
-        out.negated = true;
-        ++i;
-    }
-    if (i >= toks.size() || (toks[i] != "resname" && toks[i] != "RESNAME")) {
-        out.valid = false;   // 复杂表达式：UI 不接管，视为全部
+    const auto lower = [](std::string s) {
+        for (char& c : s) {
+            if (c >= 'A' && c <= 'Z') {
+                c = static_cast<char>(c - 'A' + 'a');
+            }
+        }
+        return s;
+    };
+    if (flat.size() == 1 && (lower(flat[0]) == "none")) {
+        out.defaultInclude = false;
         return out;
     }
-    for (++i; i < toks.size(); ++i) {
-        out.names.push_back(toks[i]);
+    if (flat.size() == 1 && (lower(flat[0]) == "all")) {
+        return out;
+    }
+    size_t i = 0;
+    bool sawResname = false;
+    while (i < flat.size()) {
+        bool neg = false;
+        if (lower(flat[i]) == "not") {
+            neg = true;
+            ++i;
+        }
+        if (i >= flat.size() || lower(flat[i]) != "resname") {
+            out.valid = false;   // within / 链/残基等复杂表达式：UI 不接管
+            return out;
+        }
+        ++i;
+        sawResname = true;
+        bool any = false;
+        while (i < flat.size()) {
+            const std::string t = lower(flat[i]);
+            if (t == "and" || t == "or") {
+                ++i;
+                break;
+            }
+            if (t == "not" || t == "resname") {
+                break;   // 宽容：没有连接词的相邻子句
+            }
+            out.flags.emplace_back(flat[i], !neg);
+            any = true;
+            ++i;
+        }
+        if (!any) {
+            out.valid = false;
+            return out;
+        }
+    }
+    if (!sawResname) {
+        out.valid = false;
     }
     return out;
 }
@@ -229,13 +277,14 @@ ResnameSelection parseResnameSelection(const std::string& sel) {
 bool selectionIncludesGroup(const std::string& sel, const std::string& name) {
     const ResnameSelection ps = parseResnameSelection(sel);
     if (!ps.valid) {
-        return true;
+        return true;   // 复杂表达式交给引擎，UI 不显示勾选状态（默认勾）
     }
-    const bool listed = std::find(ps.names.begin(), ps.names.end(), name) != ps.names.end();
-    if (ps.negated) {
-        return !listed;
+    for (const auto& kv : ps.flags) {
+        if (kv.first == name) {
+            return kv.second;
+        }
     }
-    return ps.names.empty() ? true : listed;
+    return ps.defaultInclude;
 }
 
 std::string buildResnameSelection(const std::vector<std::string>& included,
@@ -254,17 +303,30 @@ std::string buildResnameSelection(const std::vector<std::string>& included,
     }
     std::string out;
     if (included.size() <= excluded.size()) {
-        out = "resname";
+        // 选择引擎每个比较只接受一个值：多个 resname 必须写成 "resname A or resname B"。
+        bool first = true;
         for (const auto& n : included) {
-            out += ' ';
+            if (!first) {
+                out += " or ";
+            }
+            out += "resname ";
             out += n;
+            first = false;
         }
     } else {
-        out = "not resname";
+        // 排除项少：用 "not (resname X or resname Y)"，避免旧版 "not resname X Y Z"
+        // 只生效第一个名字（引擎会忽略多余 token）的静默 bug。
+        out = "not (";
+        bool first = true;
         for (const auto& n : excluded) {
-            out += ' ';
+            if (!first) {
+                out += " or ";
+            }
+            out += "resname ";
             out += n;
+            first = false;
         }
+        out += ")";
     }
     return out;
 }
@@ -1835,6 +1897,21 @@ void renderSurfaceSection(Workbench& wb) {
         if (aurora::sliderNum(tr("等值面阈值"), &iso, 0.05f, 2.0f, "%.2f", 0.01f)) {
             ctl->setSurfIsovalue(id, iso);
         }
+        // 平滑：vdW 并集在溶剂体系里会生成"每个水分子一个疙瘩"的壳；1–3 次
+        // 3×3×3 盒式平滑后是接近 QuickSurf/SES 的连续表面。
+        int smooth = std::clamp(r.surfSmooth, 0, 3);
+        if (aurora::stepper(tr("表面平滑"), &smooth, 1, 0, 3,
+                            tr("对 vdW 标量场做 3×3×3 平滑的次数；0 = 关闭（保留原始 vdW 疙瘩）"))) {
+            ctl->setSurfSmooth(id, smooth);
+        }
+        aurora::helpTip(tr("溶剂盒整体系表面建议 1–2 次平滑；溶质表面 1 次即可，"
+                           "过高会让小分子表面涨大、细节消失。"));
+        if (aurora::chip(tr("仅溶质（去溶剂）"), false,
+                         tr("把作用分子改为排除 SOL/WAT 等水分子，只看溶质表面"))) {
+            ctl->setSelection(id,
+                              "not resname SOL and not resname WAT and not resname HOH "
+                              "and not resname TIP3 and not resname TIP3P and not resname H2O");
+        }
         bool sys = r.systemSurface;
         if (aurora::toggleRow(tr("整体系合并表面"), &sys,
                               tr("溶剂化体系强烈建议开启"))) {
@@ -2375,7 +2452,7 @@ public:
         renderOverview(wb);
         renderSystemsTable();
         renderActions(wb);
-        renderPerMolecule(wb);
+        renderPerMolecule();
         renderQuantumChemistry();
     }
 
@@ -2605,8 +2682,7 @@ private:
         const std::string header =
             std::string(tr("逐分子统计")) + " (" +
             std::to_string(stats_.molecules.size()) + ")";
-        if (!ImGui::CollapsingHeader(header.c_str(),
-                                     ImGuiTreeNodeFlags_NoSavedSettings)) {
+        if (!ImGui::CollapsingHeader(header.c_str())) {
             return;
         }
         ImGui::SetNextItemWidth(-1.0f);
@@ -2622,24 +2698,22 @@ private:
         }
 
         constexpr float kTableH = 300.0f;
+        // 检查器只有 ~320 px 宽：只放最关键的 6 列（分子/原子/帧/Rg/RMSE/RMSF），
+        // 体系、键数、统计帧数、最大位移放进行 tooltip；完整字段仍在 CSV/Excel 里。
         const ImGuiTableFlags flags = ImGuiTableFlags_Borders |
                                       ImGuiTableFlags_RowBg |
                                       ImGuiTableFlags_ScrollY |
                                       ImGuiTableFlags_SizingFixedFit |
                                       ImGuiTableFlags_NoSavedSettings;
-        if (ImGui::BeginTable("##analysis_molecules", 9, flags,
+        if (ImGui::BeginTable("##analysis_molecules", 6, flags,
                               ImVec2(0.0f, kTableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn(tr("分子"), ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn(tr("体系"), ImGuiTableColumnFlags_WidthFixed, 80.0f);
-            ImGui::TableSetupColumn(tr("原子"), ImGuiTableColumnFlags_WidthFixed, 46.0f);
-            ImGui::TableSetupColumn(tr("键"), ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGui::TableSetupColumn(tr("分子"), ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableSetupColumn(tr("原子"), ImGuiTableColumnFlags_WidthFixed, 38.0f);
             ImGui::TableSetupColumn(tr("帧"), ImGuiTableColumnFlags_WidthFixed, 44.0f);
-            ImGui::TableSetupColumn("Rg", ImGuiTableColumnFlags_WidthFixed, 48.0f);
-            ImGui::TableSetupColumn("RMSE", ImGuiTableColumnFlags_WidthFixed, 54.0f);
-            ImGui::TableSetupColumn("RMSF", ImGuiTableColumnFlags_WidthFixed, 54.0f);
-            ImGui::TableSetupColumn(tr("最大位移"),
-                                    ImGuiTableColumnFlags_WidthFixed, 62.0f);
+            ImGui::TableSetupColumn("Rg", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+            ImGui::TableSetupColumn("RMSE", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+            ImGui::TableSetupColumn("RMSF", ImGuiTableColumnFlags_WidthFixed, 48.0f);
             ImGui::TableHeadersRow();
             ImGuiListClipper clipper;
             clipper.Begin(static_cast<int>(rows.size()));
@@ -2651,26 +2725,24 @@ private:
                     ImGui::TableSetColumnIndex(0);
                     ImGui::TextUnformatted(m.name.empty() ? tr("未命名")
                                                           : m.name.c_str());
-                    if (ImGui::IsItemHovered() && !m.system.empty()) {
-                        ImGui::SetTooltip("%s: %s", tr("体系"), m.system.c_str());
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "%s: %s\n%s: %zu\n%s: %u\n%s: %.3f Å",
+                            tr("体系"),
+                            m.system.empty() ? tr("未归组") : m.system.c_str(),
+                            tr("键"), m.bonds, tr("统计帧数"), m.framesUsed,
+                            tr("最大位移"), m.maxDisplacement);
                     }
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::TextUnformatted(m.system.empty() ? tr("未归组")
-                                                            : m.system.c_str());
-                    ImGui::TableSetColumnIndex(2);
                     ImGui::Text("%zu", m.atoms);
-                    ImGui::TableSetColumnIndex(3);
-                    ImGui::Text("%zu", m.bonds);
-                    ImGui::TableSetColumnIndex(4);
+                    ImGui::TableSetColumnIndex(2);
                     ImGui::Text("%llu", static_cast<unsigned long long>(m.frames));
-                    ImGui::TableSetColumnIndex(5);
+                    ImGui::TableSetColumnIndex(3);
                     ImGui::Text("%.2f", m.radiusOfGyration);
-                    ImGui::TableSetColumnIndex(6);
+                    ImGui::TableSetColumnIndex(4);
                     ImGui::Text("%.3f", m.rmse);
-                    ImGui::TableSetColumnIndex(7);
+                    ImGui::TableSetColumnIndex(5);
                     ImGui::Text("%.3f", m.rmsf);
-                    ImGui::TableSetColumnIndex(8);
-                    ImGui::Text("%.3f", m.maxDisplacement);
                 }
             }
             ImGui::EndTable();
@@ -2684,8 +2756,8 @@ private:
         const std::string needle(filter_);
         for (size_t i = 0; i < stats_.molecules.size(); ++i) {
             const auto& m = stats_.molecules[i];
-            if (onlyTrajectory_ && m.frames == 0) {
-                continue;
+            if (onlyTrajectory_ && m.frames <= 1) {
+                continue;   // 单帧 = 静态结构，不算"有轨迹"
             }
             if (!containsCaseInsensitive(m.name, needle) &&
                 !containsCaseInsensitive(m.system, needle)) {

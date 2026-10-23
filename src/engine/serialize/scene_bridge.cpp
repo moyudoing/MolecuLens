@@ -295,6 +295,7 @@ SceneSnapshot makeSnapshot(const SnapshotSource& in) {
             o.systemSurface = r.systemSurface;
             o.surfIsovalue = r.surfIsovalue;
             o.surfGridSpacing = r.surfGridSpacing;
+            o.surfSmooth = r.surfSmooth;
             o.espDensityCubePath = r.espDensityCubePath;
             o.espPotentialCubePath = r.espPotentialCubePath;
             o.espIsovalue = r.espIsovalue;
@@ -408,6 +409,7 @@ void applySnapshot(const SceneSnapshot& snap, const RestoreTarget& out) {
             rep.systemSurface = r.systemSurface;
             rep.surfIsovalue = r.surfIsovalue;
             rep.surfGridSpacing = r.surfGridSpacing;
+            rep.surfSmooth = r.surfSmooth;
             rep.espDensityCubePath = r.espDensityCubePath;
             rep.espPotentialCubePath = r.espPotentialCubePath;
             rep.espIsovalue = r.espIsovalue;
